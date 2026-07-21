@@ -1,0 +1,18 @@
+# 仅忽略仓库根的依赖与构建输出;前导 "/" 确保不误伤
+# resources/openclaw 下随包内置的 dist/ 与 node_modules(内核运行必需)。
+/node_modules/
+/out/
+/dist/
+
+# electron-builder 打包产物(体积巨大,含超 100MB 文件)
+/release/
+
+# WorkBuddy 分析残留
+/.wb-analysis/
+/wb_ls.txt
+
+# 日志 / 系统文件 / 本地密钥
+*.log
+.DS_Store
+/.env
+/.env.local
