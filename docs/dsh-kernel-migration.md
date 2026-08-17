@@ -1,0 +1,711 @@
+# 换内核：从 openclaw 到 DeepSeek Harness
+
+> 分支 `feature/dsh-kernel`（三个仓库同名）。基线是 `0a990099`（桌面端）、
+> `a1c97c2`（admin-server）、`9ad9795`（admin-cloud），随时可回退对照行为。
+
+## 三个前置问题的答案
+
+**内核是 `deepseek-harness`。** `deepseek-harness-desktop` 是外壳，两者不是一回事、
+也不是 fork 关系：desktop 仓库用 git 子模块引内核（`.gitmodules` → `deepseek-ai/deepseek-harness`），
+`upstream.json` 把它锁在 commit `47f9438`（源码版本 `0.1.0-rc.5`，运行时包 `0.1.0-rc.6`），
+自己只加一个 Cordis 插件 `dsh-plugin-desktop`。
+
+**"用它的外壳还是用 Electron"是个误解——它的外壳就是 Electron**
+（`dsh-plugin-desktop/package.json` 的 `electron` 是 `43.4.0`）。真正的选择是
+"我们现有那套 Electron 壳"对"它这套"。**结论：用它的，理由见下面「外壳选型」。**
+
+**许可证这道闸门是绿的。** 内核与外壳都是 MIT（`Copyright (c) 2026 DeepSeek` /
+`Copyright (c) 2026 Anywhere Labs`），商用、改动、改品牌、闭源分发都允许。义务只有一条：
+随分发附版权声明与许可证原文，内核那份 15.8 KB 的 `THIRD_PARTY_NOTICES.md` 也要一起带。
+
+## 家底：我们自己写了多少，以及它们各自的命运
+
+不含随包 vendored 的 openclaw 内核（那是 30,268 个文件 / 275.6 MB，整体删除）。
+
+### 可以整体搬过去（约 2,400 行）
+
+前提是新内核同样接受「OpenAI 兼容 baseUrl + Bearer sk-」这个形状。
+**这个前提已经在真机上验过**：`settings.yaml` 里把 `llm-deepseek.baseURL` 指向
+`https://api.openlux.ai/v1`，真对话跑通，69 tok/s。
+
+| 模块 | 行数 | 为什么能搬 |
+|---|---|---|
+| `yunwu-auth.ts` | 245 | 纯 `fetch`，零内核引用（唯一 import 是 `./account-session`） |
+| `yunwu-captcha.ts` + `Captcha.tsx` | 157 + 322 | go-captcha 五种模式原生渲染，纯 fetch + Node crypto |
+| `account-session.ts` | 87 | 只依赖 `app.getPath('userData')` 与 `secret-box` |
+| `yunwu-account.ts` | 254 | 余额四档降级，纯 fetch |
+| `yunwu-client.ts` | 50 | 令牌校验 `GET /v1/models` |
+| `store.ts` / `secret-box.ts` | 106 / 47 | 纯 fs / Electron safeStorage |
+| `model-catalog.ts` | 545 | 只打云雾 `/v1/models` 与 `/api/pricing_new` |
+| `model-capabilities.ts` | 884 | 纯函数，输入 `RawModelEntry` 输出 `ModelInfo` |
+
+`model-capabilities.ts` 有个例外要注意：**判据可留，输出的取值域要重新映射**。
+它输出的 `ThinkingFormat` 七种方言与 `thinkingLevels` 五档是照 openclaw 的
+`compat.thinkingFormat` / `thinkingLevelMap` 设计的，dsh 怎么表达思考档位是阶段 2 的验证点。
+
+### 必须重写
+
+| 模块 | 行数 | 重写什么 |
+|---|---|---|
+| `config-writer.ts` | 1,331 | 全文，但**重写后会短得多**。写的 12 类键（`models.providers`、`agents.defaults.models`、`agents.defaults.model.primary`、`agents.defaults.{image,video}GenerationModel`、`messages.tts.providers.openai`、`tools.web.search.*`、`tools.deny`、`tools.experimental.planTool`、`plugins.entries.*`、`session.maintenance.*`、`agents.defaults.skipOptionalBootstrapFiles`、`gateway.*`）全是 openclaw schema 专属；dsh 那边是 `settings.yaml` 的 namespace 分段 + `cordis.yml` / `cordis.patch.yml` + `.credentials.yaml`。**其中约 430 行（baseHash 取值、体积骤降保护、渲染队列分槽、自写抑制）是绕路，直接归零** —— 已在真机验过，见阶段 1 |
+| `gateway-client.ts` | 1,941 | 15 个网关 RPC（`config.set` / `config.get` / `sessions.*` / `chat.*` / `device.pair.*` / `agents.delete`）+ ed25519 设备鉴权握手。dsh 是同进程 + loopback HTTP/WS，协议不同 |
+| `yunwu-video-plugin/index.mjs` | 4,219 | 13 个视频适配器 + 3 条出图路径 + 4 个异步出图适配器 + 搜索 provider + 对话流包装，6 个 openclaw `register*` 扩展点 |
+| `persona-plugin/index.mjs` | 667 | 5 个 openclaw 钩子。**大部分应当消失**，见下节 |
+| `market/` | 2,271 | 10 个文件。市场接口可留，但制品安装的落点从 `~/.openclaw/skills/<slug>` 变成 dsh 的 preset 目录 |
+| 专家 / 专家团 | 1,991 | 7 个文件。**大部分应当消失**，见下节 |
+| 技能 | 1,208 | 4 个文件。同上 |
+
+### 应当消失，而不是移植
+
+这是换内核最大的一笔收益。下面每一条都是我们被 openclaw 逼出来的绕路，
+dsh 有一等公民的做法（大部分我已在真机上验过）。
+
+| 我们现在有什么 | 行数 | dsh 的一等公民做法 | 验证状态 |
+|---|---|---|---|
+| `team-relay.ts`：内核 direct/steer 两条投递路对 `acp:` 会话键必然失败，所以自己用 `chat.send` 投 `<teammate-message>` | 268 | `dsh-tool-subagent` 的产出直接作为工具结果回到队长 | **已验**：队长收到并汇总了两名成员的产出 |
+| 每个成员约 9 千字符的重复上下文（内核那条播报会迟到落地，v2026.6.11 无解） | — | `reported` 位 + first-wins settlement：任一方 `kill`/`read`/`wait` 认领终态，另一条通告就不发 | **已验**（机制级，不只是"未复现"）：调过 `wait` 后 `reported=true`、投递 0 条 |
+| `skill-visibility.ts`：`disable-model-invocation` 藏起全部市场技能 + 按专家注入提示词 | 212 | `ctx.tools.restrict({allow/deny})` 按 scope 收窄，子代理由 `applyChildComposition` 装上 | **已验**：内核 `core/tools/tests/scoped.spec.ts` 27 项全绿，含"过滤祖先 scope 继承来的工具" |
+| 成员人设注入要等约 7 秒（`subagent_spawned` 记账 → 子会话 `before_prompt_build` 才触发） | — | `applyChildComposition` 在子代理创建窗口里**同步**装 `deployment:persona` section | **已验**（`subagent/src/child-agent.ts:163-174`） |
+| 媒体投递那一整套：`after_tool_call` 记账落盘 + `fs.watch` + 启动全量扫 + 30 秒慢清扫 + `chat.send` 补投 + `agent.wait` 确认 + `3s/10s/30s` 退避重投 | ~400 | `ctx.jobs.onJobDone` → 闲的 owner `followup()` 开一轮、忙的 `inject()` 等在 next-step 收件箱 | **已验**：idle→`followup=1`；busy 且两任务同时完→`inject=2`（只花一步） |
+| `duplicateGuard` 按「工具+provider」锁死，同时只能跑一个视频任务 | ~40 | `maxConcurrentJobsPerOwner` 配置项，默认 10 | **已验**：第 11 个被拒，报错还教模型用 `job_kill` |
+| `persona-plugin` 的 `before_prompt_build` 按 sessionKey 注入人设 | ~200 | `dsh-persona` 插件，`complete: true` 直接接管系统提示词 | **已验**：身份被接管，输入 token 从 7.9K 降到 116 |
+| `persona-plugin` 的 `before_model_resolve`：成员跟随队长模型的兜底钩子 | ~30 | 成员不设 `agentOptions` 时原生继承 | **已验** |
+| `team-roster-prompt.ts` 里 `[Working directory: …]` 那句 + `cwd` 双管 | 151 | 子会话原生继承 cwd | **已验** |
+| **每次写配置前 `config.get` 取 baseHash** | — | dsh 的 `expectedRevision` 是**可选**参数，不传就不检查 | **已验**：openclaw 上这一步白花 0.9~3.2 秒；dsh 上三个 namespace 并发写全程 **36ms** |
+| `setConfigBatchStepwise` + `SIZE_DROP_SAFE_RATIO` 体积骤降保护 | ~250 | dsh 按 namespace 写**叶级 diff**，压根没有「整份配置体积」这个概念 | **已验**（`settings-file/src/index.ts:81-92` 的 `patchNode`） |
+| `renderQueue` 串行 + 分槽合并 | ~60 | 内核自带一条串行操作链，watcher 重载与文档写入一次一个、按队列顺序 | **已验**（`settings-file/src/index.ts:126, 192-197`） |
+| 自写抑制（忽略自己那次落盘触发的回传） | — | `this.text` 缓存最后一次成功持久化的原文，watcher 事件内容相等即 no-op | **已验**：`does not republish its own persisted write` |
+| `removeStale{Image,Video}GenerationModel` / `removeStaleTtsProvider` / `removeLegacyUiToolsMcpEntry` | ~120 | dsh 有明确的删除路径：`replace` 整段重置（缺的键回落 base + schema 默认）、`mutate` 的 `unset` 按路径删 | 形状已确认，逐条对照留到阶段 2 |
+| `openclaw-manager.ts` + `gateway-port.ts` + `preflight.ts`：spawn 进程、端口自愈、6 步自检、5 次重启退避 | 1,030 | **内核跑在 Electron 主进程内**，没有子进程、没有端口、没有握手 | 架构事实，已读源码确认 |
+| `agent-manager.ts`：79 个 agent 的包袱（专家各占一个 agent） | 941 | 专家 = agent preset，不进全局注册表 | **已验**（`kumo-test` / `kumo-team`） |
+| `scripts/patch-kernel-reasoning.mjs` + `ipc.ts` 的运行时自检 | — | 直接打内核 dist 补丁去掉 `onReasoningStream` 闸门。换内核后重新评估 | 待确认 |
+
+粗算：**约 3,840 行是纯粹为绕开 openclaw 而存在的，换内核后应当归零**
+（其中媒体投递那 ~400 行与并发锁那 ~40 行是 2026-08-17 阶段 4 闸门验完后新确认可归零的）。
+
+### 必须从零新建
+
+| 能力 | 为什么是从零 |
+|---|---|
+| **媒体生成** | 195 个已装 dsh 包里，出图 / 视频 / 语音 / TTS **一个都没有**。规模：13 个视频适配器（文生档 19 条 / 图生档 18 条）、出图池 33 条（23 条走 OpenAI 兼容端点 + 6 条 Gemini 族走对话端点 + 4 条厂商异步，其中 17 条可改图）、TTS 5 条、搜索 provider 一个。**这是本次最大的一笔成本**，而且它依赖内核能力，不只是重写代码，见阶段 4 |
+| **账号体系的 dsh 侧落点** | dsh 没有任何账号概念（`dsh-credentials` 只是 API key 存取，`dsh-token-meter` 是 token 计数，`dsh-anonymous-user-id` 是遥测 ID）。登录页、余额行、会话过期回登录页这些要作为新插件挂进 dsh 的 slot |
+| **连接器界面** | dsh 有能力（`dsh-mcp-client`）无界面 |
+
+## 外壳选型：用它的
+
+`dsh-plugin-desktop` 只有 **39 个文件 / 5,766 行**，却已经带了这些我们否则要自己写或已经写了的东西：
+
+| 它带的 | 我们现在的对应物 |
+|---|---|
+| 内核跑在 Electron 主进程内，loopback HTTP/WS 供 UI | `openclaw-manager.ts` spawn 子进程 + `gateway-port.ts` 端口自愈 + `preflight.ts` 6 步自检，共 1,030 行 |
+| `profile-manager.ts` / `profile.ts` 多配置档与 generation 生命周期 | 无 |
+| `updates.ts` / `update-checker.ts` / `update-download.ts` 自动更新 | 有，但要重接 |
+| `electron-runtime.ts` 托盘、窗口、`window-chrome.ts` / `window-options.ts` | 有，`App.tsx` 里的自绘标题栏 |
+| `windows-pwsh-sandbox.ts` / `windows-acl-runner.ts` / `windows-volume-diagnostics.ts` | 无 |
+| `pnpm.ts` 插件安装 | `plugins install --force` spawn CLI 三处 |
+| `desktop-terminal.ts` | 无 |
+
+最关键的一条不是省代码，是**去掉一整类 bug**：我们撞过的
+`Agent "<id>" no longer exists` 那条竞态，根因就是 spawn CLI 改配置、网关读到旧值。
+内核在主进程内之后这条路不存在了。
+
+**品牌触点清单（2026-08-17 逐处查证，不是三处，是七处，且有两处在内核里）**：
+
+原先写的「改三处」是照 `package.json` 推的，实际逐处搜过之后是这样：
+
+| # | 位置 | 内容 | 能不能从外部覆盖 |
+|---|---|---|---|
+| 1 | `dsh-plugin-desktop/package.json` `build.*` | `appId` = `ai.deepseek.dsh.desktop`、`productName` = `DSH Desktop`、`nsis.shortcutName`、`artifactName` | 能 —— electron-builder 配置归打包方，我们自己写 |
+| 2 | `src/main.ts:47` | `PRODUCT_NAME = 'DSH Desktop'`，喂给 `app.setName()`，**决定 userData 目录名** | 不能，模块级常量 |
+| 3 | `src/main.ts:165` | `app.setAppUserModelId('ai.deepseek.dsh.desktop')`（Windows 任务栏归组） | 不能 |
+| 4 | `src/index.ts:171-172` | `productName: 'DSH Desktop'`、`windowTitle: 'DeepSeek Harness Desktop'`，写在 `...config` 展开**之后** | **不能**，展开在前所以 cordis 配置压不住它 |
+| 5 | `src/update-checker.ts:4`、`src/update-download.ts:13-14` | 三个 `https://www.dshdesktop.cn/...` 端点（版本 + mac/win 下载） | **能，而且不用改代码** —— 见下面「更新端点」 |
+| 6 | `build/tray-icon.svg` + `scripts/generate-tray-icons.mjs:13-16` | 托盘图标，且脚本对品牌蓝 `#4D6BFE` 有断言，换色不改脚本会构建失败 | 不能 |
+| 7 | 内核 `client/ui-primitives/src/BrandWordmark.tsx` | DeepSeek Harness 字标 SVG，被 `ui-sidebar/src/client/SidebarRoot.tsx:140` **硬导入**，logo 行不是槽位 | **未定，见下面「字标是唯一一处真冲突」** |
+
+还有两处小尾巴：内核 `client/ui-settings-models/src/onboarding-copy.ts` 的内测声明文案提到
+DeepSeek Harness；网页 `<title>DeepSeek Harness</title>` 是运行时生成的（`packages/client/web`
+的 `DocumentTitle`），高级模式下原生标题栏走的是第 4 条那个 `windowTitle`，所以影响面小。
+
+**更新端点这条比原先估的便宜。** `cordis.patch.yml` 显示外壳是**五个可分别组合的插件**
+（`desktop-shell` / `-terminal` / `-pnpm` / `-profiles` / `-updates`），三个硬编码端点全在
+`desktop-updates` 那一条底下（`updates.ts` 257 + `update-checker.ts` 197 +
+`update-download.ts` 316 = 770 行）。**不插入这一条即可**，不必为了改更新地址去动它的代码。
+但「照原样发布会让我们的用户去 anywhere-labs 检查更新」这个风险不变，**仍是发布前的硬闸门**。
+
+第 8 条：Windows 代码签名，`scripts/package-win.ts` 支持 PFX（`win_csc_link`），接我们的证书。
+
+**风险要写清**：外壳是社区维护的单点依赖，内核锁在 `0.1.0-rc.5` —— rc 意味着接口还会变
+（内核自己的内测声明就写着「核心插件与基础 API 会在接下来一段时间快速迭代」）。
+应对是 fork 而不是 submodule 跟随，升级由我们自己决定时机，每次升级前 diff 内核的
+配置层与 subagent 相关目录。
+
+## UI 铁律：内核有的就用内核的
+
+**用户 2026-08-17 定的原则，优先级高于本文档其它一切界面判断：
+侧栏、布局、聊天区这些一律用内核的，我们只往上加专家、技能、连接器。
+凡是内核已经有的，就用内核的，不自写、不为了形似去改它的结构。**
+
+（本节上一版写过「我们本来就要自写侧栏，所以内核字标那条不是问题」——**那句是错的，已删**。
+不自写侧栏，字标那条因此重新变成待决项，见品牌触点第 7 条。）
+
+现有渲染层 **34 个 ts/tsx = 15,656 行**，外加 `styles.css` 10,257 行。
+其中 `Workspace.tsx` 一个文件 6,687 行（占 ts/tsx 的 43%），加 `Composer.tsx` 1,670 行
+与四个聊天组件，聊天主界面共约 **8,836 行，占 56%**。按上面这条原则，这 8,836 行
+**绝大部分不是重写，是删掉换成内核的**。
+
+### 真机名录：默认外壳已经挂了 39 个浏览器插件（2026-08-17 实测）
+
+原先这一节是照包名清单推的，推错了一次：`dsh-plugin-desktop/package.json` 的依赖清单里
+只有 14 个 `dsh-client-ui-*`，据此我判断专家 / 技能 / 专家团的界面「内核有但外壳没挂」。
+**依赖清单不是挂载名录。** 真正的名录在 `packages/bundle/web-app/cordis.patch.yml`，
+外壳的 `cordis.patch.yml` 只是往上**追加**五行桌面插件，一条都没删。
+
+取真机证据的办法（结论会过期，记怎么取）：起进程 → 找它 loopback 端口 →
+拉根 HTML，浏览器插件名录就内联在 `window.__DSH_BOOT__` 里。实测 **39 条**，我们要的全在：
+
+| 我们要的 | 内核的包 | 默认挂了吗 |
+|---|---|---|
+| 专家 | `dsh-client-ui-agent-preset` | **已挂** |
+| 技能 | `dsh-client-ui-skill` | **已挂** |
+| 专家团 | `dsh-client-ui-subagent` | **已挂** |
+| 连接器 / 插件 | `dsh-client-ui-settings-plugins` + `-settings-plugin-inventory` | **已挂** |
+| 聊天时间线 / 侧栏 / 布局 | `-conversation` / `-sidebar` / `-layout` | 已挂 |
+| 产物 | `-deliverables` | 已挂 |
+| 任务 | `-jobs` | 已挂 |
+| 项目 | `-workspace` | 已挂 |
+| 自动化 | `-plan` / `-goal` / `-workflow-run` | 已挂 |
+| 设置 | `-settings` / `-settings-general` / `-settings-models` / `-settings-plugins` | 已挂 |
+| 模型选择 | `-model-selection` | 已挂 |
+| 主题 | `-theme` | 已挂 |
+| 追踪 / 问答卡 / 权限档 / 消息反馈 | `-trajectory` / `-user-questions` / `-permission-presets` / `-message-feedback` | 已挂 |
+
+**所以「把专家·技能·连接器加上去」加的不是界面，是我们自己的内容。**
+唯一真缺的一条是 MCP：`packages/mcp/mcp-client` 在内核里存在，但
+`packages/bundle` 下三份组合（base / headless / web-app）**一处都没挂它**，
+要连接器就得自己加这一行。
+
+### 专家与技能的落点：agent preset 目录（内核原生形状）
+
+出厂四个档 `standard` / `minimal` / `cordis` / `code`，在
+`apps/cli/config/agent-presets/<id>/`。`cordis` 那个是完整样板，直接对上我们
+「专家 = 人设 + 技能 + 工具集」：
+
+| 我们的概念 | 内核里是什么 | `path:line` |
+|---|---|---|
+| 专家的显示名 / 简介 / 排序 | `preset.yml` 的 `name` / `description` / `order`，**`name` 原生支持中文**（出厂那个就叫「创造模式」）| `agent-presets/cordis/preset.yml:1-3` |
+| 专家人设 | `agent.cordis.yml` 里一行 `@deepseek-ai/dsh-persona`，`{{model}}` / `{{cwd}}` 会插值 | `agent-presets/cordis/agent.cordis.yml:17-29` |
+| **技能跟着专家走** | `skill-filesystem` 的 `customSkillDirs` 指向**档目录内部**的 `skills/`，配 `tool-skill` 给出目录与加载器 | 同上 `:255-262` |
+| 专家能用哪些工具 | 就是这份 `agent.cordis.yml` 的行；宿主层把工具整批 `disabled`，每个会话挂一个档 | `bundle/web-app/cordis.patch.yml:276-425` |
+
+内核自己写了为什么技能要跟着档走（`:248-254`）：*a preset is the unit that gets copied and edited*。
+这条正好是我们专家市场要的分发单位——市场装的东西从「往 `~/.openclaw/skills/` 塞文件 +
+改 frontmatter 控可见性」变成「写一个 preset 目录」，`skill-visibility.ts` 那 212 行的
+frontmatter 手术随之消失。
+
+出厂档是只读的（`system` 信任，升级会覆盖），用户/市场装的写在
+`$DSH_HOME/.agent-presets/<id>/`，名录会报每个档的真实路径。
+
+### 侧栏能往哪儿加：三个具名槽位
+
+`ui-sidebar/src/client/SidebarRoot.tsx` 自己只管列几何与折叠动画，内容归注册方：
+
+| 槽位 | 位置 | `path:line` |
+|---|---|---|
+| `sidebar.workspaces` | New Session 按钮到底栏之间**整块浏览区**（今天由 `ui-workspace` 的 `WorkspaceBrowser` 占着）| `SidebarRoot.tsx:175` |
+| `sidebar.footer.action` | 底栏动作区，叠在设置之上 | `:184` |
+| `sidebar.settings` | 钉在最底的设置 | `:187` |
+
+槽位还能声明**子槽位**（`ui-workspace` 就声明了 `sidebar.workspaces.directoryFlow`，
+`kind: 'single'`），所以往里加东西不必抢占整块区域。
+
+我们独有的那几件（媒体三档选择器 `MediaPicker.tsx` 441 行、账户余额行
+`AccountBalanceRow.tsx` 113 行、市场入口 `MarketGallery.tsx` 611 行 +
+`settings/Market.tsx` 948 行）就挂这些槽位。专家团成员条 `TeamMemberBar.tsx` 163 行
+与问答卡 `AskUserModal.tsx` 239 行**先比对内核的 `-subagent` / `-user-questions`
+再决定留不留**——按上面那条铁律，默认是不留。
+
+### 字标是唯一一处真冲突
+
+不自写侧栏之后，内核字标 `BrandWordmark`（`ui-primitives/src/BrandWordmark.tsx`）
+被 `SidebarRoot.tsx:140` 硬导入进 logo 行，而 logo 行**不是槽位**（三个槽位都在它下面）。
+客户端是按包构建、按 `/plugins/<id>/client.js` 分发的，所以字标是编译进
+`ui-sidebar` 的 client bundle 的，从外部换不掉。三条路，都有代价，**待定**：
+
+1. **接受它**，内测期先挂着 DeepSeek Harness 字标。零成本，但不能这样发版。
+2. **CSS 盖掉**：藏掉 `.brand` 里的 svg、换成我们的背景图。不动内核，但
+   `SidebarRoot.module.css` 的类名是构建期哈希的，选择器脆；每次升内核要复验。
+3. **fork 内核的 `ui-primitives`**，从源码构建。最干净也最贵：内核是 `0.1.0-rc`，
+   fork 一个包就等于把整条源码构建链接进我们的流水线（今天不需要，见阶段 0 第 1 条发现）。
+
+WorkBuddy 的作用降为**判据来源**：某个交互该长什么样、某条降级该怎么兜，
+仍以「WorkBuddy 用户看到的行为」为准（例如余额取不到时四档降级、绝不显示 0）。
+但**实现形状以内核为准**。
+
+## 分阶段计划
+
+每个阶段都遵守「查 → 验 → 改 → 复验」：**动手前必须拿到一条真机输出证明假设成立**，
+证不了就不开始写。下面每阶段的"动手前要拿到的证据"就是那道闸门。
+
+### 阶段 0 · 骨架（1 周）· 构建闸门已通过
+
+fork `deepseek-harness-desktop`，改品牌（上面那七处）、接签名证书，
+内核按 `upstream.json` 锁版。
+
+- **动手前要拿到的证据**：已有 —— 真机 69 tok/s 通过 `api.openlux.ai`。
+- **复验判据**：我们品牌的安装包能装、能起、能用云雾的 key 跑通一条对话，
+  且更新检查打的是我们的地址。
+
+**构建闸门已验（2026-08-17，本机 Windows + node 24.12.0 + yarn 4.18.0 + electron 43.4.0）。**
+在上游克隆里从零跑通，验完已清理（探针已删、`git status` 空白、临时 `DSH_HOME` / `userData` 已移除）：
+
+| 步骤 | 真机结果 |
+|---|---|
+| `corepack yarn install` | **18.8s**，850 包 / 513 MiB；`koffi` / `node-pty` / `dsh-subprocess-local` 三个原生包本机编过，无需 MSVC 手工介入 |
+| `corepack yarn build` | **6.8s**，tsdown 出 40 个文件 / 438 KiB |
+| 起进程 | 窗口起来了，标题「DeepSeek Harness Desktop」，stderr 干净 |
+| 宿主服务 | loopback `127.0.0.1:62808` 返回 **HTTP 200 / 12301 字节**，`<title>DeepSeek Harness</title>` |
+
+**顺带查清三件影响做法的事**：
+
+1. **内核不用从源码构建。** `upstream.json` 里 `sourceVersion`（rc.5）与
+   `runtimePackageVersion`（rc.6）是两个值，因为 `dsh-plugin-desktop` 依赖的是**发布在 npm 上的**
+   `@deepseek-ai/dsh-*@0.1.0-rc.6`，submodule 只是源码参考。本机 submodule 目录**是空的**
+   （`git submodule status` 前缀 `-`），照样装完、构建完、跑起来了。
+   `dsh-plugin-desktop` 自己也在 npm 上（latest 2.0.0，本地仓库 2.0.1 未发布）。
+2. **开发运行必须给独立 `userData`。** 本机已装正式版 DSH Desktop
+   （`%LOCALAPPDATA%\Programs\DSH Desktop\DSH Desktop.exe`）并在跑，它占着
+   `%APPDATA%\DSH Desktop` 那把单实例锁，于是 `main.ts:108` 的
+   `requestSingleInstanceLock()` 返回 false → `app.quit()`，**静默退出、退出码 0、零输出**。
+   查这个现象要注意 Windows 上 electron 是 GUI 子系统，控制台拿不到它的 JS 输出，
+   诊断得往文件写。改完 `PRODUCT_NAME` 之后 userData 目录换名，这条自然消失。
+3. `.yarnrc.yml` 是 `nodeLinker: node-modules` + `enableScripts: false`，
+   靠 `dependenciesMeta.*.built` 逐包放行；换句话说加新依赖如果要跑安装脚本，得在那里显式开。
+
+### 阶段 1 · 登录与账号（2 周）· 闸门已通过
+
+把 946 行账号代码原样搬过来，新写"把 `sk-` 与 baseUrl 落进 dsh 配置"的那一层，
+登录页与余额行挂进 slot。
+
+**闸门已验（2026-08-17，本机 Windows + node 24.12.0 + vitest 4.1.8）。**
+先跑内核自己那套 `packages/settings` 测试：**151 通过 / 2 跳过**；再按我们
+`config-writer` 的真实形状（三个 namespace：供货商带密钥 / 账号 / 媒体三档）写了六条探针，
+全过，验完已删、`git status` 干净、临时目录零残留、本机真 `settings.yaml` 未被动过。
+
+| 我们要问的 | 真机结果 |
+|---|---|
+| 并发批量写会不会互相覆盖 | 三个 namespace 并发 `update`、**都不带** `expectedRevision`，一段都不丢，**36ms** |
+| 用户手改夹在飞行中会不会被吃掉 | 注释、我们没注册的 `locale` 段、我们的新值三样同时存活（写入在锁内先 `reconcileFromDisk` 折进盘上状态） |
+| 盘上文档坏掉时 | 写入 **loud 失败**，原文一字未动（刻意不覆盖用户手改）；而热重载路径相反——warn + 保留 last good，绝不让进程下去 |
+| 脱敏视图回写会不会误删密钥 | `describe({redactSecrets:true})` 里搜不到密钥、`secrets` 枚举出 `apiKey` 槽位；按 path op `mutate` 之后密钥仍在盘上 |
+| 冲突检测 | 陈旧 `expectedRevision` 被拒，赢家留在原位 |
+| 孤儿锁 | **2173ms** 后失败 |
+
+**配置层的形状（`packages/settings`，与 openclaw 完全不是一个路子）**：一份
+`settings.yaml`，按 namespace 分段；写入走跨进程文件锁 `<file>.lock` + 锁内读改写 +
+叶级 diff（保留注释、锚点、格式）+ 原子 rename 落盘。解析顺序是
+schema 默认 → 注册方的 composition `base`（来自 `cordis.yml`）→ 用户段。
+三个写入 API 各有分工：`update` 稀疏合并、`replace` 整段替换（这是删除/重置路径）、
+`mutate` 路径寻址（`set` / `unset`）。
+
+**四条要落进代码的纪律**：
+
+1. **持有脱敏视图的调用方只能用 `mutate`，绝不能用 `replace`。** 子系统文档原话：
+   从脱敏文档重建的整段 `replace` 会**静默删掉每一个协议层从未返回的密钥**。
+   我们的模型选择器、设置页都属于这一类。
+2. **孤儿锁要我们自己兜。** `withFileLock` 的超时是 2000ms（退避 20→200ms），而且
+   `atomic-write/src/index.ts:81-88` 明说竞争者**永不删除**已存在的锁——文件年龄证明不了
+   持有者已死，"orphan recovery is an operator action"。桌面应用崩在持锁期间，之后每次写配置
+   都要等 2 秒然后失败。**内核不给这个兜底，是我们要写的代码**：启动时检测残留锁 + 按 pid
+   存活判断 + 给用户一条能读懂的话。
+3. **`applies: 'live' | 'restart'` 是 UI 提示，不是机制。** 没有 openclaw 那张「前缀最长匹配、
+   没匹配上一律 restart」的规则表——每个 namespace 的 owner 自己声明，`restart` 的语义只是
+   「它不 watch，值在构造时读一次」。所以"这条配置要不要重启"是可查的，不用猜。
+4. **两个事件分工别搞错**：`settings/updated` 是消费者面向的，**deep-equal 门控**（值没变不发）；
+   `settings/document-updated` 是给配置界面的，raw 用户段变了就发——界面要知道「某字段从继承
+   变成了覆盖」（resolved 值相同但含义不同）以及「我手上的 revision 过期了」。
+
+**还有个白捡的旋钮**：注册时可给 `validate`，用来拒掉 schema 表达不了的跨字段约束，
+抛错会**拒掉产生该值的那次写入**，而不是存进去然后静默禁用 owner。`dsh-llm-pi-ai` 就用它
+拒绝一个它服务不了的供货商 profile——正是我们写供货商配置要的东西。
+
+- **复验判据**：登录 → 换 `sk-` → 落配置 → 发第一条消息全程走通；
+  余额四档降级逐档能复现；会话过期回登录页且用户名已回填。
+- **保留的取舍**：首屏判据仍用本地 `hasStoredSession()`，不放网络往返
+  （这条在 openclaw 上把首屏从 1303ms 降到 114ms，与内核无关，直接继承）。
+- **一处 Windows 缺口**：`concurrency.spec.ts:89` 那条「非竞争性锁失败」用
+  `it.skipIf(process.platform === 'win32')` 跳过了——他们自己知道 Windows 上
+  chmod 那套不成立。我们是 Windows 产品，这块没有上游测试覆盖，要自己补。
+
+### 阶段 2 · 模型（2 周）
+
+搬 `model-catalog.ts` + `model-capabilities.ts`（1,429 行判据），
+重写配置写入的键映射，模型选择器决定是复用 `dsh-client-ui-settings-models` 还是保留我们的。
+
+#### 闸门已通过（2026-08-17）：dsh 怎么表达思考档位
+
+落点是 `llm-pi-ai` 的目录层（`packages/llm/llm-pi-ai/src/catalog.ts`）。
+**结论：能一对一表达我们全部四个维度，而且比我们现在的形状更直白。**
+真机跑了 8 项自写探针 + 内核 `catalog.spec.ts` 52 项，共 60 项全绿（探针已删）。
+
+| 我们现在怎么表达 | dsh 怎么表达 | 真机验到 |
+|---|---|---|
+| `thinkingLevels: ['low','medium','high']` + `defaultThinkingLevel` | `reasoningEfforts: { low: 'low', medium: 'medium', high: 'high' }`——**键是档位，值是该档下发的 wire 拼写** | `deepseek-v4-flash` 得到 `{minimal:null, low:'low', medium:'medium', high:'high', xhigh:null, max:null}` |
+| `canDisableThinking: false` + 配置层写 `thinkingLevelMap.off = null` | **`off` 不进字典就是不提供**（内核测试标题原话：*leaving off out makes thinking mandatory*） | `gemini-3-pro` 未声明 `off` → 落地 `off: null` |
+| `thinkingEffort: false`（上游不收 `reasoning_effort`） | `compat.supportsReasoningEffort: false`，**可按 route 设默认、按 model 覆盖** | `glm-4.5` 那条 400 的模型单独设成 false，成功 |
+| `thinkingFormat`（七种方言，逐模型给） | `compat.thinkingFormat`，同样按 route 默认 + model 覆盖 | 见下一行 |
+| **同一族两种方言**（`glm-4.5` 走 `enable_thinking:false`，`glm-5` 走 `thinking:{type:disabled}`）——我们「不能按族推」的最硬证据 | 两条模型各自 `compat.thinkingFormat` | `glm-4.5` → `qwen`，`glm-5` → `deepseek`，同一路由内并存 |
+| 中转站服不了某个模型的思考 | `reasoningEfforts: false` 直接声明成不思考的模型 | `qwen3-vl-32b-instruct` → `reasoning: false` |
+
+四条关键差异，都是往好的方向：
+
+1. **档位取值域是超集。** dsh 七档 `off / minimal / low / medium / high / xhigh / max`
+   （`catalog.ts:69-77`），我们现在放开的只有 `low/medium/high` 三档公约数。
+   而且那张表是用 `Record<ModelThinkingLevel, true>` 全枚举写的，注释说明意图是
+   **编译期漂移闸门**：上游加减档位会在这里编译失败并点名，而不是静默收窄。
+   我们那份 `THINKING_FORMATS` 是运行时校验，弱一档。
+2. **「方言」这个间接层在档位这一侧被取消了。** 我们现在要说「这个模型用 qwen 方言」，
+   由内核去查那种方言的 effort 该怎么拼；dsh 直接让我们写下发的字符串。方言开关
+   （`compat.thinkingFormat`）仍然保留且必要——因为它管的是**关思考要下发哪个字段**
+   （`enable_thinking:false` 对 `thinking:{type:disabled}`），不是 effort 的拼写。
+3. **内核替我们抹平了底层的不对称默认。** `catalog.ts:298-310` 写着：pi-ai 自己对五个基础档
+   缺键当"支持"、对 `xhigh`/`max` 缺键当"不支持"，所以 dsh 在配置层把**所有**档位显式钉一遍，
+   理由原话是 *a profile author should not need to know that*。真机验到：只声明
+   `{off: null, high: 'high'}` 的模型，落地是六个档位全部显式决定。
+   **这正是我们在 openclaw 上被咬的那类不对称**（方言写成 `openai` 会双重打击：
+   wrapper 不挂 + 额外触发删 `thinking` 字段的清理器）。
+4. **失手一律 loud。** 空字典、非 `off` 档位缺 wire 值、只有 `off` 没有思考档、空字符串 wire 值、
+   给非 `openai-completions` 协议设 compat 开关、route 设了开关但没有模型讲那个协议
+   ——六种都在配置解析期抛，不是运行时静默失效。
+
+**一条已排除的风险**：dsh 刻意扣住两种方言不暴露（`chat-template` / `qwen-chat-template`，
+理由是它们要走 `chatTemplateKwargs`，配置层不开这个口）。核过我们自己的
+`model-capabilities.ts`：全部 `format:` 赋值只有 `qwen` 与 `deepseek` 两种，
+加一个隐式默认 `openai`——**被扣住的两种我们一条都没用**，所以这条不构成迁移阻碍。
+
+**顺带一个能力升级**：`off` 档位可以带 wire 值（内核测试 *keeps a declared off value in the
+map for dispatch to send*）。所以「关思考」有两种表达：`off: null` = 不发这个参数就是不思考；
+`off: '<wire>'` = 发这个特定值。我们现在只有前一种，`qwen` 族那些「关不掉」的模型
+值得用后一种再试一次。
+- **复验判据**：`scripts/verify-search-capability.mjs` 的 17 条断言全过
+  （判据是纯函数 + 真机快照，换内核不该让它们变红）；广场过滤后的对话池条数与换内核前一致；
+  出图 / 视频 / 语音三档的可选集合与换内核前一致。
+- **注意**：模型池**不缓存**是刻意决定（能不能调到取决于渠道分组与令牌路由，
+  缓存住会骗人），继续保持。
+
+### 阶段 3 · 专家、技能、专家团（3 周）
+
+这一阶段是**删得比写得多**。专家 → agent preset + `dsh-persona`；
+专家团 → 一成员一个 `dsh-tool-subagent` 实例，各配 `persona` 与 `toolFilter`；
+技能可见性 → `toolFilter`。删掉 `team-relay.ts`、`skill-visibility.ts`、
+`before_model_resolve` 兜底、`agent-manager.ts` 的 agent 包袱。
+
+**别把技能当成"市场装的那一种"——它有六个来源，漏一个就是一条静默失效的路**：
+市场 zip、专家捆绑（装专家时一起下来）、内置引导播种（find-skills / skill-creator，
+带 `_yunwu_builtin.json` 标记）、AI 现场生成、本地 zip 上传、项目级
+（`<cwd>/.yunwu-desktop/skills/`，openclaw 发现不了所以靠插件注入）。
+最后一条尤其要重新判断：它之所以走钩子注入，是因为 openclaw 按 agent workspace 而不是
+会话 cwd 解析——**这个约束在 dsh 上未必成立，值得先验再决定要不要保留这条路**。
+
+- **闸门已通过（2026-08-17）**：逐成员 `toolFilter` 真的能让模型只看到该角色的工具。
+  跑内核自己的 `packages/core/tools/tests/scoped.spec.ts`，27 项全绿，四条比我预期的更深：
+  1. **能过滤子代理从祖先 scope 继承来的工具**，不只是全局层的。测试注释描述的正是我们的形状：
+     「no model-facing row in the global layer, all of them contributed by an ancestor scope
+     the child joined」。
+  2. **子代理自己注册的工具豁免自己的 filter**——`allow` 只列能力工具时，不会把子代理的
+     汇报 / 结构化输出工具一起剥掉。
+  3. **多个 restriction 求交集，各自独立 lift**（`restrict` 返回精确 disposer）。
+  4. **失手一律 loud**：非 scoped 调用、空 filter、写错名字、点名 scope 自己的注册、
+     点名保留的 `run_code` 传输——五种都抛，且报错列出已知工具名。
+  落地点是 `subagent/src/child-agent.ts:163-174` 的 `applyChildComposition`：
+  一次给子代理装上 `deployment:persona` section（order 0）+ scoped `tools.restrict(toolFilter)`。
+- **复验判据**：真专家团跑一轮，四条判据（各自人设 / 继承模型 / 继承 cwd / 产出汇总）
+  全过，且模型的工具名录里只有该角色的那几个。
+- **一条遗留已由阶段 4 闸门顺带关掉**：后台 / continuable 模式下产出会不会重复投递
+  ——`reported` 位 + first-wins settlement 从机制上去重，见阶段 4。
+- **仍待定性的一条**：并行工具调用时 `name`/`id` 流式组装丢字段
+  （`unknown tool ""`，重试自愈，尚未定性）。
+
+### 阶段 4 · 媒体（4~6 周）· 四条闸门已通过
+
+**原本判定这是全案最大的不确定性，因为风险不在"要写多少行"，在"dsh 有没有承载它的能力"。
+2026-08-17 四条证据全部验完：能力都在，只有视频产物的显示方式要选一条路。**
+先记下 openclaw 在这条链上白送的四样东西——我们的 4,219 行插件是**长在它们上面**的，
+所以下面这张表是"要自己补什么"的清单，不是"做不了"的清单：
+
+| openclaw 白送的 | 出处 | 少了它会怎样 |
+|---|---|---|
+| `video_generate` 工具原生收参考图：`image`（一张）/ `images`（多张）/ **`imageRoles`**（`first_frame` / `last_frame` / `reference_image`，按下标对齐） | `agents/tools/video-generate-tool.ts:117-131` | 图生视频整档要自己造，包括工具 schema 与模式推导 |
+| 模式由**有没有传参考图**推出（`generate` / `imageToVideo` / `videoToVideo`），provider 只声明 `capabilities.imageToVideo` | `video-generation/types.ts:105` | 同上 |
+| **`resolveModelCapabilities(ctx)` 钩子**，运行时逐模型问参考图张数，调用点在张数卡**之前** | `video-generation/types.ts` + `runtime.ts` | Vidu 首尾帧那条路径就是因为静态声明算不出张数，写好后当了四天死代码。这是"不报错的失败形态" |
+| 内核在同一条 primary+fallbacks 链上**按能力跳**：候选不支持这次的参考图输入就跳下一个 | `video-generation/runtime.ts:125-205` | 用户会撞到"选中即必然失败"的模型 |
+
+我们自己的抽象**可以整体保留**：视频「提交 → 轮询 → 取 url → 下载」循环在 `generateVideo` 内部，
+异步出图同形骨架在 `generateAsyncImage`，每家适配器只补「拼提交体 / 解析轮询体 / 取 url /
+判终态」四个函数，归属判据由适配器自己用 `endpointTypes` 声明，装不进静态清单的
+（Replicate / fal 的类型名逐模型）走 `matchesType` 钩子。这套「一家一个适配器」**不是我们发明的**，
+openclaw 自带的五个视频扩展逐条对得上，是成熟做法。
+
+**产物怎么回到对话，是这条链上花力气最多的地方，且必然要重做。** openclaw 上那套是：
+媒体一律后台任务 → 投递走 `deliverSubagentAnnouncement`（对我们的会话键必然失败）→
+所以我们用 `after_tool_call` 钩子记账落 `~/.openclaw/yunwu-media-tasks/<taskId>.json` →
+主进程 `fs.watch` + 启动全量扫 + 30 秒慢清扫 → `chat.send` 补投 → `agent.wait` 确认真起了一轮 →
+失败按 `3s / 10s / 30s` 退避重投。还有一条：**本机绝对路径只在 `agent`/`stream:"assistant"`
+的 `data.mediaUrls` 上**，`chat`/`final` 的正文里 `MEDIA:` 行已经被内核剥掉了。
+dsh 的事件流形状完全不同，这一整套要重新设计——但**要复现的结果不变**：
+用户说"画一张图"，图出现在这条对话里，失败也要说出原因。
+
+#### 四条前置证据：已验完（真机跑过，探针已删）
+
+**第 1 条 · 长任务：通过，而且内核给的比我们手搓的那套完整。**
+dsh 有一等公民的后台任务运行时 `ctx.jobs`（`packages/jobs/jobs/src/index.ts:62`），
+`JobKindMap` 明确设计成插件声明合并扩展（`jobs/src/types.ts` + `docs/subsystems/jobs.md:9`），
+所以 `video_generation` / `image_generation` 是加一个 kind 的事。生产者契约正好是媒体的形状：
+`run()` 返回 `{ cancel, done, readOutput? }`，**不给 `readOutput` 就是 final-output-only 任务**，
+终态产物放 `JobOutcome.output`，`read()` 幂等不消费。真机读数：
+
+| 我们在 openclaw 上手搓的 | dsh 的对应物 | 真机验到 |
+|---|---|---|
+| `chat.send` 补投 + `agent.wait` 确认 + `3s/10s/30s` 退避重投 | `ctx.jobs.onJobDone` → 闲的 owner 走 `owner.followup()` 开一轮，忙的走 `owner.inject()` 等在 next-step 收件箱（`tool-jobs/src/index.ts:279-300`） | idle → `followup=1`；busy 且两个任务同时完 → `inject=2`（只花一步） |
+| 「会不会重复投递」一直没验 | `JobSnapshot.reported` 位 + first-wins：**`kill`/`read`/`wait` 任一发生就算有人认领了终态**，通告自动去重 | 调过 `wait` 后 `reported=true`，投递 0 条 |
+| `duplicateGuard` 按「工具+provider」锁死，同一时刻只能一个视频任务 | `maxConcurrentJobsPerOwner` 配置项，**默认 10** | 第 11 个被拒，报错还教模型怎么办：`background job limit reached for this owner (limit: 10); use job_kill to stop an unneeded job, wait for it to finish, then retry` |
+| 用户点停止后撤上游轮询要自己接 | `kill(id, caller, reason)`，reason 原样传给生产者 `cancel()` | `cancel` 收到 `'用户点了停止'` |
+| 自激链（任务完成唤醒一轮、那一轮又起任务）没防护 | `maxConsecutiveWakes` 默认 3 轮，由用户真实输入重置（`tool-jobs/src/index.ts:39-45`） | 内核注释直说这是防自激 |
+
+**一个要做的设计选择**：内核默认通告的内容是**「任务完成了，用 `job_output` 读」**，
+不是产物本身——照默认走，一次出图 = 提交 1 轮 + 唤醒 1 轮 + 模型再调一次 `job_output`。
+`ctx.jobs.onJobDone` 是公开 API，我们可以自己挂监听器把产物直接塞进消息，省掉那一次读；
+代价是要把 `dsh-tool-jobs` 的 `completionDelivery` 设成 `'quiet'`，否则两个监听器各投一条。
+
+**第 2 条 · 产物显示：出图通过，出视频要选路。这是本次唯一一条改产品形态的发现。**
+
+- **出图有一等公民的路。** `ctx.attachments.saveImage()` 验字节 → 原子提交 →
+  返回内容寻址的 `ImageAttachmentRef` → 进 `ImageBlock`（`llm/src/types.ts:99-105` 的
+  `ContentBlockMap` 里 `'image'` 是内建项）→ 会话日志与模型可见块都认它。
+  内核刻意规定引用里**不许放 base64、provider URL、主机临时路径**
+  （`docs/subsystems/attachment.md:5`）。这比我们现在那套「`MEDIA:<绝对路径>` 行 +
+  内核广播前剥掉 + 我们从 `data.mediaUrls` 捞」干净一个量级。
+- **出视频 / 音频在内核层没有落点。** 正面证据三条：`attachment/src/types.ts:8` 的
+  `ImageMediaType` 只有 `image/png|jpeg|webp|gif`；`ContentBlockMap` 只有
+  text / reasoning / image / tool-call / tool-result；全 `packages` 搜
+  `video/mp4|video/webm|audio/*` 只命中 2 个文件、**都是测试**。
+  **选路已定，见下面「视频产物显示：选路结论」。**
+- `ToolResultView` 的卡片种类是封闭联合（`generic` / `terminal` / `diff` / `search` /
+  `read` / `web`），**没有媒体卡片**；但 UI 不认识的卡片会回落到原始 content，
+  所以内联显示图片靠的是 `ImageBlock`，不是卡片。
+
+#### 视频产物显示：选路结论（2026-08-17 查证 + 探针验完）
+
+**结论：不给 `ContentBlockMap` 加 `video` 模态。照 `dsh-client-ui-deliverables` 的形状
+自己写一个 `ui-media` 插件。** 理由是四条路里三条免费、唯一要钱的那条要动内核文件。
+
+先把「加模态」的四条路逐条定价（内核 `types.ts:96-97` 自己写明「New core blocks must
+land with adapter, UI, and compaction support」）：
+
+| 路 | 落点 | 加 `video` 的成本 |
+|---|---|---|
+| 适配器（上线） | `llm-pi-ai/src/context.ts:58-60` 与 `replay.ts:140-142` 都是 `default: break` | **0**。探针实证：静默丢弃、不抛。对照组 `image` 放在助手内容里**会抛**（`replay.ts:138`），所以我们反而比内建模态好过 |
+| 计费 / 压缩 | `token-meter/src/estimate.ts:42-45` 的 `default` 按 JSON 长度计价 | **0**。注释明写就是给 merge-extensible 留的 |
+| 持久化 / 回放 | `apiproxy/session-export.ts:125` 只认 image 的附件引用；`attachment/src/types.ts:8` 的 `ImageMediaType` 无视频 | 不论走哪条路都要我们自己的产物存储，**不是加模态的增量成本** |
+| **UI** | `runtime/conversation.ts:71` 落到 `kind:'other'`；`ui-tool/tool-call-model.ts:110-111` 把**所有非 text 块 `JSON.stringify` 摊平** | **唯一要钱的一条**：想有播放器而不是一坨 JSON，就得改内核文件 = 长期维护补丁 |
+
+最后那条是决定性的。我们现在已经在 `scripts/patch-kernel-reasoning.mjs` /
+`patch-kernel-toolcalls.mjs` 上吃过打内核补丁的苦，不该为了显示视频再欠一笔。
+
+**而内核给了不用改它的做法，`ui-deliverables` 本身就是范例**——它不是内核内建，
+是个能被 `cordis.yml` 整个撤掉的插件（`ui-deliverables/src/client/index.ts:5-8` 原话：
+「All policy lives here … so composing this plugin out of cordis.yml removes both
+surfaces entirely」）。它的注册只有两句（同文件 `:39-51`）：
+
+- `ctx.conversationEvents.register(定义)`：一个 `ConversationNodeDefinition`，
+  自己盯 `tool/call` / `tool/result` 事件攒 turn 数据
+- `ctx.slots.inject('conversation.chat.turnTail', …)`：往聊天时间线的 turn 尾部挂组件，
+  `select` 返回 null 就在挂载前主动弃权
+
+照这个形状，我们的 `ui-media` 插件盯自己的媒体工具、渲染真的 `<video>` / `<img>`，
+**零内核改动，且升级内核不受影响**。分两步走：
+
+**这两步都不降级，第一步反而是升级——这条查了现状才敢说。** 今天视频产物在界面上
+**并没有内联播放**：它是 `msg-artifacts` 里的一张 `artifact-card`（`Workspace.tsx:5626-5642`），
+点开走产出物预览抽屉，而那个抽屉**只有图片分支**（`:2409-2410` 注释原话「图片字节;有值即走
+图片分支(主进程只对图片扩展名返回它)」）。也就是说用户今天点视频卡片是**预览不了**的。
+dsh 第一步给的是产出行文件片 + Host opener 交给系统播放器，**真能播**。
+第二步的内联播放是超出今天的增强，不是保平的欠账。
+（顺带：`Workspace.tsx:6241` 已经有一个原生 `<video controls preload="metadata">`，
+是剧本产物那条路上照 WorkBuddy 的 `PreviewVideo` 做的，第二步可以直接复用这个形状。）
+
+- **第一步（零代码）**：媒体工具的 `presentCall` 返回
+  `{ card:'generic', kind:'edit', title, locations:[{path}] }`，产物立刻进现成的
+  `ProducedFiles` 那一行，点击交给 Host opener。内核自己的测试把这条契约钉死了：
+  `ui-deliverables/tests/produced-files.client.spec.tsx:194-205` 证明 `kind:'edit'`
+  + `locations` 会进产出行，`:215` 证明缺 `locations` 就不进，`:196` 证明 `kind` 不是
+  `edit` 也不进，`:198` 证明失败的调用不进。
+- **第二步**：`ui-media` 插件接内联播放。
+
+**第一步有一条硬约束，是这次查证纠正的一个判断**：deliverables 读的是 **call view**
+（`turn-deliverables.ts:43` 形参是 `ToolResultNode['callView']`，`update` 里存的是
+`for:'call'` 那一支），不是 result view——而 `GenericResultView` 压根没有 `locations`
+字段。`presentCall` 又被明确规定为**纯函数、只能依赖 `args`**（`tools/src/index.ts:275-277`：
+回放时也会调它）。**所以产物路径必须能从工具参数纯推出来**：不能用执行时的墙上时钟、
+不能用 callId，得用参数哈希这类确定性的算法，且 `presentCall` 与 `execute` 共用同一个
+纯函数算路径。
+
+第二步没有这条约束：我们自己的 node definition 直接读 `tool/result` 事件上的
+`meta`（工具私有展示载荷，`tools/src/index.ts:296-301` 说明它从事件原样穿过来），
+而 `meta` 是执行时产生的，可以带真实产物路径。
+
+一条要注意的既有限制：deliverables 的已知限制第二条正好命中我们——「Files created
+indirectly by terminal commands remain outside the matching vocabulary」。所以视频文件
+光写到磁盘上**不会**自己出现在产出行里，必须由工具声明。另有一条：
+`turn-deliverables.ts:40-41` 明说只有**根**调用视图进 turn 累加器，
+Code Mode 里嵌套派发的不单独计入——媒体工具若被 `run_code` 包着调，产出行不会出现。
+
+**第 3 条 · 参考图与逐模型能力：问题被重新框定了，而且是好消息。**
+dsh 没有内建的出图 / 出视频工具，所以「它收不收参考图」不是内核问题——
+**工具是我们自己用 `defineTool` 定义的，schema 由我们写**。这恰好消掉了 openclaw 上那个坑的根：
+当年 `resolveModelCapabilities` 钩子之所以必要，是因为**工具和 fallback 链归内核所有**，
+我们只能静态声明能力，于是 Vidu 首尾帧那条路径算不出张数、当了四天死代码。
+在 dsh 上链和张数卡都在我们自己的 `execute` 里，直接查实时模型目录即可，不存在静态声明这一层。
+参考图**输入**同样有一等公民的路：用户/模型传进来的图就是 `ImageBlock` 挂 attachment 引用，
+我们用 `ctx.attachments.readImage(ref)` 取回字节。代价是 primary+fallbacks 的按能力跳选逻辑
+要自己写（openclaw 是 `video-generation/runtime.ts:125-205` 白送的），但不必再跟内核契约较劲。
+
+**第 4 条 · 工具闸门：通过，形状比 openclaw 干净，顺带把阶段 3 的 `toolFilter` 闸门也答掉了。**
+dsh 的工具收窄是运行时 API `ctx.tools.restrict({ allow?, deny? })`，返回精确 disposer，
+按 scope 生效、多个限制求交集、scope 自己注册的工具豁免自己的 filter。跑过内核自己的
+`packages/core/tools/tests/scoped.spec.ts`（27 项全绿）证到更深的四条：
+
+- **拒绝非 scoped 调用**，报错原话：`tools.restrict() requires a scoped context (agent.ctx):
+  a context-global restriction would mask every agent — deny the tool for the intended agent
+  instead`。内核压根不让你不小心做一个全局收窄。
+- **传错名字失败而不是静默无效**，且报错列出已知工具名（`unknown global tool "reall" …
+  known global tools: real`）。openclaw 上那个「`image_generate` 躺在 `tools.deny` 里、
+  改完还要重启网关」的坑，在 dsh 上换成了代码里显式调的 API + 启动即报错。
+- **能过滤子代理从祖先 scope 继承来的工具**，不只是全局的。测试注释写的正是我们专家团的形状：
+  「no model-facing row in the global layer, all of them contributed by an ancestor scope
+  the child joined」。
+- 专家团（leader + member）有一等公民实现：`subagent/src/child-agent.ts:163-174` 的
+  `applyChildComposition` 一次给子代理装上 `deployment:persona` section（order 0）
+  和 scoped `tools.restrict(toolFilter)`。我们现在靠改 `SKILL.md` frontmatter 的
+  `disable-model-invocation` + `before_prompt_build` 钩子拼出来的那套，**整体可以扔**。
+  顺带解掉两条存量差异（对照 `experts-and-teams.md`）：
+  - **成员人设的 7 秒延迟没了。** 我们现在是「`subagent_spawned` 记一笔
+    `childSessionKey -> label`，约 7 秒后子会话 `before_prompt_build` 触发才回查注入」
+    （该册第 136-139 行）。dsh 是在子代理创建窗口里**同步**装 section，不存在这个窗口。
+  - **我们判定「v2026.6.11 无解」的重复投递，dsh 有内核级答案。** 该册第 42 行记着：
+    成员产出回传做通之后长出「内核那条会迟到落地，同一份产出进两遍上下文」，
+    结论是当前内核版本无解。dsh 用 `reported` 位 + first-wins settlement 从机制上去重
+    ——真机验过：任何一方 `kill`/`read`/`wait` 认领了终态，另一条通告就不发。
+    这条不是"少写代码"，是**换内核解掉一个我们已经判死的存量 bug**。
+- **复验判据**：13 家逐家端到端出片（openclaw 上的既有战果，不接受退化）；出图三条路径各出一张；
+  TTS 出一段音频。三个判据脚本继续通过：`verify-video-endpoints.mjs`（52 条）、
+  `verify-image-endpoints.mjs`（26 条）、`verify-search-capability.mjs`（17 条）——
+  它们是纯函数 + 真机快照，换内核不该让它们变红，是最便宜的回归网。
+- **两条必须继承的纪律**：判据取库里的 `models.endpoints`，不自己拼路径、不看文档；
+  界面认候选靠端点类型名、插件跑靠适配器，**两份清单必须逐字一致**（这就是那两个脚本在看的东西）。
+- **一条与内核无关但必须带过去的产品智慧**：搜索后端可能是思考模型时，`max_tokens` 要按
+  「思考预算 + 正文」给。实测 1200 时 `reasoning_tokens` 一次就烧 1149，正文只剩 45 个 token，
+  答案截断成半句，而 `finish_reason` 仍是 `stop`、回执结构完好——**不报错的失败**，上层不会换后端。
+
+### 阶段 5 · 市场与后端契约（2 周，与阶段 3 并行）
+
+见下一节。
+
+### 阶段 6 · 发布（1 周）
+
+品牌、签名、更新通道、许可证附带（内核 MIT + `THIRD_PARTY_NOTICES.md` + 外壳 MIT）、
+灰度与回滚方案。
+
+## admin-server / admin-cloud 要改什么
+
+两个仓库都已建 `feature/dsh-kernel` 并并入最新 main。要改的不多，但有一条是硬的。
+
+### 硬的那条：制品格式要加版本，不能一刀切
+
+现在市场条目的制品是 openclaw 形状的 zip：`SKILL.md` + persona 目录 + `_yunwu_meta.json`，
+装到 `~/.openclaw/skills/<slug>`。dsh 的专家是 agent preset 目录
+（`agent.cordis.yml` + 可选 `preset.yml`），技能与连接器又各是另一套。
+
+**老版本客户端已经发布在外**，它们会继续按 openclaw 形状拉制品。所以：
+
+- `desktop_market_item` 加一个格式/内核标识字段，客户端按自己认识的格式取。
+- `GET /api/desktop-market/snapshot` 按客户端声明的能力过滤，或返回两份制品链接。
+- 制品下载那条是公开 HMAC 直链（`api-router.go` 里 `ServeDesktopMarketArtifact`
+  刻意没挂 `TokenAuth`），这条机制不用动。
+
+admin-cloud 侧对应改：市场编辑器要能产出新格式（`src/pages/desktop-market/`，7 文件 87 KB）。
+
+### 软的那条：模型档案的思考方言
+
+`desktop_model_profile` 现在下发的是 openclaw 的 `compat.thinkingFormat` 七种方言与
+`thinkingLevelMap`。阶段 2 闸门验完后（2026-08-17），目标形状已经确定，可以直接定表：
+
+| 现在的列 | 换成 | 备注 |
+|---|---|---|
+| `thinking_format`（七种枚举） | 同名保留，取值域收到 dsh 的 `PiAiThinkingFormat` | 我们只用 `qwen` / `deepseek`，被扣住的 `chat-template` / `qwen-chat-template` 要从枚举里去掉 |
+| `thinking_levels`（字符串数组）+ `default_thinking_level` | **合成一列 `reasoning_efforts`（档位 → wire 拼写的字典）** | 这是形状变化最大的一列：从"提供哪些档"变成"每档发什么" |
+| `can_disable_thinking`（布尔） | 不再单独存——**`off` 键在不在 `reasoning_efforts` 里就是答案** | 少一列，也少一处自相矛盾的可能 |
+| `thinking_effort`（布尔） | `supports_reasoning_effort`，语义不变 | 只是改名对齐内核字段 |
+| `reasoning`（布尔） | 保留；`false` 时下发 `reasoning_efforts: false` | dsh 用 `false` 显式表达"不思考的模型" |
+
+档位取值域从 `low/medium/high` 三档扩到 dsh 的七档（`off / minimal / low / medium /
+high / xhigh / max`）。admin-cloud 的模型档案页（`src/pages/desktop-model-profile/`，41 KB）
+跟着改表单：档位那一栏从多选框变成"档位 + wire 值"的键值对编辑器，
+`can_disable_thinking` 那个开关删掉。
+
+**服务端要继承客户端已有的那三道校验**（现在写在 `model-profiles.ts:147-168`）：
+方言不在枚举里整条作废、`thinking_effort: false` 却配了档位整条作废、
+`reasoning: false` 时连带清掉思考细节。dsh 那边这些是解析期抛错，
+所以下发脏数据的后果从"界面铺出一排点了不生效的假档位"升级成"整个路由起不来"——
+这道校验比现在更要紧，不是更不要紧。
+
+**这条通道只下发能力、不许携带"该用哪些模型"** —— 清单是用户数据，这条纪律继承。
+
+### 不用改的
+
+- 登录 / 令牌 / 余额相关的接口（`/api/user/login`、`/api/token/`、`/api/user/self`、
+  `/api/status`、go-captcha 那三个）：桌面端换内核与它们无关。
+- 市场的分类、场景、反馈三块的接口形状。
+- `/api/pricing_new` 与 `/v1/models` 的口径。
+
+## 风险与未决
+
+| 风险 | 应对 |
+|---|---|
+| 内核锁在 `0.1.0-rc.5`，rc 版接口会变 | fork 而非 submodule 跟随；每次升级前 diff 配置层与 subagent 目录 |
+| 外壳是社区单点依赖（anywhere-labs） | MIT 已 fork，最坏情况自己维护 5,766 行 |
+| 媒体从零，13 家适配器的端到端战果可能退化 | 逐家复验，不接受"大部分能用"。四条前置证据 2026-08-17 已全部拿到，见阶段 4 |
+| **视频 / 音频产物在内核层没有落点**（`ImageMediaType` 只收四种光栅图，`ContentBlockMap` 无 video） | **已选路**：不加模态，照 `ui-deliverables` 形状自写 `ui-media` 插件。四条路里适配器与计费两条免费（探针实证静默丢弃、不抛），UI 那条要改内核文件所以不走。第一步先白嫖现成产出行，且**比今天强**——今天视频卡点开预览抽屉只有图片分支 |
+| 老客户端还在外面跑 | 制品格式加版本字段，两种格式并存一段时间 |
+| ~~**孤儿写者锁**：进程崩在持锁期间，之后每次写配置等 2173ms 然后失败，内核刻意不夺锁~~ | **已落地** `src/main/dsh/settings-lock.ts` + `npm run verify:settings-lock`（11 项全绿）。判 **pid 三态**而非文件年龄，`EPERM` 必须当"活着" |
+| Windows 上「非竞争性锁失败」无上游测试覆盖（他们自己 skipIf win32） | 我们是 Windows 产品，这条分支自己补测试。**守卫这一侧已覆盖**（判据脚本本机 Windows 跑绿，含 `EPERM` 那档）；内核锁本身的失败分支仍待补 |
+| 默认通告只说"任务完成了，用 `job_output` 读"，照默认走每次出图多花一轮模型调用 | 自己挂 `ctx.jobs.onJobDone` 把产物直接塞进消息，同时把 `dsh-tool-jobs` 的 `completionDelivery` 设 `'quiet'`，否则两个监听器各投一条 |
+
+**四条闸门全部关掉（2026-08-17 一天内验完，所有探针已删，内核仓库无残留）**：
+
+| 闸门 | 结论 | 真机证据 |
+|---|---|---|
+| **阶段 1 · 配置的程序化写入语义** | 通过。跨进程文件锁替掉 baseHash，叶级 diff 保注释，操作串行化 | 6 项自写探针 + 内核 `packages/settings` 151 项 |
+| **阶段 2 · 思考档位表达** | 通过，且比我们现在更直白：档位直接映射 wire 拼写，方言开关按模型可覆盖 | 8 项自写探针 + 内核 `llm-pi-ai/catalog.spec.ts` 52 项，共 60 项 |
+| **阶段 3 · 逐成员 `toolFilter`** | 通过，能过滤祖先 scope 继承来的工具，失手一律 loud | 内核 `core/tools/tests/scoped.spec.ts` 27 项 |
+| **阶段 4 · 媒体四条证据** | 长任务与工具闸门**超预期通过**，出图有一等公民的路，**只有视频 / 音频产物要选路** | 6 项自写探针（jobs 投递 / 去重 / 并发 / 取消） |
+
+**没有一条闸门要求改变产品形态。** 阶段 4 那条视频产物的路，是"先做文件产出行、
+内联播放留作后续"，不是"媒体退回服务端"。
+
+**那两件工程活也收掉了（2026-08-17）**：
+
+1. **孤儿写者锁兵底 —— 已落地**。`src/main/dsh/settings-lock.ts` +
+   `npm run verify:settings-lock`（7 项行为判据 + 4 项内核漂移闸门，全绿）。
+   判据是 **pid 三态**，不是文件年龄：`process.kill(pid, 0)` 正常返回 = 活着，
+   `EPERM` = **活着但我们没权限**，`ESRCH` = 不存在。只有 `ESRCH` 才回收。
+   **这里有个坑值得单记**：仓库既有的 `isAlive`（`openclaw-manager.ts:45-52`）把
+   `catch` 一律当"死了"——本机实测 `pid 4`（System）返回 `EPERM`，照那个判据会去删一个
+   活写者持有的锁。用来决定"补不补一刀 kill"没问题，用来决定"删不删别人的锁"是错的，
+   所以单写了一个。锁内容解析不出 pid 时（进程死在"创建锁"与"写 pid"之间）退回年龄兜底，
+   10 秒为界——这不违背内核那条纪律，它拒绝的是"用年龄替代所有判断"。
+   漂移闸门每次跑都回内核源码核那三条字面量，内核改了锁文件名或内容格式就变红，
+   不会让守卫静默失效。
+2. **视频产物显示选路 —— 已定**：不加 `ContentBlockMap` 模态，照 `ui-deliverables`
+   的形状自己写 `ui-media` 插件；第一步先用 `presentCall` 的 `kind:'edit'` + `locations`
+   白嫖现成的产出行。四条路的逐条定价与理由见上面「视频产物显示：选路结论」。

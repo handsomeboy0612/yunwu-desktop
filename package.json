@@ -17,6 +17,7 @@
     "prepare-kernel": "node scripts/prepare-kernel.mjs",
     "patch:kernel": "node scripts/patch-kernel-reasoning.mjs && node scripts/patch-kernel-toolcalls.mjs",
     "verify:history": "node scripts/verify-history.mjs",
+    "verify:settings-lock": "node scripts/verify-settings-lock.mjs",
     "pack": "npm run build && npm run prepare-kernel && npm run patch:kernel && electron-builder",
     "pack:win": "npm run build && npm run prepare-kernel && npm run patch:kernel && electron-builder --win"
   },
