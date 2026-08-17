@@ -1,5 +1,14 @@
 # Desktop Host operations compose around the existing Web bundle. Compatibility
 # mode keeps upstream ownership of the browser carrier and rendered UI.
+#
+# `desktop-updates` is deliberately absent. Its endpoints are module-level
+# constants in update-checker.ts and update-download.ts pointing at
+# www.dshdesktop.cn, so a mounted row would have this product check upstream's
+# release service and offer upstream's installer. Dropping the row — rather
+# than setting its `enabled: false` — leaves no code path that can reach those
+# constants. Re-add a row here once our own release service exists.
+# Notifications are unaffected: `runtime.updates.notify` is a method on
+# ElectronDesktopRuntime, not on this plugin.
 - insert:
     - id: desktop-shell
       name: dsh-plugin-desktop
@@ -12,8 +21,6 @@
       name: dsh-plugin-desktop/pnpm
     - id: desktop-profiles
       name: dsh-plugin-desktop/profiles
-    - id: desktop-updates
-      name: dsh-plugin-desktop/updates
 
 # A desktop launch has no terminal operator waiting for the Web readiness line.
 - id: web-runtime

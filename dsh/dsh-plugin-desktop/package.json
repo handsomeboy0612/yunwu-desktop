@@ -233,8 +233,8 @@
     "vitest": "4.1.8"
   },
   "build": {
-    "appId": "ai.deepseek.dsh.desktop",
-    "productName": "DSH Desktop",
+    "appId": "ai.yunwu.desktop",
+    "productName": "Yunwu Desktop",
     "asar": true,
     "asarUnpack": [
       "package.json",
@@ -292,9 +292,9 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "differentialPackage": false,
-      "shortcutName": "DSH Desktop",
+      "shortcutName": "云雾",
       "useZip": true,
-      "artifactName": "DSH-Desktop-${version}-${arch}-Setup.${ext}"
+      "artifactName": "Yunwu-Desktop-${version}-${arch}-Setup.${ext}"
     },
     "linux": {
       "target": [

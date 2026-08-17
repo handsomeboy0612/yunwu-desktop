@@ -4,6 +4,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import sharp from 'sharp'
 import { describe, expect, it } from 'vitest'
+import { APP_ID, INSTALLER_STEM, PRODUCT_NAME, SHORTCUT_NAME } from '../src/brand.ts'
 
 const packageRoot = new URL('../', import.meta.url)
 const workspaceRoot = new URL('../', packageRoot)
@@ -99,7 +100,11 @@ describe('published package surface', () => {
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/terminal')
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/pnpm')
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/profiles')
-    expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).toContain('name: dsh-plugin-desktop/updates')
+    // This fork does not mount the update plugin: its endpoints are module-level
+    // constants pointing at upstream's release service. The export stays (the
+    // packaged-runtime verifier still resolves it), but no row may reach it
+    // until our own release service exists.
+    expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).not.toContain('name: dsh-plugin-desktop/updates')
   })
 
   it('keeps unaudited marketplace packages out of the published runtime', () => {
@@ -146,8 +151,13 @@ describe('published package surface', () => {
 
   it('fixes the installed application identity', () => {
     expect(manifest.version).toBe(workspaceManifest.version)
-    expect(manifest.build?.productName).toBe('DSH Desktop')
-    expect(manifest.build?.appId).toBe('ai.deepseek.dsh.desktop')
+    // Installer identity and runtime identity are two spellings of one fact:
+    // electron-builder writes the install from the manifest, while
+    // `app.setName(PRODUCT_NAME)` picks the userData directory. Comparing the
+    // manifest against src/brand.ts is what keeps a rebrand from splitting one
+    // install across two state directories.
+    expect(manifest.build?.productName).toBe(PRODUCT_NAME)
+    expect(manifest.build?.appId).toBe(APP_ID)
     expect(manifest.build?.asarUnpack).toEqual([
       'package.json',
       'cordis.patch.yml',
@@ -189,9 +199,9 @@ describe('published package surface', () => {
       createDesktopShortcut: true,
       createStartMenuShortcut: true,
       differentialPackage: false,
-      shortcutName: 'DSH Desktop',
+      shortcutName: SHORTCUT_NAME,
       useZip: true,
-      artifactName: 'DSH-Desktop-${version}-${arch}-Setup.${ext}',
+      artifactName: `${INSTALLER_STEM}-\${version}-\${arch}-Setup.\${ext}`,
     })
     expect(manifest.build?.linux?.icon).toBe('build/app-icon.png')
   })

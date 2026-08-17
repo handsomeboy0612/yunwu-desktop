@@ -158,9 +158,9 @@ describe('desktop profile composition', () => {
     expect(rows.find(row => row.id === 'desktop-pnpm')).toEqual(expect.objectContaining({
       name: 'dsh-plugin-desktop/pnpm',
     }))
-    expect(rows.find(row => row.id === 'desktop-updates')).toEqual(expect.objectContaining({
-      name: 'dsh-plugin-desktop/updates',
-    }))
+    // See cordis.patch.yml: this fork composes no update row, so the endpoints
+    // baked into update-checker.ts/update-download.ts stay unreachable.
+    expect(rows.map(row => row.id)).not.toContain('desktop-updates')
     expect(rows.find(row => row.id === 'desktop-profiles')).toEqual(expect.objectContaining({
       name: 'dsh-plugin-desktop/profiles',
     }))

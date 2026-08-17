@@ -10,6 +10,7 @@ import {
   loadLayeredEnv,
   type FailLoudProcess,
 } from '@deepseek-ai/dsh-app-boot'
+import { APP_ID, PRODUCT_NAME } from './brand.ts'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
@@ -44,7 +45,6 @@ import {
 } from './windows-volume-diagnostics.ts'
 
 const BIN_NAME = 'dsh-plugin-desktop'
-const PRODUCT_NAME = 'DSH Desktop'
 
 /** Report profile recovery without changing startup or rollback outcomes. */
 function notifyProfileRecovery(runtime: ElectronDesktopRuntime, body: string): void {
@@ -162,7 +162,7 @@ async function start(): Promise<void> {
 
   app.on('second-instance', () => { runtime.show() })
   await app.whenReady()
-  if (process.platform === 'win32') app.setAppUserModelId('ai.deepseek.dsh.desktop')
+  if (process.platform === 'win32') app.setAppUserModelId(APP_ID)
   if (app.isPackaged && process.cwd() === '/') process.chdir(app.getPath('home'))
   const homeDir = resolveDshHome()
   const windowsVolumeConcerns = diagnoseWindowsVolumes(process.platform, [
