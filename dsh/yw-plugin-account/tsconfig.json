@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "jsx": "react-jsx",
+    "allowImportingTsExtensions": true,
+    "rootDir": "src",
+    "outDir": "lib/types",
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "verbatimModuleSyntax": true,
+    // The kernel's own client packages typecheck inside its pnpm workspace,
+    // where every transitive type dependency resolves. Here they arrive as
+    // published tarballs, so `.d.ts` files reference packages this leaf never
+    // imports (dsh-api-remotes' types reach for dsh-cordis-host-runner, and
+    // ui-primitives' Markdown types import katex's stylesheet). Declaring that
+    // closure would mean ~30 dependencies we never call and 21 peer warnings
+    // on every install. Our own sources stay fully checked either way: this
+    // skips checking inside `.d.ts`, not our use of what they declare.
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src/*.ts"]
+}

@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  // The CSS shim is shared with the host program: `ui-primitives` types reach
+  // it through katex's stylesheet import, which TypeScript resolves as a
+  // module like any other.
+  "include": ["src/css-modules.d.ts", "src/client/**/*.ts", "src/client/**/*.tsx"]
+}

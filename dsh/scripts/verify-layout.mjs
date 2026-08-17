@@ -16,6 +16,7 @@ const upstream = readJson('upstream.json')
 const plugin = readJson('dsh-plugin-desktop/package.json')
 const fabric = readJson('dsh-community-fabric/package.json')
 const market = readJson('dsh-community-market/package.json')
+const account = readJson('yw-plugin-account/package.json')
 const upstreamPackage = readJson('deepseek-harness/package.json')
 const noteDirectory = '.agents/notes/implemented/process'
 const noteName = '2026-08-15-pinned-upstream-and-isolated-yarn-workspace'
@@ -25,20 +26,27 @@ const noteRecordPath = `${noteDirectory}/${noteName}.i18n.yaml`
 if (workspace.packageManager !== 'yarn@4.18.0') {
   fail('the product workspace must pin yarn@4.18.0')
 }
+// Upstream's three packages, plus ours. Kept exact rather than "at least":
+// a package that joins the workspace silently joins the desktop package's
+// dependency closure, and that closure is what gets symlinked into
+// $DSH_HOME/profiles/node_modules and becomes loader-resolvable.
 if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'dsh-plugin-desktop',
   'dsh-community-fabric',
   'dsh-community-market',
+  'yw-plugin-account',
 ])) {
-  fail('the root Yarn workspace must contain the desktop, community-fabric, and community-market packages')
+  fail('the root Yarn workspace must contain the desktop, community-fabric, community-market, and yunwu account packages')
 }
 for (const [name, manifest] of [
   ['dsh-plugin-desktop', plugin],
   ['dsh-community-fabric', fabric],
   ['dsh-community-market', market],
+  ['yw-plugin-account', account],
 ]) {
   if (manifest.packageManager !== undefined) fail(`${name} must inherit the root Yarn release`)
 }
+if (account.name !== 'yw-plugin-account') fail('the account workspace must own yw-plugin-account')
 if (fabric.name !== 'dsh-community-fabric') fail('the Fabric workspace must own dsh-community-fabric')
 if (market.name !== 'dsh-community-market') fail('the market workspace must own dsh-community-market')
 const claudePath = resolve(root, 'CLAUDE.md')
@@ -73,16 +81,28 @@ if (typeof upstreamPackage.packageManager !== 'string' || !upstreamPackage.packa
   fail('the upstream checkout must retain its pnpm package manager')
 }
 
+// The boundary being guarded is the DSH one: every @deepseek-ai package must
+// arrive as a published release at the pinned version, never as a live link
+// into the submodule checkout, or the app would run against source that
+// upstream.json does not describe. Upstream wrote that as a blanket ban on
+// workspace:/portal:/link:, which is equivalent while every workspace package
+// is upstream's own. Ours is not — yw-plugin-account is first-party product
+// code that ships inside this app and cannot come from a registry — so the
+// rule is narrowed to the boundary it protects instead of dropped.
 for (const [owner, manifest] of [
   ['root', workspace],
   ['desktop', plugin],
   ['fabric', fabric],
   ['market', market],
+  ['account', account],
 ]) {
   for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies', 'resolutions']) {
     for (const [name, range] of Object.entries(manifest[field] ?? {})) {
       if (typeof range !== 'string') continue
-      if (/^(?:workspace|portal|link):/u.test(range)
+      const localRange = /^(?:workspace|portal|link):/u.test(range)
+      const ourOwn = workspace.workspaces.includes(name.replace(/^.*\//u, ''))
+      if ((localRange && !ourOwn)
+        || (localRange && name.startsWith('@deepseek-ai/'))
         || (range.startsWith('file:') && range.includes('deepseek-harness'))) {
         fail(`${owner} ${field}.${name} bypasses the published DSH package boundary`)
       }

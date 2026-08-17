@@ -5408,6 +5408,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@types/node@npm:24.10.1":
+  version: 24.10.1
+  resolution: "@types/node@npm:24.10.1"
+  dependencies:
+    undici-types: "npm:~7.16.0"
+  checksum: 10c0/d6bca7a78f550fbb376f236f92b405d676003a8a09a1b411f55920ef34286ee3ee51f566203920e835478784df52662b5b2af89159d9d319352e9ea21801c002
+  languageName: node
+  linkType: hard
+
 "@types/node@npm:^22.20.0":
   version: 22.20.1
   resolution: "@types/node@npm:22.20.1"
@@ -6767,6 +6776,7 @@ __metadata:
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
     yaml: "npm:^2.9.0"
+    yw-plugin-account: "workspace:^"
   peerDependencies:
     electron: 43.4.0
   bin:
@@ -10503,6 +10513,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"undici-types@npm:~7.16.0":
+  version: 7.16.0
+  resolution: "undici-types@npm:7.16.0"
+  checksum: 10c0/3033e2f2b5c9f1504bdc5934646cb54e37ecaca0f9249c983f7b1fc2e87c6d18399ebb05dc7fd5419e02b2e915f734d872a65da2e3eeed1813951c427d33cc9a
+  languageName: node
+  linkType: hard
+
 "undici-types@npm:~7.18.0":
   version: 7.18.2
   resolution: "undici-types@npm:7.18.2"
@@ -10979,6 +10996,30 @@ __metadata:
   checksum: 10c0/dceb44c28578b31641e13695d200d34ec4ab3966a5729814d5445b194933c096b7ced71494ce53a0e8820685d1d010df8b2422e5bf2cdea7e469d97ffbea306f
   languageName: node
   linkType: hard
+
+"yw-plugin-account@workspace:^, yw-plugin-account@workspace:yw-plugin-account":
+  version: 0.0.0-use.local
+  resolution: "yw-plugin-account@workspace:yw-plugin-account"
+  dependencies:
+    "@deepseek-ai/cordis": "npm:4.0.1"
+    "@deepseek-ai/dsh-client-runtime": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-client-ui-primitives": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-client-ui-settings": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-client-ui-slots": "npm:0.1.0-rc.6"
+    "@types/node": "npm:24.10.1"
+    "@types/react": "npm:^18"
+    react: "npm:18.3.1"
+    tsdown: "npm:0.22.2"
+    typescript: "npm:6.0.3"
+  peerDependencies:
+    "@deepseek-ai/cordis": 4.0.1
+    "@deepseek-ai/dsh-client-runtime": 0.1.0-rc.6
+    "@deepseek-ai/dsh-client-ui-primitives": 0.1.0-rc.6
+    "@deepseek-ai/dsh-client-ui-settings": 0.1.0-rc.6
+    "@deepseek-ai/dsh-client-ui-slots": 0.1.0-rc.6
+    react: 18.3.1
+  languageName: unknown
+  linkType: soft
 
 "zod-to-json-schema@npm:^3.25.0, zod-to-json-schema@npm:^3.25.1":
   version: 3.25.2

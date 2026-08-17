@@ -21,6 +21,12 @@
       name: dsh-plugin-desktop/pnpm
     - id: desktop-profiles
       name: dsh-plugin-desktop/profiles
+    # Yunwu account. Resolvable by bare name because it is a dependency of this
+    # package: app-boot walks the desktop manifest's dependency closure and
+    # symlinks each package into $DSH_HOME/profiles/node_modules, which Node
+    # finds on the parent walk from any profile (app-boot/src/profile.ts:223).
+    - id: yunwu-account
+      name: yw-plugin-account
 
 # A desktop launch has no terminal operator waiting for the Web readiness line.
 - id: web-runtime

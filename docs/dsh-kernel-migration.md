@@ -605,12 +605,47 @@ tsdown 按 browser 单独打成 `lib/client.js`）里注册一个 order `-50` �
 运行期要用到的模块得进 `package.json` 的 `dsh.client.inject`，那是模块加载序，
 和导出的 `inject`（cordis 服务）是两回事，别混。
 
-**尚未定的一件事：这个插件该住哪。** 探针借了 `dsh-plugin-desktop`，因为启动器会把它
-junction 进 profile（`profile-manager.ts` 里写明该包 launcher-owned、不许出现在
-`dsh.profile.bundles`），所以零安装就能跑。但那是上游包，我们往里塞业务代码会让
-`git subtree pull` 变脏——`brand.ts` 那次收口就是为了躲这个。真实现更该是我们自己的包，
-代价是要解决它怎么进 profile 的依赖树（profile 是 pnpm 工作区，`packages: - .`）。
-两条路都通，动手前挑一条。
+#### 插件住哪：自建包 `yw-plugin-account`，骨架已通真机
+
+探针借的是上游的 `dsh-plugin-desktop`。业务代码不该住在那里——`git subtree pull` 会变脏，
+`brand.ts` 那次收口正是为了躲这个。定为自建包，代价是先答清「它怎么被 profile 解析到」。
+
+**答案在内核源码里，不用猜**（`boot/app-boot/src/profile.ts:223` `healProfilesModuleFallback`）：
+启动时 BFS 遍历**桌面包清单的 dependencies + peerDependencies 闭包**，给每个包在
+`$DSH_HOME/profiles/node_modules` 放一条扁平符号链接；Node 从任何 profile 往上走都能找到它。
+配套的 `verify-runtime-closure` 守的就是这条闭包的完整性。所以规则一句话：**挂进
+`dsh-plugin-desktop` 的 dependencies，就能被裸名解析。** 客户端半边同理——`modules` 插件
+「扫描 Loader 条目里声明了 `dsh.client` 的包」并按包名服务 `/plugins/<id>/client.js`，
+机制对 out-of-tree 的包一视同仁。
+
+**真机复验（一次重启看四件事）**：
+
+| 要问的 | 结果 |
+|---|---|
+| 闭包投影认不认我们的包 | `profiles/node_modules/yw-plugin-account` 链接已生成，指向工作区目录 |
+| 客户端 bundle 送不送 | 启动图第 40 项：`/plugins/yw-plugin-account/client.js?rev=970752cdd1d5` |
+| 槽位注册生效吗 | 「登录云雾」整屏挂起，`#root` 被冻结 |
+| 交棒对吗 | 点过之后步消失、应用解冻、无人顶上 |
+
+`dsh-plugin-desktop` 测试 **297 通过 / 4 失败**，那 4 条是 Windows 上跑 macOS DMG 与
+universal 那组的既有失败，与上游基线一致；`profile.spec.ts` 没被组合新增撞到。
+
+**上游两条守卫按老规矩翻成我们的意图，不是关掉**（`scripts/verify-layout.mjs`）：
+工作区清单从三项改成四项（仍然写死，不改成「至少包含」——进了工作区就等于进了桌面包的
+依赖闭包，也就等于进了 profile 的可解析范围，这件事必须显式）；`workspace:` 的全面禁令
+收窄成「`@deepseek-ai/*` 不得用本地范围」。那条禁令守的是 DSH 边界：内核只能以固定版本的
+已发布包进来，不能活链进 submodule。上游写成一刀切是因为当时每个工作区包都是它自己的；
+我们的不是。改完单独验过判据：我们的包放行，反例（给某个 `@deepseek-ai` 包写 `workspace:^`）
+照样被抓。
+
+**顺带查实两件工程事实。** 一是 `check:layout` 在我们这个 fork 里**本来就是空转的**——
+它第 19 行要读 `dsh/deepseek-harness/package.json`，而 subtree 合并没带子模块，所以自打并进来
+就没跑通过；这不是本次改动造成的，但意味着它的上游锁定那半边目前不提供任何保护。二是新包
+开了 `skipLibCheck`：内核客户端包是在它自己的 pnpm 工作区里做类型检查的，那里每个传递类型
+依赖都解析得到；到我们这儿它们是发布出来的 tarball，`.d.ts` 会引用这个叶子包从不 import 的东西
+（`dsh-api-remotes` 的类型伸手要 `dsh-cordis-host-runner`，`ui-primitives` 的 Markdown 类型
+import 了 katex 的样式表）。试过把它们逐个声明上：警告从 7 涨到 21 再涨到 30，是发散的。
+`skipLibCheck` 只跳过 `.d.ts` 内部的检查，不影响我们自己的源码被完整检查。
 
 #### 老代码重新判定：活下来的比原先估的少
 
