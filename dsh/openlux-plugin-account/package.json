@@ -1,8 +1,8 @@
 {
-  "name": "yw-plugin-account",
+  "name": "openlux-plugin-account",
   "version": "0.1.0",
   "private": true,
-  "description": "Yunwu account: sign-in onboarding step, credential handoff, and balance readout",
+  "description": "OpenLux account: sign-in onboarding step, credential handoff, and balance readout",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",

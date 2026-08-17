@@ -16,7 +16,7 @@ const upstream = readJson('upstream.json')
 const plugin = readJson('dsh-plugin-desktop/package.json')
 const fabric = readJson('dsh-community-fabric/package.json')
 const market = readJson('dsh-community-market/package.json')
-const account = readJson('yw-plugin-account/package.json')
+const account = readJson('openlux-plugin-account/package.json')
 const upstreamPackage = readJson('deepseek-harness/package.json')
 const noteDirectory = '.agents/notes/implemented/process'
 const noteName = '2026-08-15-pinned-upstream-and-isolated-yarn-workspace'
@@ -34,19 +34,19 @@ if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
   'dsh-plugin-desktop',
   'dsh-community-fabric',
   'dsh-community-market',
-  'yw-plugin-account',
+  'openlux-plugin-account',
 ])) {
-  fail('the root Yarn workspace must contain the desktop, community-fabric, community-market, and yunwu account packages')
+  fail('the root Yarn workspace must contain the desktop, community-fabric, community-market, and OpenLux account packages')
 }
 for (const [name, manifest] of [
   ['dsh-plugin-desktop', plugin],
   ['dsh-community-fabric', fabric],
   ['dsh-community-market', market],
-  ['yw-plugin-account', account],
+  ['openlux-plugin-account', account],
 ]) {
   if (manifest.packageManager !== undefined) fail(`${name} must inherit the root Yarn release`)
 }
-if (account.name !== 'yw-plugin-account') fail('the account workspace must own yw-plugin-account')
+if (account.name !== 'openlux-plugin-account') fail('the account workspace must own openlux-plugin-account')
 if (fabric.name !== 'dsh-community-fabric') fail('the Fabric workspace must own dsh-community-fabric')
 if (market.name !== 'dsh-community-market') fail('the market workspace must own dsh-community-market')
 const claudePath = resolve(root, 'CLAUDE.md')
@@ -86,7 +86,7 @@ if (typeof upstreamPackage.packageManager !== 'string' || !upstreamPackage.packa
 // into the submodule checkout, or the app would run against source that
 // upstream.json does not describe. Upstream wrote that as a blanket ban on
 // workspace:/portal:/link:, which is equivalent while every workspace package
-// is upstream's own. Ours is not — yw-plugin-account is first-party product
+// is upstream's own. Ours is not — openlux-plugin-account is first-party product
 // code that ships inside this app and cannot come from a registry — so the
 // rule is narrowed to the boundary it protects instead of dropped.
 for (const [owner, manifest] of [

@@ -213,10 +213,10 @@
     "@deepseek-ai/schemastery": "^3.18.1",
     "koffi": "3.1.5",
     "node-addon-require-builtin": "^0.1.4",
+    "openlux-plugin-account": "workspace:^",
     "pnpm": "11.7.0",
     "react": "18.3.1",
-    "yaml": "^2.9.0",
-    "yw-plugin-account": "workspace:^"
+    "yaml": "^2.9.0"
   },
   "peerDependencies": {
     "electron": "43.4.0"
@@ -234,8 +234,8 @@
     "vitest": "4.1.8"
   },
   "build": {
-    "appId": "ai.yunwu.desktop",
-    "productName": "Yunwu Desktop",
+    "appId": "ai.openlux.desktop",
+    "productName": "OpenLux Desktop",
     "asar": true,
     "asarUnpack": [
       "package.json",
@@ -293,9 +293,9 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "differentialPackage": false,
-      "shortcutName": "云雾",
+      "shortcutName": "OpenLux",
       "useZip": true,
-      "artifactName": "Yunwu-Desktop-${version}-${arch}-Setup.${ext}"
+      "artifactName": "OpenLux-Desktop-${version}-${arch}-Setup.${ext}"
     },
     "linux": {
       "target": [

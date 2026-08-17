@@ -1,5 +1,5 @@
 /**
- * Yunwu account plugin, browser half: registers sign-in as one entry in the
+ * OpenLux account plugin, browser half: registers sign-in as one entry in the
  * shell's first-run queue.
  */
 

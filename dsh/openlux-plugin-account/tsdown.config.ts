@@ -4,7 +4,7 @@ import { defineConfig } from 'tsdown'
 // package name, because that is the id `modules` advertises when it scans this
 // package's `dsh.client` field and serves /plugins/<id>/client.js. A mismatch
 // here loads the script but never resolves the entry.
-const PACKAGE_NAME = 'yw-plugin-account'
+const PACKAGE_NAME = 'openlux-plugin-account'
 
 export default defineConfig([
   {

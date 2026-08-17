@@ -21,12 +21,12 @@
       name: dsh-plugin-desktop/pnpm
     - id: desktop-profiles
       name: dsh-plugin-desktop/profiles
-    # Yunwu account. Resolvable by bare name because it is a dependency of this
-    # package: app-boot walks the desktop manifest's dependency closure and
+    # OpenLux account. Resolvable by bare name because it is a dependency of
+    # this package: app-boot walks the desktop manifest's dependency closure and
     # symlinks each package into $DSH_HOME/profiles/node_modules, which Node
     # finds on the parent walk from any profile (app-boot/src/profile.ts:223).
-    - id: yunwu-account
-      name: yw-plugin-account
+    - id: openlux-account
+      name: openlux-plugin-account
 
 # A desktop launch has no terminal operator waiting for the Web readiness line.
 - id: web-runtime
@@ -56,12 +56,16 @@
 - id: llm-pi-ai
   config:
     providers:
-      yunwu:
-        displayName: 云雾
+      openlux:
+        displayName: OpenLux
         # A route pi-ai's installed catalog does not ship must name its protocol.
         api: openai-completions
         baseURL: https://api.openlux.ai/v1
-        apiKeyEnv: DEEPSEEK_API_KEY
+        # Must equal what the Models page derives from the route id
+        # (`<ROUTE>_API_KEY`): that page only clears a credential on row delete
+        # when the reference matches its own derived target, so a name chosen
+        # freely here would leave the key on disk after the user removes us.
+        apiKeyEnv: OPENLUX_API_KEY
         # Default is 300s (llm-pi-ai/src/config.ts:35). A relay channel that
         # stalls should reach the retry plugin as a failure while the user is
         # still watching, not after five minutes of an idle spinner.
@@ -71,6 +75,6 @@
         # from admin-server overwrites this list cleanly rather than adding to it.
         models:
           - id: deepseek-v4-pro
-            name: 云雾 V4-Pro
+            name: OpenLux V4-Pro
           - id: deepseek-v4-flash
-            name: 云雾 V4-Flash
+            name: OpenLux V4-Flash

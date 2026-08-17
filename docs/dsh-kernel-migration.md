@@ -321,15 +321,15 @@ id: CallId(known?.id ?? ''),
 ```yaml
 llm-pi-ai:
   providers:
-    yunwu:
-      displayName: 云雾
-      apiKeyEnv: DEEPSEEK_API_KEY
+    openlux:
+      displayName: OpenLux
+      apiKeyEnv: OPENLUX_API_KEY
       api: openai-completions          # 目录里没有的路由必须自报协议
       baseURL: https://api.openlux.ai/v1
       streamIdleTimeoutMs: 90000       # 顺手治渠道挂死拖满 300s
       models:
-        - { id: deepseek-v4-pro,   name: 云雾 V4-Pro }
-        - { id: deepseek-v4-flash, name: 云雾 V4-Flash }
+        - { id: deepseek-v4-pro,   name: OpenLux V4-Pro }
+        - { id: deepseek-v4-flash, name: OpenLux V4-Flash }
 ```
 
 **真机复验（2026-08-17）：** 写入后 6 秒内选择器从 2 个模型变 4 个，没重启；
@@ -337,8 +337,8 @@ llm-pi-ai:
 
 | 模型 | 结果 | 用时 / 首 token |
 |---|---|---|
-| 云雾 V4-Pro | `mcp__ywprobe__ping · hello` → 口令 TOPAZ-9 | 9s / 5.2s |
-| 云雾 V4-Flash | `mcp__ywprobe__ping · second` → 口令 TOPAZ-9（带备注） | 9s / 5.3s |
+| OpenLux V4-Pro | `mcp__ywprobe__ping · hello` → 口令 TOPAZ-9 | 9s / 5.2s |
+| OpenLux V4-Flash | `mcp__ywprobe__ping · second` → 口令 TOPAZ-9（带备注） | 9s / 5.3s |
 
 对照组是同一个探针在 `llm-deepseek` 下必现卡第一步。
 
@@ -357,13 +357,13 @@ llm-pi-ai:
 - **稀疏 patch 擦不掉下层的键**（注释原话）→ 出厂路由删不掉。
 
 最后这条本来是我判断的一个坑：以为界面会给出厂路由一个按了不生效的「删除」。
-**真机验下来是我想错了，内核处理得比预想干净**——同一条 `yunwu` 路由，
+**真机验下来是我想错了，内核处理得比预想干净**——同一条 `openlux` 路由，
 来自用户层时卡片是「编辑 + 删除」，改成来自组合基座后**删除按钮直接消失**，
 只剩「编辑」，跟内置的 DeepSeek 一模一样。判据是用户层有没有这一条，
 不是路由在不在 pi-ai 的内置目录里。所以出厂路由天然呈现为内置提供方，可改不可删，
 正是产品该有的姿态。
 
-组合层供给的复验（`settings.yaml` 里已无 `llm-pi-ai:` 段）：重启后选择器里两个云雾模型
+组合层供给的复验（`settings.yaml` 里已无 `llm-pi-ai:` 段）：重启后选择器里两个 OpenLux 模型
 都在，`mcp__ywprobe__ping` 一次调通，11s。测试 297 passed / 4 failed，那 4 个是
 Windows 上跑 macOS 应用包校验的既有失败，暂存改动后对照跑数字完全一致。
 
@@ -471,7 +471,7 @@ fork `deepseek-harness-desktop`，改品牌（上面那七处）、接签名证�
 内核按 `upstream.json` 锁版。
 
 - **动手前要拿到的证据**：已有 —— 真机 69 tok/s 通过 `api.openlux.ai`。
-- **复验判据**：我们品牌的安装包能装、能起、能用云雾的 key 跑通一条对话，
+- **复验判据**：我们品牌的安装包能装、能起、能用 OpenLux 的 key 跑通一条对话，
   且更新检查打的是我们的地址。
 
 **构建闸门已验（2026-08-17，本机 Windows + node 24.12.0 + yarn 4.18.0 + electron 43.4.0）。**
@@ -518,10 +518,10 @@ fork `deepseek-harness-desktop`，改品牌（上面那七处）、接签名证�
 
 | 改了什么 | 值 / 做法 |
 |---|---|
-| `APP_ID` | `ai.yunwu.desktop`（与旧项目 `src/main/index.ts:278` 一致） |
-| `PRODUCT_NAME` | `Yunwu Desktop` —— 同时决定 userData 目录名 |
-| `WINDOW_TITLE` / `SHORTCUT_NAME` | `云雾` |
-| `INSTALLER_STEM` | `Yunwu-Desktop` |
+| `APP_ID` | `ai.openlux.desktop` |
+| `PRODUCT_NAME` | `OpenLux Desktop` —— 同时决定 userData 目录名 |
+| `WINDOW_TITLE` / `SHORTCUT_NAME` | `OpenLux` |
+| `INSTALLER_STEM` | `OpenLux-Desktop` |
 | 更新插件 | `cordis.patch.yml` 里**整行摘掉** `desktop-updates`，不是设 `enabled: false` —— 要让没有代码路径能碰到那三个 `www.dshdesktop.cn` 常量。包导出保留（打包校验器 `verify-packaged-runtime.ts:102` 仍要解析它）；`runtime.updates.notify` 不受影响，它是 `ElectronDesktopRuntime` 的方法 |
 | 字标 | 未动，见「字标是唯一一处真冲突」，内测期先挂着 |
 
@@ -537,8 +537,8 @@ fork `deepseek-harness-desktop`，改品牌（上面那七处）、接签名证�
 要 mac 的权限位与 `lipo`）。我们改完之后逐条一致 —— 判断有没有回归要拿这个数比，
 不是拿「全绿」比。
 
-**复验（真机）**：`dsh/` 里装 9.0s、构建 0.3s；起进程窗口标题码点
-**U+4E91 U+96FE**（= 云雾）、userData 落在 `%APPDATA%\Yunwu Desktop`、
+**复验（真机）**：`dsh/` 里装 9.0s、构建 0.3s；起进程窗口标题为品牌名、
+userData 落在 `%APPDATA%\OpenLux Desktop`、
 loopback **HTTP 200 / 12301 字节**；`typecheck` 干净。
 
 **三份 userData 互不相撞，本机可以并排跑**（对着一个活的上游正式版比对很有用，别关它）：
@@ -546,13 +546,43 @@ loopback **HTTP 200 / 12301 字节**；`typecheck` 干净。
 | 谁 | userData |
 |---|---|
 | 已装的上游正式版 | `%APPDATA%\DSH Desktop` |
-| 我们的新壳 | `%APPDATA%\Yunwu Desktop` |
+| 我们的新壳 | `%APPDATA%\OpenLux Desktop` |
 | 旧项目 | `%APPDATA%\yunwu-desktop` —— 它只调 `setAppUserModelId`、**没调 `app.setName`**，所以目录名是 package.json 的 `name` |
 
-唯一共享的是 `AppUserModelId`（旧项目与新壳都是 `ai.yunwu.desktop`）：Windows 任务栏归组
-与通知身份，不挡开发，但看到两者挤同一个任务栏位置就是这个原因。
+改名成 OpenLux 之后连 `AppUserModelId` 也不再共享了（旧项目仍是 `ai.yunwu.desktop`，
+新壳是 `ai.openlux.desktop`），两者在 Windows 任务栏上各占各的位置。
 
-**阶段 0 剩下的**：用云雾的 key 跑通一条对话；接 Windows 代码签名证书
+##### 云雾 → OpenLux（2026-08-17 改完并复验）
+
+产品定名 OpenLux。**这不是改一处返回值**：名字落在五个地方，前三个是「越晚改越贵」的，
+所以趁没发版一次改完。
+
+| 落点 | 改了什么 | 晚改的代价 |
+|---|---|---|
+| `brand.ts` 的 `PRODUCT_NAME` | `OpenLux Desktop` | 它同时决定 userData 目录名，发版后再改会把一份安装劈成两个状态目录 |
+| `brand.ts` 的 `APP_ID` / `INSTALLER_STEM` / package.json 的 `build` 块 | `ai.openlux.desktop` / `OpenLux-Desktop` | 安装身份与升级路径，发版后再改就成了两个产品 |
+| 组合层路由 id | `yunwu` → `openlux` | **凭据名跟着变**，见下 |
+| 显示名与模型名 | `OpenLux` / `OpenLux V4-Pro` / `OpenLux V4-Flash` | 纯展示 |
+| 自建包与槽位 id | `openlux-plugin-account` / `openlux-sign-in` | 纯内部 |
+
+**路由 id 不是标签，它派生凭据名。** 模型页按 `<ROUTE>_API_KEY` 推导，且删除一行时只清
+「引用等于该派生目标」的凭据（`ui-settings-models/README.zh.md:7,34`）。所以路由改叫
+`openlux` 之后，`apiKeyEnv` 必须同步改成 `OPENLUX_API_KEY`——改名前它写的是
+`DEEPSEEK_API_KEY`，那本来就是个对不上的引用，用户从模型页删账号会删不干净。这次一并修正了。
+
+端点本来就已经是 `https://api.openlux.ai/v1`，只有标签还写着云雾。
+
+**真机复验**：模型选择器里四条（内核自带 DeepSeek 两条 + 我们 OpenLux 两条）；选中
+OpenLux V4-Flash 发一条，回「链路已通。」，**5.3s / 首 token 5.2s**——证明新凭据名
+`OPENLUX_API_KEY` 真被解析到了。冷启动分段采样 10s 到 45s，登录步稳定挂起且 `#root` 冻结。
+测试 297 通过 / 4 失败，与上游基线一致。
+
+> **改名时被 PowerShell 坑了一次，记下来。** 用 `Get-Content -Raw` + `Set-Content -Encoding UTF8`
+> 批量替换，PS 5.1 会按 ANSI 码页读 UTF-8 文件、再写回 UTF-8 并加 BOM：八个文件全带上 BOM
+> （`JSON.parse` 直接失败），含中文的两个还多了一层乱码。**在这个仓库里批量改文件不要走
+> `Get-Content`/`Set-Content`**，用 Node 读写 Buffer，或者逐处精确替换。
+
+**阶段 0 剩下的**：用 OpenLux 的 key 跑通一条对话；接 Windows 代码签名证书
 （`scripts/package-win.ts` 支持 PFX `win_csc_link`）；出一次安装包验能装能起。
 
 ### 阶段 1 · 登录与账号（2 周）· 闸门已通过
@@ -572,12 +602,12 @@ loopback **HTTP 200 / 12301 字节**；`typecheck` 干净。
 | 注册方自持 readiness、文案、弹窗外壳，自己决定何时 `complete()` | 同上 | 「没登录就不放行」是槽位本来的语义，不用另造门禁 |
 | 内核那步凭据**自判该不该出现**：「只要用户已经能触达任何一个提供方，它就直接完成而不渲染」 | `ui-settings-models/README.zh.md:11` | 我们写完凭据它自动消失，**不需要压制** |
 | `OnboardingSurface` / `Modal` / `Button` / `Input` / `StateDot` 均已导出 | `ui-primitives/src/index.ts:18-20` | 这一步能用内核原件搭，长得跟原生一致 |
-| 模型页收密钥：只问密钥不问变量名，存进 profile 的引用；profile 无引用则派生 `<ROUTE>_API_KEY` | `README.zh.md:7` | **凭据名是内核约定，不是口味**：路由 id 是 `yunwu` → 必须叫 `YUNWU_API_KEY` |
+| 模型页收密钥：只问密钥不问变量名，存进 profile 的引用；profile 无引用则派生 `<ROUTE>_API_KEY` | `README.zh.md:7` | **凭据名是内核约定，不是口味**：路由 id 是 `openlux` → 必须叫 `OPENLUX_API_KEY` |
 | 删除一行**仅当**引用等于该派生目标时才清凭据 | `README.zh.md:34` | 名字对不上，用户从模型页删账号就删不干净 |
 
 **所以登录的落点是**：一个客户端插件把登录注册进 `settings.onboarding`（order 在内核凭据步之前），
-登录成功后 `credentials.set('YUNWU_API_KEY', sk)` 再 `complete()`。至此内核凭据步自行完成，
-模型选择器里的云雾路由拿到密钥即可用——baseURL 早已烤在组合基座里（见「中转分片错位」一节）。
+登录成功后 `credentials.set('OPENLUX_API_KEY', sk)` 再 `complete()`。至此内核凭据步自行完成，
+模型选择器里的 OpenLux 路由拿到密钥即可用——baseURL 早已烤在组合基座里（见「中转分片错位」一节）。
 
 原计划里「新写把 `sk-` 与 baseUrl 落进 dsh 配置的那一层」**缩成一次 `credentials.set`**。
 
@@ -605,7 +635,7 @@ tsdown 按 browser 单独打成 `lib/client.js`）里注册一个 order `-50` �
 运行期要用到的模块得进 `package.json` 的 `dsh.client.inject`，那是模块加载序，
 和导出的 `inject`（cordis 服务）是两回事，别混。
 
-#### 插件住哪：自建包 `yw-plugin-account`，骨架已通真机
+#### 插件住哪：自建包 `openlux-plugin-account`，骨架已通真机
 
 探针借的是上游的 `dsh-plugin-desktop`。业务代码不该住在那里——`git subtree pull` 会变脏，
 `brand.ts` 那次收口正是为了躲这个。定为自建包，代价是先答清「它怎么被 profile 解析到」。
@@ -622,9 +652,9 @@ tsdown 按 browser 单独打成 `lib/client.js`）里注册一个 order `-50` �
 
 | 要问的 | 结果 |
 |---|---|
-| 闭包投影认不认我们的包 | `profiles/node_modules/yw-plugin-account` 链接已生成，指向工作区目录 |
-| 客户端 bundle 送不送 | 启动图第 40 项：`/plugins/yw-plugin-account/client.js?rev=970752cdd1d5` |
-| 槽位注册生效吗 | 「登录云雾」整屏挂起，`#root` 被冻结 |
+| 闭包投影认不认我们的包 | `profiles/node_modules/openlux-plugin-account` 链接已生成，指向工作区目录 |
+| 客户端 bundle 送不送 | 启动图第 40 项：`/plugins/openlux-plugin-account/client.js`（rev 每次构建都变，别记死） |
+| 槽位注册生效吗 | 「登录 OpenLux」整屏挂起，`#root` 被冻结 |
 | 交棒对吗 | 点过之后步消失、应用解冻、无人顶上 |
 
 `dsh-plugin-desktop` 测试 **297 通过 / 4 失败**，那 4 条是 Windows 上跑 macOS DMG 与
@@ -665,7 +695,7 @@ import 了 katex 的样式表）。试过把它们逐个声明上：警告从 7 
 
 1. **环境变量会遮蔽凭据写入，而且是硬失败。** `credentials-local/src/index.ts:410` 的
    `assertUnshadowed`：继承的环境变量排在文件层之上，被它遮蔽的写入直接抛错而不是静默无效。
-   用户机器上凑巧有 `YUNWU_API_KEY` 就登录写不进去——要给一条能读懂的话，不能吐原始错误。
+   用户机器上凑巧有 `OPENLUX_API_KEY` 就登录写不进去——要给一条能读懂的话，不能吐原始错误。
 2. **登录成功不能被配置写入失败拖垮。** 老壳的 `writeOpenClawConfig` 刻意不把失败上抛成登录失败
    （`config-writer.ts:1029-1038` 记着那次「换账号时配置整批被拒、用户卡在登录页反复重试」的事故）。
    新壳里 `credentials.set` 失败要走同一条纪律：登录态先落，配置失败单独提示。

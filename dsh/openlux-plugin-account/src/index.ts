@@ -1,5 +1,5 @@
 /**
- * Host loader entry for the Yunwu account plugin.
+ * Host loader entry for the OpenLux account plugin.
  *
  * Empty for now: the sign-in step lives entirely in `./client`. The host half
  * exists because a composition entry loads the package's main export, and
@@ -8,5 +8,5 @@
  * balance endpoints answer without CORS headers) will move in here.
  */
 
-/** Host plugin body — no host-side behavior yet. */
+/** Host plugin body 鈥?no host-side behavior yet. */
 export function apply(): void {}
