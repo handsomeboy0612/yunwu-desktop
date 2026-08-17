@@ -35,6 +35,7 @@ import { signIn } from './account/auth.ts'
 import { BalanceReader } from './account/balance.ts'
 import { fetchCaptcha, fetchCaptchaConfig, verifyCaptcha, type CaptchaType } from './account/captcha.ts'
 import { clearSession, readSession } from './account/session.ts'
+import { syncModels } from './models/sync.ts'
 
 /**
  * Logical channel owned by this plugin. The browser addresses it as
@@ -99,6 +100,19 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     }
   }, { authority: 'loopback' })
+
+  // Deferred startup work belongs to this fiber. A detached promise is not a
+  // resource cordis tracks, so it goes in an `effect` whose disposer aborts it:
+  // a hot reload of this plugin then cannot leave a write racing its successor.
+  //
+  // Running it at mount costs no network on a machine that already has a list
+  // (`models/sync.ts` reaches the console only to seed), so what the first
+  // screen waits on is unchanged.
+  ctx.effect(() => {
+    const stop = new AbortController()
+    void syncCatalog(ctx, baseUrl, 'startup', stop.signal)
+    return () => stop.abort()
+  })
 }
 
 /**
@@ -140,6 +154,11 @@ async function route(
 
     case 'balance':
       return { ok: true, value: await balance.read(forceOf(payload), signal) }
+
+    // Hand refresh. Mount and sign-in run their own rounds, so this is for the
+    // case where the account gained models after both.
+    case 'models.sync':
+      return { ok: true, value: await syncModels(ctx, { baseUrl, apiKey: () => apiKey(ctx) }, signal) }
 
     default:
       // The error-code union belongs to the kernel and cannot grow a row from
@@ -242,7 +261,43 @@ async function runSignIn(
         : `密钥保存失败：${detail}`,
     }
   }
+  // Seeding needs the key that was just stored, so a fresh account gets its
+  // list here rather than at the next launch. Detached on purpose: a slow
+  // square must not hold the sign-in screen open.
+  void syncCatalog(ctx, baseUrl, 'sign-in')
   return { kind: 'ok', userId: outcome.userId, username: outcome.username }
+}
+
+/** Read the stored key, treating any credential fault as "not signed in yet". */
+async function apiKey(ctx: Context): Promise<string | undefined> {
+  return await ctx.credentials.resolve(API_KEY_REF).then(hit => hit?.value).catch(() => undefined)
+}
+
+/**
+ * Run one catalog sync and say so in the log.
+ *
+ * Failures stay here: the sync is a background correction, and an installation
+ * whose list is a round out of date is in exactly the state it was in before
+ * the round started.
+ * @param ctx - host context.
+ * @param baseUrl - console origin.
+ * @param reason - what triggered it, for the log line.
+ * @param signal - cancellation, when the caller owns a lifetime.
+ */
+async function syncCatalog(ctx: Context, baseUrl: string, reason: string, signal?: AbortSignal): Promise<void> {
+  try {
+    const outcome = await syncModels(ctx, { baseUrl, apiKey: () => apiKey(ctx) }, signal)
+    if (outcome.changed) {
+      ctx.logger.info(`openlux: model list synced (${reason}): ${outcome.models} models, `
+        + `${outcome.described ?? 0} with a thinking declaration`)
+    } else {
+      ctx.logger.debug(`openlux: model sync (${reason}) changed nothing: ${outcome.skipped}`)
+    }
+  } catch (error: unknown) {
+    if (signal?.aborted === true) return
+    ctx.logger.warn(`openlux: model sync (${reason}) failed; leaving the list as it was`)
+    ctx.logger.warn(error)
+  }
 }
 
 /**
@@ -275,4 +330,4 @@ function forceOf(payload: unknown): boolean {
  * `connection.rpc.handle` registers the route through the *calling* fiber's
  * context, so it has to resolve here.
  */
-export const inject = ['connection', 'webServer', 'credentials']
+export const inject = ['connection', 'webServer', 'credentials', 'settings']

@@ -1010,8 +1010,10 @@ schema 默认 → 注册方的 composition `base`（来自 `cordis.yml`）→ �
 
 ### 阶段 2 · 模型（2 周）
 
-搬 `model-catalog.ts` + `model-capabilities.ts`（1,429 行判据），
-重写配置写入的键映射，模型选择器决定是复用 `dsh-client-ui-settings-models` 还是保留我们的。
+~~搬 `model-catalog.ts` + `model-capabilities.ts`（1,429 行判据），重写配置写入的键映射，
+模型选择器决定是复用 `dsh-client-ui-settings-models` 还是保留我们的。~~
+**这段计划 2026-08-17 作废**，理由见下面「能力判据不用我们再养」一节：
+内核自带一份逐模型实测的能力库，那 1,429 行和它配套的服务端下发通道都不必搬。
 
 #### 闸门已通过（2026-08-17）：dsh 怎么表达思考档位
 
@@ -1064,11 +1066,144 @@ schema 默认 → 注册方的 composition `base`（来自 `cordis.yml`）→ �
 map for dispatch to send*）。所以「关思考」有两种表达：`off: null` = 不发这个参数就是不思考；
 `off: '<wire>'` = 发这个特定值。我们现在只有前一种，`qwen` 族那些「关不掉」的模型
 值得用后一种再试一次。
-- **复验判据**：`scripts/verify-search-capability.mjs` 的 17 条断言全过
-  （判据是纯函数 + 真机快照，换内核不该让它们变红）；广场过滤后的对话池条数与换内核前一致；
-  出图 / 视频 / 语音三档的可选集合与换内核前一致。
 - **注意**：模型池**不缓存**是刻意决定（能不能调到取决于渠道分组与令牌路由，
   缓存住会骗人），继续保持。
+
+#### 能力判据不用我们再养：内核自带一份，逐模型实测的（2026-08-17 五条真机）
+
+原计划要搬 `model-capabilities.ts` 的 1,429 行家族表，外加 `model-profiles.ts` 那条
+「服务端下发能力覆盖」通道。**两样都不搬了**，因为下面五件事逐条量过：
+
+**一、内核自带 776 个模型的能力库。** `llm-pi-ai` 依赖的
+`@earendil-works/pi-ai/providers/all` 里有 37 家提供方、1,109 条模型条目、去重 776 个 id，
+**其中 556 条带思考声明**。一条条目长这样（`deepseek-v4-flash`）：
+
+```
+reasoning: true,  contextWindow: 1000000,  maxTokens: 384000,
+compat: { thinkingFormat: 'deepseek', requiresReasoningContentOnAssistantMessages: true },
+thinkingLevelMap: { minimal: null, low: null, medium: null, high: 'high', max: 'max' }
+```
+
+——正是我们那 1,429 行费力算出来的四个维度，而且是**逐模型给的，不是按族猜的**。
+我们被咬过的「同族两种方言」（`glm-4.5` 走 `enable_thinking` / `glm-5` 走 `thinking:{type}`）
+在这里天然不成立问题：它们本来就是两条独立条目。
+
+**二、裸 id 能继承，条件是路由键等于内置提供方名。** schema 注释原话：*an explicit list
+replaces it, **each entry defaulting its unset fields from the installed model of the same id***
+（`llm-pi-ai/src/config.ts:79-83`）。真机验证——路由键 `deepseek`、`models: [{ id: 'deepseek-v4-flash' }]`、
+外加我们的 `baseURL` 与 `api: openai-completions`：
+
+```
+deepseek-v4-flash → name "DeepSeek V4 Flash", reasoning true,
+  thinkingLevelMap {minimal:null, low:null, medium:null, high:"high", max:"max"},
+  thinkingFormat "deepseek", contextWindow 1000000,
+  baseUrl "https://api.openlux.ai/v1"   ← 我们的覆盖活着
+```
+
+同一份写在 `openlux` 路由上则直接抛错（`contextWindow must be a positive integer`）——
+**内置目录没有这条路由，什么都继承不到**，字段得自己给全。13 家厂商路由逐条试过
+强制 `openai-completions`，全部通过，方言也跟着继承（`zai` → `zai`、`moonshotai` → `deepseek`、
+`qwen-token-plan` → `qwen`）。
+
+**三、覆盖率量到了：广场 249 条对话模型里，内置目录认得 83 条（33%），
+轻度归一化（剥日期后缀）后 101 条（41%）。** 缺口按家族：qwen 46、gpt 16（多是日期变体，
+基名本身有）、llama 15、deepseek 14（`v3`/`r1` 这些老的）、doubao 13、grok 9、ernie 8、glm 6、qwq 5。
+**认得的那 83 条恰好是用户真在用的头部**（GPT / Gemini / Claude / DeepSeek / Kimi / GLM）。
+
+**四、价格这条风险不存在。** 内置条目带着官方厂商的 `cost`，而我们的账单走中转站自己的倍率。
+但 `catalog.ts:29-30` 写着：*The harness never reads pi-ai's cost metadata — `replay.ts`
+zeroes it and no consumer reports spend.* 内核既不显示也不消费花费，不会在钱上误导用户。
+
+**五、那条服务端下发通道从来没上线过。** `admin-cloud/src/api/desktop-model-profile.ts`
+有整套管理端封装（列表 / 批量导入 / 一键实测 / 灰度开关），桌面端也有 `model-profiles.ts`
+消费它——但 MCP 查两个站的库，**`desktop_model_profiles` 这张表在海外站和主站都不存在**
+（`information_schema` 里 `%desktop%` / `%profile%` / `%thinking%` 只捞到 `billing_profiles`
+和 `corporate_payee_profiles`）。也就是说这层覆盖在生产上一天都没生效过，
+我们一直靠的就是那 1,429 行家族表。
+
+**于是阶段 2 的形状是：**
+
+| 层 | 谁给 | 覆盖 |
+|---|---|---|
+| 清单（哪些模型） | 用户自己的 key：`/v1/models` ∩ 广场 `/api/pricing_new` | 249 条对话模型 |
+| 能力（会不会思考 / 档位 / 方言） | **内核自带目录，同步时按 id 取** | 101 条 |
+| 长尾的能力 | **不声明** = 内核的安全默认（*a hand-declared model has none and does not reason*） | 148 条 |
+
+长尾不声明是有意的：平台库里只有 `tags` 和 `model_type`，**没有任何思考能力字段**
+（`models` 表 27 列逐列看过），而 `tags` 里那个「推理」正是当年把向量模型误判成推理模型的
+那个坑。判不出来就不判，比猜错强——猜错的代价我们见过，是 `glm-4.5` 收到
+`reasoning_effort` 直接 400。真要给某条长尾开思考，是在组合层加一行显式声明，
+不是再造一条服务端往返。
+
+#### 写入通道已验通：宿主插件能写别人的设置段，pi-ai 免重启认账（2026-08-17 真机）
+
+`settings.mutate(ns, [{ op: 'set', path: [...], value }])` 是路径级写入
+（`settings/src/index.ts:200-227`），比 `update` 的整块合并精确——只动
+`providers.openlux.models` 一个路径，兄弟键不碰。真机：宿主插件写进第三条模型后，
+`settings.get('llm-pi-ai')` 立刻能读到，**组合层的 `baseURL` / `apiKeyEnv` /
+`streamIdleTimeoutMs` 全部原样保留**，选择器**不重启**就列出了新模型。
+`installSettingsSection` 的 `onChange` 会让 pi-ai 重注册路由（`llm-pi-ai/src/index.ts:284-298`）。
+
+**清单只存选中的那几条，不存整池。** 老壳栽过一次并写在注释里：登录时照单全收 `/v1/models`
+把配置从 30KB 推到 124KB，换账号时新配置 29KB 撞上内核的体积骤降保护被整批拒写，
+人卡在登录页看 `Config write rejected`。DSH 这边没有那道保护，但形状同样不能变——
+**内核的模型选择器没有搜索框**（`ui-model-selection/src/client/ModelSelect.tsx` 全文无
+filter/search），它就是为一份策展好的小清单设计的。铺 249 条进去是给用户挖坑。
+
+可选池那一半内核也已经有了：模型页的「获取模型」按钮走
+`ctx.llm.registerModelDiscovery`，`discovery.ts:11-14` 原话——*Nothing here is stored:
+the reply is candidate metadata the surface offers for adoption.* **现拉、不落盘**，
+与老壳「可选池不缓存」同一条纪律。它打的是 `/v1/models`（481 条，不过广场那一关），
+这是个已知差距，记在下面待办里。
+
+#### 阶段 2 已落地：同步作业跑在内核自己的 effect 里（2026-08-17 真机）
+
+三个新模块，都在 `openlux-plugin-account`：`models/pool.ts` 取可调（`/v1/models`）
+∩ 广场上架（`/api/pricing_new` 的 chat 类）；`models/capabilities.ts` 按 id 从 pi-ai
+装机目录取能力；`models/sync.ts` 合成一次 `settings.mutate` 写入。
+
+**触发点是 `ctx.effect`，不是让浏览器挂载后来踢一脚。** 一开始照老壳「首屏不放网络往返」
+那条教训做成了客户端调用的显式端点，联网查完文档改掉了：cordis 对「插件自己起的、
+自己要收的东西」的答案就是 `ctx.effect(() => { …; return dispose })`
+（`develop/cordis-tutorial/02-lifecycle-and-effects`），卸载与热重载时 disposer 自动跑，
+用不着浏览器代劳。也查了 `ctx.jobs`——**那不是这个用途**：它是给 agent 看的后台作业
+（有 owner、`start` 会拒绝没有 controller 服务的 owner、模型能 read/kill，
+`jobs/src/index.ts:41-58`），拿它跑目录同步等于把我们的内务挂进模型的作业列表。
+
+那条教训本身依然成立，只是换了个方式满足：**已经有清单的机器这一轮根本不碰网络**
+（`sync.ts` 只在「用户从没定过清单」时才去拉池子），所以挂载时跑不产生首屏往返。
+登录成功后再跑一轮——那时才有密钥可播种——同样是 detached 的。另留 `models.sync`
+端点作手动刷新。
+
+真机（`DSH_HOME` 带密钥、无 `llm-pi-ai` 段）：五个策展模型全部播种成功，能力全部来自
+内核目录，**每家的方言都不一样，一行都不是我们写的**：
+
+| 模型 | reasoningEfforts | 输入 |
+| --- | --- | --- |
+| `deepseek-v4-pro` / `-flash` | `off:null high:high max:max`，另带 `compat.thinkingFormat: deepseek` | text |
+| `claude-opus-4-8` | `off:null xhigh:xhigh max:max` | text, image |
+| `gemini-3.1-pro-preview` | `low:LOW high:HIGH`（Google 的大写枚举） | text, image |
+| `gpt-5.4` | `off:none low medium high xhigh` | text, image |
+
+界面复验：推理等级子菜单**跟着模型换**——DeepSeek 是 Off/High/Max，GPT-5.4 是
+Off/Low/Medium/High/Xhigh。发一条真消息（GPT-5.4 经 `api.openlux.ai`）5 秒回
+`PONDEROSA`，带 Think 块。
+
+**归属划分**：用户拥有成员资格与标签（模型页只编辑 `id`/`name`/`contextWindow`/`maxTokens`，
+保存时先展开原条目），我们拥有思考声明（`reasoningEfforts` / `compat` 全壳没有编辑器）。
+同步**从不删模型**——广场打个嗝就把用户策展好的清单静默清空，这种事不可逆。
+
+#### 顺带摘掉 `llm-deepseek`：四条 DeepSeek 里有两条是陷阱（2026-08-17 真机）
+
+播种后选择器列出 **7 条**而不是 5 条。多出的两条不是我们的出厂路由（那两条已被数组替换
+掉了），是基础包 `llm-deepseek` 行自带的 `deepseek-official` 路由
+（`bundle/base/cordis.patch.yml:450`，无 config，模型来自适配器 schema 的默认值）。
+
+它们比「多余」更糟：普通用户没有 `DEEPSEEK_API_KEY`，点了就是 MISSING_CREDENTIAL；
+而谁真给它配上并指向我们的中转，命中的正是本文上面那条分片错位——空 callId 落盘之后
+**会话再也打不开**。所以在 `cordis.patch.yml` 里给它 `disabled: true`：不删行，因为行是
+上游的，写成 disabled 能让合并冲突时看见我们的意图，也给自带 DeepSeek 密钥的人留了开关。
+改完真机复验，选择器正好 5 条。
 
 ### 阶段 3 · 专家、技能、专家团（3 周）
 

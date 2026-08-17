@@ -79,6 +79,20 @@
           - id: deepseek-v4-flash
             name: OpenLux V4-Flash
 
+# The base bundle's native DeepSeek adapter, switched off rather than left to
+# sit beside ours. Mounted, it publishes its own `deepseek-official` route with
+# two default models, so the picker offers four DeepSeek rows of which two need
+# a DEEPSEEK_API_KEY nobody signing in with an OpenLux account has. Picking one
+# is worse than an error: that adapter is the one whose stream parser our relay
+# breaks (see the note above this file's llm-pi-ai row), and the empty callId it
+# then persists makes the session refuse to reopen.
+#
+# `disabled` rather than a dropped row: the row is upstream's, so this states our
+# intent where a merge conflict will show it, and a user who brings their own
+# DeepSeek key can flip it back.
+- id: llm-deepseek
+  disabled: true
+
 # Point new installs at our route. The base bundle ships
 # `provider: deepseek-official` (bundle/base/cordis.patch.yml:63-67), which asks
 # for a DEEPSEEK_API_KEY nobody signing in with an OpenLux account will ever

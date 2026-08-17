@@ -3827,7 +3827,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@earendil-works/pi-ai@npm:^0.82.1":
+"@earendil-works/pi-ai@npm:0.82.1, @earendil-works/pi-ai@npm:^0.82.1":
   version: 0.82.1
   resolution: "@earendil-works/pi-ai@npm:0.82.1"
   dependencies:
@@ -9200,6 +9200,7 @@ __metadata:
     "@deepseek-ai/dsh-credentials": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-settings": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-timeout": "npm:0.1.0-rc.6"
+    "@earendil-works/pi-ai": "npm:0.82.1"
     "@types/node": "npm:24.10.1"
     "@types/react": "npm:^18"
     react: "npm:18.3.1"
@@ -9219,6 +9220,7 @@ __metadata:
     "@deepseek-ai/dsh-credentials": 0.1.0-rc.6
     "@deepseek-ai/dsh-settings": 0.1.0-rc.6
     "@deepseek-ai/dsh-timeout": 0.1.0-rc.6
+    "@earendil-works/pi-ai": 0.82.1
     react: 18.3.1
   languageName: unknown
   linkType: soft

@@ -16,6 +16,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
+import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { LOCALE_SETTINGS_NAMESPACE, type LocaleSettings } from '@deepseek-ai/dsh-client-locale'
 
 /**
@@ -77,7 +78,10 @@ export function normalizeBase(baseUrl: string): string {
  */
 function acceptLanguage(ctx: Context): string {
   const settings = ctx.get('settings')
-  const locale = settings?.get(LOCALE_SETTINGS_NAMESPACE) as LocaleSettings | undefined
+  // The plain string the locale package exports is not the branded namespace
+  // `settings.get` takes; the kernel's own callers brand it at the call site
+  // (`client/locale/src/index.ts:19`).
+  const locale = settings?.get(settingsNamespace(LOCALE_SETTINGS_NAMESPACE)) as LocaleSettings | undefined
   return locale?.preference === 'en' ? 'en-US' : 'zh-CN'
 }
 
