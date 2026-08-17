@@ -557,8 +557,54 @@ loopback **HTTP 200 / 12301 字节**；`typecheck` 干净。
 
 ### 阶段 1 · 登录与账号（2 周）· 闸门已通过
 
-把 946 行账号代码原样搬过来，新写"把 `sk-` 与 baseUrl 落进 dsh 配置"的那一层，
-登录页与余额行挂进 slot。
+> **2026-08-17 重写这一节。** 原文写的是「把 946 行账号代码原样搬过来」。前提变了：
+> 外壳以 DSH 为主，老壳只作参考，所以这一阶段不是搬运而是**照内核给的面重设计**。
+> 下面「闸门已验」那部分（配置层的真机结论）仍然有效，保留原文。
+
+#### 重设计：登录是内核引导队列里的一步，不是我们自己的全屏门
+
+查了 `client/ui-settings/src/client/contract/slots.ts` 与
+`client/ui-settings-models/README.zh.md`（这两份是本节全部结论的出处）：
+
+| 内核已经有的 | 出处 | 对我们的意义 |
+|---|---|---|
+| 有序首启引导队列 `settings.onboarding`，**外壳一次只挂一步** | `contract/slots.ts:63-73` | 登录注册成其中一步，排在内核凭据步之前 |
+| 注册方自持 readiness、文案、弹窗外壳，自己决定何时 `complete()` | 同上 | 「没登录就不放行」是槽位本来的语义，不用另造门禁 |
+| 内核那步凭据**自判该不该出现**：「只要用户已经能触达任何一个提供方，它就直接完成而不渲染」 | `ui-settings-models/README.zh.md:11` | 我们写完凭据它自动消失，**不需要压制** |
+| `OnboardingSurface` / `Modal` / `Button` / `Input` / `StateDot` 均已导出 | `ui-primitives/src/index.ts:18-20` | 这一步能用内核原件搭，长得跟原生一致 |
+| 模型页收密钥：只问密钥不问变量名，存进 profile 的引用；profile 无引用则派生 `<ROUTE>_API_KEY` | `README.zh.md:7` | **凭据名是内核约定，不是口味**：路由 id 是 `yunwu` → 必须叫 `YUNWU_API_KEY` |
+| 删除一行**仅当**引用等于该派生目标时才清凭据 | `README.zh.md:34` | 名字对不上，用户从模型页删账号就删不干净 |
+
+**所以登录的落点是**：一个客户端插件把登录注册进 `settings.onboarding`（order 在内核凭据步之前），
+登录成功后 `credentials.set('YUNWU_API_KEY', sk)` 再 `complete()`。至此内核凭据步自行完成，
+模型选择器里的云雾路由拿到密钥即可用——baseURL 早已烤在组合基座里（见「中转分片错位」一节）。
+
+原计划里「新写把 `sk-` 与 baseUrl 落进 dsh 配置的那一层」**缩成一次 `credentials.set`**。
+
+#### 老代码重新判定：活下来的比原先估的少
+
+| 老代码 | 行数 | 命运 | 理由 |
+|---|---|---|---|
+| `yunwu-auth.ts`（登录 + 换 `sk-`） | 246 | **活，几乎原样** | 纯 fetch，内核不做账号，没有对应物 |
+| `yunwu-captcha.ts` + `Captcha.tsx`（go-captcha 五模式） | 157 + 323 | **活，换宿主** | 内核没有人机验证；从 renderer 组件变成引导步里的一段 |
+| `yunwu-account.ts`（余额四档降级） | 254 | **活** | 挂进侧栏槽位 |
+| `account-session.ts` + `secret-box.ts` | 87 + 47 | **活** | 会话 cookie 仍走我们自己的文件：内核凭据库是给 API key 的，cookie 权限更大且要按 `userId + baseUrl` 记账 |
+| `yunwu-client.ts`（`/v1/models` 校验令牌） | 50 | **活** | 登录时确认令牌真能调 |
+| `Activate.tsx` 的四步编排 | 513 | **大部分死** | 内核的引导队列接管排序与弹窗；只剩登录表单本身 |
+| `store.ts` / `activation.json` | 106 | **死** | 三样东西各归各位：凭据进凭据库、baseURL 进组合基座、模型选择进 settings，不再攒一个大 JSON（顺带解决老壳「渲染进程内存里有明文 `sk-`」那个问题） |
+| `ModelPicker` + `MediaPicker` | 920 | **死（待阶段 2 确认）** | 模型页已能编辑路由的模型列表并做端点询问（`llm.discoverModels`） |
+| `config-writer.ts` + `gateway-client.ts` | 3,273 | **死** | 写的每个键都是 openclaw schema；其中约 630 行是为绕开 openclaw 写入语义而存在的（体积骤降保护、渲染队列分槽、baseHash 快照、脱敏还原），dsh 这边没有这些概念 |
+
+#### 这一阶段要自己验的三条
+
+1. **环境变量会遮蔽凭据写入，而且是硬失败。** `credentials-local/src/index.ts:410` 的
+   `assertUnshadowed`：继承的环境变量排在文件层之上，被它遮蔽的写入直接抛错而不是静默无效。
+   用户机器上凑巧有 `YUNWU_API_KEY` 就登录写不进去——要给一条能读懂的话，不能吐原始错误。
+2. **登录成功不能被配置写入失败拖垮。** 老壳的 `writeOpenClawConfig` 刻意不把失败上抛成登录失败
+   （`config-writer.ts:1029-1038` 记着那次「换账号时配置整批被拒、用户卡在登录页反复重试」的事故）。
+   新壳里 `credentials.set` 失败要走同一条纪律：登录态先落，配置失败单独提示。
+3. **登出要清干净。** 老壳登出漏了 `providers.json` 与 `openclaw.json` 里的 `apiKey`，
+   换账号后旧令牌还在盘上。新壳只有一个落点（凭据库），顺手把这条补上。
 
 **闸门已验（2026-08-17，本机 Windows + node 24.12.0 + vitest 4.1.8）。**
 先跑内核自己那套 `packages/settings` 测试：**151 通过 / 2 跳过**；再按我们
