@@ -28,3 +28,43 @@
     printUrl: false
     surfaceContext: true
     trustedHosts: []
+
+# Our relay route, supplied as the composition base for the `llm-pi-ai` adapter
+# the Web bundle mounts dormant. It belongs here rather than in the user's
+# settings document because none of it is a per-user fact: the endpoint is our
+# own service, and apiKeyEnv is a reference the credential store answers per
+# request, not a secret.
+#
+# Why this adapter and not `llm-deepseek`, which stays mounted beside it: the
+# relay shards tool calls in a way the strict adapter cannot survive.
+# Continuation deltas carry `"name": ""` and some first deltas omit `id`;
+# translate.ts assigns both verbatim on `!== undefined`, so the empty string
+# overwrites the name the first delta already delivered and the call arrives as
+# `unknown tool ""`. Worse, a turn whose first delta omitted `id` persists a
+# tool result with an empty callId, which core/session refuses on reload — the
+# session never opens again. `llm-pi-ai` captures id and name once at
+# `toolcall_start` and skips empty names (stream.ts:168-169), so the same
+# stream parses. Both models called tools first try through this route; every
+# attempt through the other one failed. `llm-deepseek` is left alone because it
+# is still correct against DeepSeek directly.
+- id: llm-pi-ai
+  config:
+    providers:
+      yunwu:
+        displayName: 云雾
+        # A route pi-ai's installed catalog does not ship must name its protocol.
+        api: openai-completions
+        baseURL: https://api.openlux.ai/v1
+        apiKeyEnv: DEEPSEEK_API_KEY
+        # Default is 300s (llm-pi-ai/src/config.ts:35). A relay channel that
+        # stalls should reach the retry plugin as a failure while the user is
+        # still watching, not after five minutes of an idle spinner.
+        streamIdleTimeoutMs: 90000
+        # The offline floor, not the catalog. Settings layers merge per key, but
+        # an array replaces the layer below it wholesale, so the catalog pulled
+        # from admin-server overwrites this list cleanly rather than adding to it.
+        models:
+          - id: deepseek-v4-pro
+            name: 云雾 V4-Pro
+          - id: deepseek-v4-flash
+            name: 云雾 V4-Flash
