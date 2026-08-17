@@ -34,7 +34,17 @@ function normalizeModels(models: unknown): ModelInfo[] {
           reasoning: !!mi.reasoning,
           vision: !!mi.vision,
           tools: mi.tools !== false,
-          category: mi.category ?? 'chat'
+          category: mi.category ?? 'chat',
+          // 协议覆盖必须原样带过来:丢了它,只吃 /v1/responses 的那批模型会被当成
+          // 普通 completions 模型下发,上游直接回「不是 chat 模型」。
+          ...(mi.api ? { api: mi.api } : {}),
+          // 思考声明同理:掉在这里的话,界面会退回"只有开关"、配置层也写不出
+          // thinkingLevelMap,`gpt-5-pro` 这种"只收 high"的族就会被按普通三档下发。
+          ...(mi.thinkingLevels?.length ? { thinkingLevels: mi.thinkingLevels } : {}),
+          ...(mi.defaultThinkingLevel ? { defaultThinkingLevel: mi.defaultThinkingLevel } : {}),
+          ...(mi.canDisableThinking === false ? { canDisableThinking: false } : {}),
+          ...(mi.thinkingEffort === false ? { thinkingEffort: false } : {}),
+          ...(mi.thinkingFormat ? { thinkingFormat: mi.thinkingFormat } : {})
         } as ModelInfo
       }
       return null
@@ -51,7 +61,9 @@ export function loadActivation(): ActivationConfig | null {
   try {
     const raw = readFileSync(file, 'utf-8')
     const parsed = JSON.parse(raw) as ActivationConfig
-    if (!parsed.baseUrl || !parsed.token) {
+    // userId 缺失(早期版本写的激活态)一律当作未激活,让用户重登一次换到新身份口径。
+    // 这一步换来的是「有激活态就一定有 userId」,模型清单那侧因此不需要任何回退分支。
+    if (!parsed.baseUrl || !parsed.token || typeof parsed.userId !== 'number') {
       return null
     }
     return { ...parsed, models: normalizeModels(parsed.models) }

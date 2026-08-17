@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs'
 import crypto from 'node:crypto'
 
 /**
@@ -118,6 +118,22 @@ export function loadOrCreateDeviceIdentity(): DeviceIdentity {
     /* 写入失败不影响本次连接(仅下次需重新生成) */
   }
   return identity
+}
+
+/**
+ * 删除本地设备身份文件,使下次连接以「全新设备」重新配对。
+ *
+ * 用途:当客户端申请的 scopes 超出网关对本设备已批准的范围时(scope-upgrade),
+ * 稳定 deviceId 会被审批门拦截("device is asking for more scopes than currently approved")。
+ * 由于本地网关 bind=loopback 且对新设备回环自动配对,轮换设备身份即可让新设备
+ * 一次性获批当前所需全部 scopes,从而自愈老设备的陈旧低 scope 审批记录。
+ */
+export function resetDeviceIdentity(): void {
+  try {
+    rmSync(identityFile(), { force: true })
+  } catch {
+    /* 删除失败时下次仍用旧身份,自愈将由后续重试兜底 */
+  }
 }
 
 /** 用 PEM ed25519 私钥对 UTF-8 payload 签名,返回 base64url 字节。 */

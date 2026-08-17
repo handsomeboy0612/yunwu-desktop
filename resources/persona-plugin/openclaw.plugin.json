@@ -1,0 +1,15 @@
+{
+  "id": "yunwu-persona",
+  "name": "云雾专家人设",
+  "description": "按会话注入专家人设",
+  "version": "1.0.0",
+  "enabledByDefault": true,
+  "activation": {
+    "onCapabilities": ["hook"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

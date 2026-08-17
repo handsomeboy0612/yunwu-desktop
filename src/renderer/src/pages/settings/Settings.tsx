@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   X,
   User,
@@ -7,10 +7,13 @@ import {
   Keyboard,
   Database,
   Info,
+  CircleHelp,
+  MessageSquarePlus,
   FolderOpen,
   LogOut
 } from 'lucide-react'
 import type { ActivationConfig } from '@shared/types'
+import FloatingMask from '../../components/FloatingMask'
 import ModelsPage from './Models'
 
 interface Props {
@@ -21,11 +24,20 @@ interface Props {
   onSignOut: () => void
   /** 模型配置变更后回调(父级刷新可选模型)。 */
   onModelsChanged?: () => void
+  /** 打开全局反馈弹窗。 */
+  onOpenFeedback: () => void
   /** 首次打开时定位到的页签(默认账户)。 */
   initial?: PageId
 }
 
-export type PageId = 'account' | 'models' | 'system' | 'shortcuts' | 'data' | 'about'
+export type PageId =
+  | 'account'
+  | 'models'
+  | 'system'
+  | 'shortcuts'
+  | 'data'
+  | 'help'
+  | 'about'
 
 interface NavItem {
   id: PageId
@@ -41,6 +53,7 @@ const NAV: NavItem[] = [
   { id: 'system', label: '系统设置', icon: SlidersHorizontal },
   { id: 'shortcuts', label: '快捷键', icon: Keyboard, soon: true },
   { id: 'data', label: '数据管理', icon: Database, soon: true },
+  { id: 'help', label: '帮助与反馈', icon: CircleHelp },
   { id: 'about', label: '关于', icon: Info }
 ]
 
@@ -54,13 +67,14 @@ export default function Settings({
   onClose,
   onSignOut,
   onModelsChanged,
+  onOpenFeedback,
   initial = 'account'
 }: Props) {
   const [page, setPage] = useState<PageId>(initial)
   const current = NAV.find((n) => n.id === page) ?? NAV[0]
 
   return (
-    <div className="settings-mask" onClick={onClose}>
+    <FloatingMask className="settings-mask" onClick={onClose}>
       <div className="settings-shell" onClick={(e) => e.stopPropagation()}>
         <aside className="settings-nav">
           <div className="settings-nav-brand">设置</div>
@@ -92,11 +106,37 @@ export default function Settings({
             )}
             {page === 'models' && <ModelsPage onChanged={onModelsChanged} />}
             {page === 'system' && <SystemPage />}
+            {page === 'help' && <HelpPage onOpenFeedback={onOpenFeedback} />}
             {page === 'about' && <AboutPage />}
           </div>
         </section>
       </div>
-    </div>
+    </FloatingMask>
+  )
+}
+
+/** 帮助与反馈页:入口复用标题栏的同一个反馈弹窗，不维护第二份表单状态。 */
+function HelpPage({ onOpenFeedback }: { onOpenFeedback: () => void }): React.JSX.Element {
+  return (
+    <>
+      <div className="settings-card">
+        <div className="settings-row settings-row-toggle">
+          <div className="settings-row-text">
+            <span className="settings-row-title">问题反馈</span>
+            <span className="settings-row-desc">
+              遇到异常或有产品建议时告诉我们，可附上截图与可选诊断信息。
+            </span>
+          </div>
+          <button className="btn-ghost settings-feedback-btn" onClick={onOpenFeedback}>
+            <MessageSquarePlus size={15} />
+            提交反馈
+          </button>
+        </div>
+      </div>
+      <p className="settings-hint">
+        诊断信息默认不上传；开启时也不会包含对话、工作区文件或访问令牌。
+      </p>
+    </>
   )
 }
 
@@ -160,10 +200,57 @@ function AccountPage({
   )
 }
 
-/** 系统设置页:工作区与本地引擎信息(只读)+ 打开工作区。 */
+/** 系统设置页:开关 + 工作区与本地引擎信息(只读)+ 打开工作区。 */
 function SystemPage(): React.JSX.Element {
+  /**
+   * 先按默认值(开)渲染,再用主进程的真值覆盖。
+   *
+   * 与 WorkBuddy 同口径:它渲染端也是默认 `enabled = true`,并把主进程的值镜像进
+   * localStorage 以免开关闪一下(asar 里 `local-skills-memory.ts`)。我们这一跳是本地
+   * IPC,快得多,所以不做镜像;但在读回来之前不接受点击,免得把默认值当成用户选择写回去。
+   */
+  const [memoryOn, setMemoryOn] = useState(true)
+  const [prefsReady, setPrefsReady] = useState(false)
+
+  useEffect(() => {
+    void (async () => {
+      const res = await window.api.getPrefs()
+      if (res.ok && res.data) {
+        setMemoryOn(res.data.localSkillsMemoryEnabled)
+      }
+      setPrefsReady(true)
+    })()
+  }, [])
+
   return (
     <>
+      <div className="settings-card">
+        <div className="settings-row settings-row-toggle">
+          <div className="settings-row-text">
+            <span className="settings-row-title">本地技能与记忆沉淀</span>
+            <span className="settings-row-desc">
+              自动记录本地记忆、工作日志,自动沉淀和优化技能。数据本地存储,仅在你的设备和工作空间中保留。
+            </span>
+          </div>
+          <button
+            className="settings-switch-btn"
+            role="switch"
+            aria-checked={memoryOn}
+            aria-label="本地技能与记忆沉淀"
+            disabled={!prefsReady}
+            onClick={() => {
+              const next = !memoryOn
+              setMemoryOn(next)
+              void window.api.setPrefs({ localSkillsMemoryEnabled: next })
+            }}
+          >
+            <span className={`switch${memoryOn ? ' on' : ''}`}>
+              <span className="switch-dot" />
+            </span>
+          </button>
+        </div>
+      </div>
+
       <div className="settings-card">
         <div className="settings-row">
           <span>版本</span>

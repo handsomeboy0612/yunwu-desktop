@@ -82,6 +82,7 @@ interface CaptchaDataResp {
   thumb_base64?: string
   thumb_width?: number
   thumb_height?: number
+  thumb_size?: number
   tile_x?: number
   tile_y?: number
   tile_width?: number
@@ -107,6 +108,7 @@ export async function fetchCaptcha(baseUrl: string, type: CaptchaType): Promise<
     thumbBase64: body.thumb_base64,
     thumbWidth: body.thumb_width,
     thumbHeight: body.thumb_height,
+    thumbSize: body.thumb_size,
     tileX: body.tile_x,
     tileY: body.tile_y,
     tileWidth: body.tile_width,
@@ -122,7 +124,7 @@ interface CaptchaCheckResp {
 
 /**
  * 提交答案换取一次性 captcha_token。answer 为明文(点选/滑块/旋转格式),内部 AES 加密后以 data 字段提交。
- * 校验失败(code!=0)返回空 token,由调用方决定重取或回落网页登录。
+ * 校验失败(code!=0)返回空 token。后端校验完即删这道题的 key,所以调用方只能换一道重来。
  */
 export async function verifyCaptcha(
   baseUrl: string,

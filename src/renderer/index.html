@@ -3,9 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      frame-src / media-src 放开到 https: 与本地端口,是为了案例弹窗里的产物预览(HTML 在
+      iframe、MP4 在 video)。这里不能写死后端域名:产物走的是对象存储预签名直链,域名可能是
+      S3/COS 的任意 host,而 admin-server 自身的地址也是运行时才定的(env / 开发期
+      localhost:3000 / 生产读激活配置,私有化部署更是任意域名)。口径与上面的 img-src 一致 ——
+      封面图早就是这么放的。产物 iframe 另有 sandbox 属性兜安全边界,详见 Workspace 里的注释。
+    -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; connect-src 'self' ws://127.0.0.1:18789 http://127.0.0.1:18789; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+      content="default-src 'self'; connect-src 'self' ws://127.0.0.1:18789 http://127.0.0.1:18789 http://localhost:* https:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; frame-src 'self' https: http://localhost:*; media-src 'self' blob: https: http://localhost:*;"
     />
     <title>Yunwu Desktop</title>
   </head>

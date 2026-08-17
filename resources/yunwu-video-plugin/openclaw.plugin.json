@@ -1,0 +1,17 @@
+{
+  "id": "yunwu-video",
+  "name": "云雾媒体生成",
+  "description": "走云雾接口的 video_generate / image_generate provider 与 web_search provider",
+  "version": "1.5.0",
+  "enabledByDefault": true,
+  "contracts": {
+    "videoGenerationProviders": ["yunwu-video"],
+    "imageGenerationProviders": ["yunwu-image"],
+    "webSearchProviders": ["yunwu-search"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

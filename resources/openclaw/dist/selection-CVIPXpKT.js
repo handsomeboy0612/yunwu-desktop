@@ -3996,7 +3996,7 @@ function subscribeEmbeddedAgentSession(params) {
 		reasoningMode,
 		includeReasoning: reasoningMode === "on" && canShowReasoning,
 		shouldEmitPartialReplies: !(reasoningMode === "on" && !params.onBlockReply),
-		streamReasoning: reasoningMode === "stream" && canShowReasoning && typeof params.onReasoningStream === "function",
+		streamReasoning: reasoningMode === "stream" && canShowReasoning,
 		deltaBuffer: "",
 		blockBuffer: "",
 		blockState: {
@@ -4647,7 +4647,7 @@ function subscribeEmbeddedAgentSession(params) {
 	};
 	const emitReasoningStream = (text) => {
 		if (params.silentExpected) return;
-		if (!state.streamReasoning || !params.onReasoningStream) return;
+		if (!state.streamReasoning) return;
 		const trimmed = text.trim();
 		if (!trimmed) return;
 		if (trimmed === state.lastStreamedReasoning) return;
@@ -4662,7 +4662,7 @@ function subscribeEmbeddedAgentSession(params) {
 				delta
 			}
 		});
-		params.onReasoningStream({ text: trimmed });
+		params.onReasoningStream?.({ text: trimmed });
 	};
 	const resetForCompactionRetry = () => {
 		state.hadDeterministicSideEffect = state.hadDeterministicSideEffect === true || hasCommittedMessagingToolDeliveryEvidence({

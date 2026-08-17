@@ -26,14 +26,16 @@ const buffers = new Map<string, SessionBuffer>()
 
 /** 记录一条已归一化的事件(在转发给渲染层的同时旁路写入)。 */
 export function recordAgentEvent(evt: AgentEvent): void {
+  // 并非每种事件都归属某一轮运行:成员(子会话)状态是会话级的,没有父会话的 runId。
+  const runId = 'runId' in evt ? evt.runId : undefined
   let buf = buffers.get(evt.sessionKey)
   /** 新一轮运行(runId 变化):重置缓冲,只保留当前轮。 */
-  if (!buf || (evt.runId !== undefined && buf.runId !== undefined && buf.runId !== evt.runId)) {
-    buf = { runId: evt.runId, events: [] }
+  if (!buf || (runId !== undefined && buf.runId !== undefined && buf.runId !== runId)) {
+    buf = { runId, events: [] }
     buffers.set(evt.sessionKey, buf)
   }
-  if (buf.runId === undefined && evt.runId !== undefined) {
-    buf.runId = evt.runId
+  if (buf.runId === undefined && runId !== undefined) {
+    buf.runId = runId
   }
   buf.events.push(evt)
   if (buf.events.length > MAX_PER_SESSION) {

@@ -48,4 +48,18 @@ exports.default = async function afterPack(context) {
   console.log(
     `[after-pack] kernel copied -> ${dest} (node_modules packages: ${pkgCount})`
   );
+
+  // 自研插件源码:开发期从 app.getAppPath()/resources 读,打包后落到
+  // process.resourcesPath/<name>,与内核同级。漏拷的话安装链路会找不到入口。
+  for (const name of ['persona-plugin', 'yunwu-video-plugin']) {
+    const pluginSrc = path.join(projectDir, 'resources', name);
+    const pluginDest = path.join(context.appOutDir, 'resources', name);
+    if (!fs.existsSync(path.join(pluginSrc, 'index.mjs'))) {
+      console.warn(`[after-pack] skip missing plugin source: ${pluginSrc}`);
+      continue;
+    }
+    fs.rmSync(pluginDest, { recursive: true, force: true });
+    fs.cpSync(pluginSrc, pluginDest, { recursive: true });
+    console.log(`[after-pack] plugin copied -> ${pluginDest}`);
+  }
 };

@@ -16,3 +16,11 @@
 .DS_Store
 /.env
 /.env.local
+
+# TypeScript 增量编译缓存
+*.tsbuildinfo
+
+# 工具与探针的本地残留
+/.slidep/
+/scripts/pc-out.txt
+/空白幻灯片.pptx

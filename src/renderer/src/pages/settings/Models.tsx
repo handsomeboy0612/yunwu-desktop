@@ -7,29 +7,71 @@ import {
   Sparkles,
   Image as ImageIcon,
   Wrench,
-  Lock,
   Eye,
   EyeOff,
-  Loader2,
   ChevronDown,
   Search,
-  Check
+  Check,
+  AudioLines,
+  Video
 } from 'lucide-react'
 import {
   PROVIDER_PRESETS,
   THINKING_LEVELS,
   THINKING_LABELS,
   type ChatThinking,
+  type MediaSelection,
+  type ModelInfo,
   type ProviderConfig,
   type ProviderModel,
   type ProviderPreset,
   type ProviderPresetId
 } from '@shared/types'
+import LoadingLottie from '../../components/LoadingLottie'
+import FloatingMask from '../../components/FloatingMask'
+import ModelPicker from '../../components/ModelPicker'
+import MediaPicker from '../../components/MediaPicker'
 
 interface Props {
   /** 模型配置发生变更并成功落盘后回调(父级据此刷新可选模型)。 */
   onChanged?: () => void
 }
+
+/**
+ * 媒体三档在小节里的回显顺序与「不选的后果」。
+ *
+ * 后果要写出来:这三档都是「不选就不上架对应工具」(内核对 `imageGenerationModel` /
+ * `videoGenerationModel` 是没配就不注册),用户看不到这句话时会以为空白只是没显示。
+ */
+const MEDIA_ROWS: {
+  id: string
+  label: string
+  icon: typeof ImageIcon
+  off: string
+  pick: (m: MediaSelection) => string[]
+}[] = [
+  {
+    id: 'image',
+    label: '出图',
+    icon: ImageIcon,
+    off: '专家没有 image_generate 工具',
+    pick: (m) => m.image
+  },
+  {
+    id: 'video',
+    label: '视频',
+    icon: Video,
+    off: '专家没有 video_generate 工具',
+    pick: (m) => m.video
+  },
+  {
+    id: 'audio',
+    label: '语音',
+    icon: AudioLines,
+    off: '朗读功能不可用',
+    pick: (m) => (m.audio ? [m.audio] : [])
+  }
+]
 
 /** 输入/输出 Token 快捷档位(对齐 WorkBuddy)。 */
 const INPUT_TOKEN_PRESETS = [32000, 64000, 128000, 256000]
@@ -125,8 +167,10 @@ function entryToProvider(e: CustomEntry): ProviderConfig {
 }
 
 /**
- * 设置 → 模型页(对齐 WorkBuddy 的"自定义模型",作为设置外壳内的一页):
- *  - 顶部:内置「云雾账号」模型组,随登录自动同步、只读;
+ * 设置 → 模型页(作为设置外壳内的一页):
+ *  - 顶部:「云雾账号」模型组,用户从**自己 key 真能调的**清单里选,与首次登录那一步同一个
+ *    选择器组件(`ModelPicker`)。这里刻意不跟 WorkBuddy 的只读「官方模型」——它那份是腾讯
+ *    自家掏钱的,我们这份花的是用户自己的余额,凭什么由我们钦定(见 shared/public-models.ts);
  *  - 下方:自定义模型列表,每条自带接口地址 / 独立 API Key / 模型 ID / 能力,支持增删改;
  *  - 增/删/改即时落盘到 providers.json(单一数据源)→ 声明式渲染进 openclaw.json 热加载。
  */
@@ -135,13 +179,27 @@ export default function ModelsPage({ onChanged }: Props) {
   const [custom, setCustom] = useState<CustomEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  /** 正在删除的那条自定义模型的 provId(空串表示没有);用于把等待状态落到具体那一行。 */
+  const [pendingId, setPendingId] = useState('')
   const [error, setError] = useState('')
   // 编辑弹窗:draft 非空时打开;editingId 为被编辑条目的 provId(新增为 null)。
   const [draft, setDraft] = useState<CustomEntry | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
+  /** 待确认删除的条目(非空时弹确认框);删除不可撤销,对齐 WorkBuddy 先问再删。 */
+  const [deleteTarget, setDeleteTarget] = useState<CustomEntry | null>(null)
+  /** 打开云雾账号模型选择器(与首次登录那一步是同一个组件)。 */
+  const [picking, setPicking] = useState(false)
+  /** 打开媒体模型选择器;media 是此刻生效的三档,用来在小节里回显。 */
+  const [pickingMedia, setPickingMedia] = useState(false)
+  const [media, setMedia] = useState<MediaSelection | null>(null)
 
   useEffect(() => {
     void (async () => {
+      // 媒体三档是本地读,跟供货商一起取;拉可选池要打网络,等用户真点开选择器再说。
+      const cat = await window.api.modelCatalog()
+      if (cat.ok && cat.data) {
+        setMedia(cat.data.media)
+      }
       const res = await window.api.listProviders()
       if (res.ok && res.data) {
         const bi = res.data.find((p) => p.builtin) ?? null
@@ -166,23 +224,72 @@ export default function ModelsPage({ onChanged }: Props) {
     })()
   }, [])
 
-  /** 用给定的自定义列表即时落盘(对齐 WorkBuddy 的即时保存,无需全局保存按钮)。 */
-  async function persist(nextCustom: CustomEntry[]): Promise<void> {
+  // 保存/删除写完 providers.json 就返回了,下发内核在后台跑;失败经此通道补报。
+  useEffect(() => window.api.onConfigSyncError((msg) => setError(`已保存,但内核未生效:${msg}`)), [])
+
+  /**
+   * 即时落盘单条自定义模型(对齐 WorkBuddy 的即时保存,无需全局保存按钮)。
+   *
+   * 按 id 单条 upsert,而不是把整张表覆盖写回:后者会让"改一个模型"重写**所有**模型的 Key,
+   * 页面内存里任何一条状态不对都会连累其它条目(实测出现过 A 的 Key 被写成 B 的)。
+   */
+  async function saveEntry(entry: CustomEntry): Promise<void> {
     setError('')
-    const providers: ProviderConfig[] = []
-    if (builtin) {
-      providers.push(builtin)
-    }
-    for (const e of nextCustom) {
-      providers.push(entryToProvider(e))
-    }
     setSaving(true)
     try {
-      const res = await window.api.saveProviders(providers)
+      const res = await window.api.upsertProvider(entryToProvider(entry))
       if (!res.ok) {
         setError(res.error ?? '保存失败')
         return
       }
+      onChanged?.()
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /**
+   * 保存云雾账号的对话模型清单。
+   *
+   * 只重读内置那一条 —— 自定义模型这次没动,整份重读会把用户正在编辑的状态一起冲掉。
+   */
+  async function saveAccountModels(models: ModelInfo[]): Promise<void> {
+    setError('')
+    setSaving(true)
+    try {
+      const res = await window.api.selectModels(models)
+      if (!res.ok) {
+        setError(res.error ?? '保存失败')
+        return
+      }
+      const list = await window.api.listProviders()
+      if (list.ok && list.data) {
+        setBuiltin(list.data.find((p) => p.builtin) ?? null)
+      }
+      setPicking(false)
+      onChanged?.()
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /**
+   * 保存媒体模型三档。
+   *
+   * 与对话模型分开一个通道:这三档不落在 `models.providers` 里(出图与视频走
+   * `yunwu-video` 插件自己的清单,语音走 `messages.tts`),所以保存完不必重读供货商。
+   */
+  async function saveMediaModels(selection: MediaSelection): Promise<void> {
+    setError('')
+    setSaving(true)
+    try {
+      const res = await window.api.selectMediaModels(selection)
+      if (!res.ok || !res.data) {
+        setError(res.error ?? '保存失败')
+        return
+      }
+      setMedia(res.data)
+      setPickingMedia(false)
       onChanged?.()
     } finally {
       setSaving(false)
@@ -199,10 +306,32 @@ export default function ModelsPage({ onChanged }: Props) {
     setDraft({ ...e, model: { ...e.model } })
   }
 
-  function removeEntry(provId: string): void {
-    const next = custom.filter((e) => e.provId !== provId)
-    setCustom(next)
-    void persist(next)
+  /**
+   * 删除单条(走 providers:delete,同样只动这一条)。
+   *
+   * 记住正在删的是哪一条:这次写入要经内核落配置,网关刚启动尚未连上时会退回 CLI 子进程,
+   * 实测能到 9 秒。只在小节标题旁转个圈的话,用户看着那一行毫无变化,会以为点了没反应
+   * (且按钮还能接着点,连点就是并发写同一份配置)。
+   */
+  async function removeEntry(provId: string): Promise<void> {
+    if (saving) {
+      return
+    }
+    setError('')
+    setSaving(true)
+    setPendingId(provId)
+    try {
+      const res = await window.api.deleteProvider(provId)
+      if (!res.ok) {
+        setError(res.error ?? '删除失败')
+        return
+      }
+      setCustom(custom.filter((e) => e.provId !== provId))
+      onChanged?.()
+    } finally {
+      setSaving(false)
+      setPendingId('')
+    }
   }
 
   function commitDraft(): void {
@@ -228,7 +357,7 @@ export default function ModelsPage({ onChanged }: Props) {
       ? custom.map((e) => (e.provId === editingId ? finalized : e))
       : [...custom, finalized]
     setCustom(next)
-    void persist(next)
+    void saveEntry(finalized)
     setDraft(null)
     setEditingId(null)
   }
@@ -238,7 +367,7 @@ export default function ModelsPage({ onChanged }: Props) {
   if (loading) {
     return (
       <div className="settings-loading">
-        <Loader2 size={18} strokeWidth={2} className="step-spin" />
+        <LoadingLottie size="sm" label="正在加载" />
         正在加载…
       </div>
     )
@@ -248,13 +377,18 @@ export default function ModelsPage({ onChanged }: Props) {
     <>
       {error && <div className="settings-error settings-error-banner">{error}</div>}
 
-      {/* 内置云雾账号模型组 */}
+      {/* 云雾账号模型组:用户自己从账号可用清单里选,不是我们下发的 */}
       {builtin && (
         <section className="cm-section">
           <div className="cm-section-head">
-            <Lock size={13} strokeWidth={1.8} />
             <span>云雾账号模型</span>
-            <span className="cm-muted">随登录自动同步 · {builtinChat.length} 个对话模型</span>
+            <span className="cm-muted">
+              消耗账号余额 · {builtinChat.length} 个对话模型 · 第一个是默认模型
+            </span>
+            <button className="btn-primary sm cm-add" disabled={saving} onClick={() => setPicking(true)}>
+              <Plus size={13} strokeWidth={2} />
+              选择模型
+            </button>
           </div>
           <div className="cm-builtin-chips">
             {builtinChat.map((m) => (
@@ -268,13 +402,60 @@ export default function ModelsPage({ onChanged }: Props) {
         </section>
       )}
 
+      {/*
+        媒体模型:出图 / 视频 / 语音三档单独一节,不混进上面的对话清单。
+        两者的可选池判据不同(对话看 tags,媒体看 supported_endpoint_types)、落配置的路径也不同,
+        混在一个列表里用户会以为随手勾一个视频模型就能拿去对话。
+      */}
+      {builtin && (
+        <section className="cm-section">
+          <div className="cm-section-head">
+            <span>媒体模型</span>
+            <span className="cm-muted">出图 / 视频 / 语音,决定专家手上有没有这三样工具</span>
+            <button
+              className="btn-primary sm cm-add"
+              disabled={saving}
+              onClick={() => setPickingMedia(true)}
+            >
+              <Plus size={13} strokeWidth={2} />
+              选择模型
+            </button>
+          </div>
+          <div className="cm-media-rows">
+            {MEDIA_ROWS.map((r) => {
+              const ids = media ? r.pick(media) : []
+              return (
+                <div className="cm-media-row" key={r.id}>
+                  <span className="cm-media-label">
+                    <r.icon size={13} strokeWidth={1.9} />
+                    {r.label}
+                  </span>
+                  {ids.length === 0 ? (
+                    <span className="cm-muted">未选择 · {r.off}</span>
+                  ) : (
+                    <span className="cm-builtin-chips">
+                      {ids.map((id, i) => (
+                        <span key={id} className="cm-chip" title={i === 0 ? `${id}（主用）` : id}>
+                          {id}
+                        </span>
+                      ))}
+                    </span>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      )}
+
       {/* 自定义模型 */}
       <section className="cm-section">
         <div className="cm-section-head">
           <span>自定义模型</span>
           <span className="cm-muted">每个模型可单独填写接口地址与 API Key</span>
-          {saving && <Loader2 size={13} strokeWidth={2} className="step-spin cm-saving" />}
-          <button className="btn-primary sm cm-add" onClick={openAdd}>
+          {/* 删除时等待状态已落在具体那一行,这里只管新增/编辑保存(它们没有对应的行)。 */}
+          {saving && !pendingId && <LoadingLottie size="xs" className="cm-saving" />}
+          <button className="btn-primary sm cm-add" disabled={saving} onClick={openAdd}>
             <Plus size={13} strokeWidth={2} />
             添加模型
           </button>
@@ -303,17 +484,56 @@ export default function ModelsPage({ onChanged }: Props) {
                     {e.apiKey ? 'Key 已设置' : '无 Key'}
                   </div>
                 </div>
-                <button className="icon-btn" title="编辑" onClick={() => openEdit(e)}>
-                  <Pencil size={14} strokeWidth={1.8} />
-                </button>
-                <button className="icon-btn" title="删除" onClick={() => removeEntry(e.provId)}>
-                  <Trash2 size={14} strokeWidth={1.8} />
-                </button>
+                {pendingId === e.provId ? (
+                  <LoadingLottie size="xs" className="cm-item-pending" label="正在删除" />
+                ) : (
+                  <>
+                    <button
+                      className="icon-btn"
+                      title="编辑"
+                      disabled={saving}
+                      onClick={() => openEdit(e)}
+                    >
+                      <Pencil size={14} strokeWidth={1.8} />
+                    </button>
+                    <button
+                      className="icon-btn"
+                      title="删除"
+                      disabled={saving}
+                      onClick={() => setDeleteTarget(e)}
+                    >
+                      <Trash2 size={14} strokeWidth={1.8} />
+                    </button>
+                  </>
+                )}
               </div>
             ))}
           </div>
         )}
       </section>
+
+      {picking && (
+        <ModelPicker
+          initial={builtinChat}
+          title="云雾账号模型"
+          hint="这些模型消耗你自己云雾账号的余额,清单的第一条会作为默认模型(拖动已选标签可换)"
+          confirmText="保存"
+          dismissible
+          onCancel={() => setPicking(false)}
+          onConfirm={saveAccountModels}
+        />
+      )}
+
+      {pickingMedia && (
+        <MediaPicker
+          title="媒体模型"
+          hint="出图、出视频、朗读各自用哪些模型。同样消耗你自己云雾账号的余额,一档都不选就等于关掉那个能力。"
+          confirmText="保存"
+          dismissible
+          onCancel={() => setPickingMedia(false)}
+          onConfirm={saveMediaModels}
+        />
+      )}
 
       {draft && (
         <ModelEditor
@@ -326,6 +546,37 @@ export default function ModelsPage({ onChanged }: Props) {
           }}
           onConfirm={commitDraft}
         />
+      )}
+
+      {deleteTarget && (
+        <FloatingMask className="modal-mask" onClick={() => setDeleteTarget(null)}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <h3 className="modal-title">删除模型</h3>
+            <p className="modal-text">
+              确认删除模型 {deleteTarget.model.name || deleteTarget.model.id} 吗?
+            </p>
+            <div className="modal-actions">
+              <button className="btn-ghost" onClick={() => setDeleteTarget(null)}>
+                取消
+              </button>
+              <button
+                className="btn-danger"
+                onClick={() => {
+                  const target = deleteTarget
+                  setDeleteTarget(null)
+                  void removeEntry(target.provId)
+                }}
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </FloatingMask>
       )}
     </>
   )
@@ -387,7 +638,7 @@ function ModelEditor({ draft, isNew, onChange, onCancel, onConfirm }: EditorProp
   }
 
   return (
-    <div className="cm-modal-mask" onClick={onCancel}>
+    <FloatingMask className="cm-modal-mask" onClick={onCancel}>
       <div className="cm-modal" onClick={(e) => e.stopPropagation()}>
         <header className="settings-head">
           <span className="settings-title">{isNew ? '添加模型' : '编辑模型'}</span>
@@ -567,7 +818,7 @@ function ModelEditor({ draft, isNew, onChange, onCancel, onConfirm }: EditorProp
           </button>
         </footer>
       </div>
-    </div>
+    </FloatingMask>
   )
 }
 
@@ -657,7 +908,7 @@ function ProviderSelect({ value, options, onChange }: ProviderSelectProps): Reac
 
       {open && (
         <>
-          <div className="cm-prov-mask" onClick={() => setOpen(false)} />
+          <FloatingMask className="cm-prov-mask" onClick={() => setOpen(false)} />
           <div className="cm-prov-panel">
             <div className="cm-prov-search">
               <Search size={14} strokeWidth={2} />

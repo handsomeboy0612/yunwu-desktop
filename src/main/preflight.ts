@@ -3,7 +3,7 @@ import net from 'net'
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
-import { OPENCLAW_DEFAULT_PORT } from '@shared/types'
+import { OPENCLAW_DEFAULT_PORT, OPENCLAW_HANDSHAKE_TIMEOUT_MS } from '@shared/types'
 import type {
   PreflightMode,
   PreflightReport,
@@ -20,7 +20,16 @@ import { loadActivation } from './store'
 const TIMEOUT = {
   version: 5000,
   gatewayListen: 15000,
-  gatewayConnect: 10000,
+  /**
+   * 必须**大于** gateway-client 的 CONNECT_TIMEOUT_MS,否则总是这层先超时,传输层那条更具体的
+   * 错误(以及它为「网关启动中」做的重连自愈)全被吃掉。所以这里跟着那个常量走,别再写死数字 ——
+   * 写死过两次,两次都因为传输层调宽了而重新变成「这层先红」。
+   *
+   * 冷启动会红是必然、不是偶发:网关端口先监听、后就绪,而 spawn 到 `gateway ready` 实测
+   * 18~20 秒,其后还有约 50 秒忙碌期,期间握手排不上处理。根因与量级见
+   * OPENCLAW_HANDSHAKE_TIMEOUT_MS 的注释。
+   */
+  gatewayConnect: OPENCLAW_HANDSHAKE_TIMEOUT_MS + 30000,
   rpcHealth: 8000
 }
 

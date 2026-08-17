@@ -3337,7 +3337,7 @@ async function processOpenAICompletionsStream(responseStream, output, model, str
 	const hasToolCalls = output.content.some((block) => block.type === "toolCall");
 	const hasVisibleText = output.content.some((block) => block.type === "text" && typeof block.text === "string" && block.text.trim().length > 0);
 	if (output.stopReason === "toolUse" && !hasToolCalls) output.stopReason = "stop";
-	if (sawStopFinishReason && output.stopReason === "stop" && hasToolCalls && !hasVisibleText) output.stopReason = "toolUse";
+	if (output.stopReason === "stop" && hasToolCalls) output.stopReason = "toolUse";
 	if (hasToolCalls && output.stopReason !== "toolUse") output.content = output.content.filter((block) => block.type !== "toolCall");
 }
 function shouldFilterDeepSeekDsmlText(compat) {
