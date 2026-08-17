@@ -1664,14 +1664,26 @@ DSH 上这件事内核替我们做了——`list()` 里 `broken` 带原因就是
 照源码写会撞 TS2305——这条教训已经吃过一次。字段：`kernel_api`（如 `0.1.0-rc.6`）+
 `preset_schema`（我们自己的组装约定版本）。快照按客户端上报的能力过滤，
 装不了的宁可不下发，也不要让用户装完拿到一个 `broken` 卡片。
-**注意这与"新旧客户端"是两件事**：老客户端的问题是格式，这里的问题是"给哪个内核写的"。
+唯一的兼容轴就是这一条"给哪个内核写的"，**没有第二条**——见下。
 
 **五、制品要多份并存 → 独立表，而不是在条目上再加一组列。**
-老客户端还在外面拉 openclaw 形状的 zip，`desktop_market_items` 上那三列
-（`artifact_key` / `artifact_sha256` / `artifact_size`）原样保留、不动它们，
 新增 `desktop_market_artifacts`：`item_id` + `format` + `kernel_api` + `key` / `sha256` / `size` /
 `version` / `created_at`，`(item_id, format, kernel_api)` 唯一。以后多内核版本并存、
 或再加一种格式，都是加行不是改表。
+
+**没有老客户端要照顾，这一条是查过库的（2026-08-18）。** 我原来在这里写着"老客户端还在外面
+拉 openclaw 形状的 zip，条目上那三列原样保留"——**前提是错的，我们还在开发，没有存量用户**。
+`desktop_market_items` 是 admin-server 自己 AutoMigrate 的表（`model/migrate_admin_owned.go:103`），
+而两站线上库里**这套表一张都不存在**：主站 `yunwuapi` 117 张表、海外站 134 张表，
+`%desktop%` / `%market%` / `%expert%` / `%scenario%` / `%plugin%` 全部零命中（连接是通的，
+总表数就是正面证据）。也就是说那三列只活在 Go struct 和本地开发库里，从来没有客户端拉过它们。
+
+所以：`artifact_key` / `artifact_sha256` / `artifact_size` 从条目 struct 上**摘掉**，制品一律进
+新表；导入侧不再产 openclaw 形状的 zip；格式并存只为内核版本与格式演进，不为客户端代际。
+内核自己对这个局面有成文立场，照它办（`deepseek-harness/AGENTS.md:5-7`，*Pre-release stance:
+foundation over blast radius* —— *with no external consumers, prefer the correct foundation over
+compatibility shims… Backends reject old on-disk formats*）。一个提醒：AutoMigrate 只 CREATE /
+ADD、从不 DROP，所以已经跑过的本地开发库里那三列会留着当死列，不会有人读；要干净就手工 DROP。
 
 **六、归档格式取 tar.gz，理由要写进注释。** 内核不提供任何解包能力，Node 内建只有 `zlib`。
 tar 头是定长 512 字节记录，自己写一个**有界读取器**是几十行，且必须自己写才能显式拒绝
@@ -1785,7 +1797,7 @@ high / xhigh / max`）。admin-cloud 的模型档案页（`src/pages/desktop-mod
 | 外壳是社区单点依赖（anywhere-labs） | MIT 已 fork，最坏情况自己维护 5,766 行 |
 | 媒体从零，13 家适配器的端到端战果可能退化 | 逐家复验，不接受"大部分能用"。四条前置证据 2026-08-17 已全部拿到，见阶段 4 |
 | **视频 / 音频产物在内核层没有落点**（`ImageMediaType` 只收四种光栅图，`ContentBlockMap` 无 video） | **已选路**：不加模态，照 `ui-deliverables` 形状自写 `ui-media` 插件。四条路里适配器与计费两条免费（探针实证静默丢弃、不抛），UI 那条要改内核文件所以不走。第一步先白嫖现成产出行，且**比今天强**——今天视频卡点开预览抽屉只有图片分支 |
-| 老客户端还在外面跑 | 制品格式加版本字段，两种格式并存一段时间 |
+| ~~老客户端还在外面跑，制品要两种格式并存~~ | **不成立，已查库销号（2026-08-18）**：还在开发、没有存量用户，且 desktop-market 那套表在两站线上库一张都没有（117 / 134 张表里 `%desktop%`/`%market%`/`%expert%` 零命中）。制品只按 `kernel_api` 分行，不为客户端代际留兼容分支——照内核 `AGENTS.md:5-7` 的 pre-release 立场 |
 | ~~**孤儿写者锁**：进程崩在持锁期间，之后每次写配置等 2173ms 然后失败，内核刻意不夺锁~~ | **已落地** `src/main/dsh/settings-lock.ts` + `npm run verify:settings-lock`（11 项全绿）。判 **pid 三态**而非文件年龄，`EPERM` 必须当"活着" |
 | Windows 上「非竞争性锁失败」无上游测试覆盖（他们自己 skipIf win32） | 我们是 Windows 产品，这条分支自己补测试。**守卫这一侧已覆盖**（判据脚本本机 Windows 跑绿，含 `EPERM` 那档）；内核锁本身的失败分支仍待补 |
 | 默认通告只说"任务完成了，用 `job_output` 读"，照默认走每次出图多花一轮模型调用 | 自己挂 `ctx.jobs.onJobDone` 把产物直接塞进消息，同时把 `dsh-tool-jobs` 的 `completionDelivery` 设 `'quiet'`，否则两个监听器各投一条 |
