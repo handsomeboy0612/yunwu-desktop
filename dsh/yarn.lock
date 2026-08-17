@@ -9194,7 +9194,9 @@ __metadata:
     "@deepseek-ai/dsh-client-runtime": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-client-ui-primitives": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-client-ui-settings": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-client-ui-sidebar": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-client-ui-slots": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-client-web-react": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-credentials": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-settings": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-timeout": "npm:0.1.0-rc.6"
@@ -9211,7 +9213,9 @@ __metadata:
     "@deepseek-ai/dsh-client-runtime": 0.1.0-rc.6
     "@deepseek-ai/dsh-client-ui-primitives": 0.1.0-rc.6
     "@deepseek-ai/dsh-client-ui-settings": 0.1.0-rc.6
+    "@deepseek-ai/dsh-client-ui-sidebar": 0.1.0-rc.6
     "@deepseek-ai/dsh-client-ui-slots": 0.1.0-rc.6
+    "@deepseek-ai/dsh-client-web-react": 0.1.0-rc.6
     "@deepseek-ai/dsh-credentials": 0.1.0-rc.6
     "@deepseek-ai/dsh-settings": 0.1.0-rc.6
     "@deepseek-ai/dsh-timeout": 0.1.0-rc.6
