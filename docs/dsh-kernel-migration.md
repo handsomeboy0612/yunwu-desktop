@@ -722,6 +722,61 @@ Node 直接 `SyntaxError: Invalid or unexpected token`。把 target 从 es2024 �
 一次调用同时证明了通道通、payload 过河完整、host 侧 `ctx.credentials` 在场。
 测试 297 通过 / 4 失败，与上游基线一致。
 
+#### host 侧账号能力：不是搬，是重判（2026-08-17 七条真机探针）
+
+老壳那几个文件是 2026-08 写的，注释里那些「只有这一条路」的断言当时对，现在得重新对着
+**当前 DSH 内核**和**当前 `new-yunwu-api` 源码**判一遍。判下来三处跟照搬的结果不一样。
+
+**一、会话 cookie 归内核凭据库，不再自建加密文件。**
+老壳用 Electron `safeStorage` 加密存盘，图两件事：cookie 出不了主进程、落盘不是明文。
+这两件内核都白送——`resolve` 故意不放在浏览器那侧的凭据 API 上
+（`host/apiproxy/src/api/credentials.ts` 只有 `describe`/`set`/`unset`），所以**没有一条线路
+能把它带出去**；`credentials-local` 建目录 `0700`、原子替换文档 `0600`，还拒读任何他人可读的
+文档（`credentials-local/src/index.ts:116,383,394`）。全仓 `safeStorage` 零命中，是内核的
+有意选择：Windows 上 DPAPI 同样是用户级的，防的是文件被拷走，而那正是 `0600` 已经覆盖的。
+
+**顺带查了 `ctx.storageDomain` 然后决定不用它。** 它是真设施（zod schema、`domain/changed`、
+web-app 组合里 `storage` + `storage-json` + `storage-domain` 三个都挂着，
+`bundle/web-app/cordis.patch.yml:51-62`），但本包只有一件要落盘的东西，而它是密钥；
+`domain/changed` 又只是进程内事件（README 明说重连的 GUI 什么也观察不到），
+换不来浏览器侧的新鲜度。**余额一个字节都不落盘**——开机就画出来的数字看着是活的，
+可能是昨天的，而余额恰好是用户不复核就直接据以行动的那一格。
+
+**二、用户访问令牌看着更合适，但有副作用，封死。**
+余额只有 `/api/user/self` 给得出来，而 `authHelperApply`（`middleware/auth.go:87`）在没有
+会话 cookie 时**接受 Authorization 里的用户访问令牌**，且跳过 session_token 与改密作废两道校验
+（`:147,234`）——比 30 天会过期的 cookie 稳。但**每个用户只有一张**：
+`GenerateAccessToken`（`controller/user.go:1418`）生成新 key 直接覆盖那一列，
+桌面端登录时换一张，就把用户原有的那张顶掉；而**我们自己的从站同步正是用它认证**
+（`SystemTokenAuth`，`middleware/auth.go:1181`）。登录不能顺手废掉用户的同步令牌。
+
+`sk-` 也替不了：`/api/user/self` 挂的 `UserAuthOrApiKey`，那个 "ApiKey" 是代理站的
+`X-Api-Key`/`X-Api-Secret`（`auth.go:504-514`），不是中转令牌；
+`/api/usage/token` 倒是认 `sk-`（`TokenAuth`），但回的是**令牌自己的额度**，
+而我们建的是 `unlimited_quota` 令牌，那几个数跟账户余额没关系（`controller/token.go:145-184`）。
+——所以老壳的结论是对的，但现在是验过的结论，不是继承来的。
+
+**三、请求语言归内核管。** 控制台按 `Accept-Language` 逐请求选语言
+（`middleware/i18n.go:23-39`），我们一条都没带，于是中文界面上原样引了一句
+`Please complete the CAPTCHA verification first`——真机打出来的，不是设想。
+语言在内核里有主：`client-locale` 在 host 侧注册了 `locale` 设置命名空间
+（`preference: 'zh' | 'en'`），`ctx.settings.get('locale')` 就能读。
+头在 `requestJson` 里统一加，不放调用点——放调用点迟早有一个漏掉。
+
+**真机复验（`/openlux` 通道，七条）**：
+
+| 端点 | 结果 | 证明了什么 |
+|---|---|---|
+| `status` | `signedIn:false, apiKeyConfigured:true` | 凭据 `describe` 通；两件事分开判 |
+| `captcha.config` | `enabled:true, type:click-shape` 1.3s | 站点**确实开着**人机验证，登录必须先过它 |
+| `captcha.challenge` | 76KB 图 + 3.3KB 缩略，0.35s | 真题解出来了 |
+| `balance`（未登录） | `expired`「登录后即可查看余额」 | 四档降级的入口档，不打网络、不显示 0 |
+| `sign-in`（错密码） | `ok:true` + `kind:'rejected'`「请先完成人机验证」`needCaptcha:true` | 业务失败走判别式而非 error 分支；**中文**（语言修复前是英文） |
+| 不存在的方法 | `ok:false, code:'bad-request'` | error 分支只留给真意外 |
+| `captcha.verify`（答错） | `passed:false` | 判错是普通结果，不是异常 |
+
+一条要记住的时序：控制台**先查人机验证再查密码**，所以登录表单不能等密码错了才弹验证码。
+
 #### 老代码重新判定：活下来的比原先估的少
 
 | 老代码 | 行数 | 命运 | 理由 |
@@ -729,7 +784,7 @@ Node 直接 `SyntaxError: Invalid or unexpected token`。把 target 从 es2024 �
 | `yunwu-auth.ts`（登录 + 换 `sk-`） | 246 | **活，几乎原样** | 纯 fetch，内核不做账号，没有对应物 |
 | `yunwu-captcha.ts` + `Captcha.tsx`（go-captcha 五模式） | 157 + 323 | **活，换宿主** | 内核没有人机验证；从 renderer 组件变成引导步里的一段 |
 | `yunwu-account.ts`（余额四档降级） | 254 | **活** | 挂进侧栏槽位 |
-| `account-session.ts` + `secret-box.ts` | 87 + 47 | **活** | 会话 cookie 仍走我们自己的文件：内核凭据库是给 API key 的，cookie 权限更大且要按 `userId + baseUrl` 记账 |
+| `account-session.ts` + `secret-box.ts` | 87 + 47 | **死**（2026-08-17 改判） | 会话 cookie 改存内核凭据库，两个手工搭的性质都白送：`resolve` 故意不上协议 → cookie 结构上出不了 host；`0700` 目录 + `0600` 文档且拒读他人可读的文件 → 不必再引 `safeStorage`。按 `userId + baseUrl` 记账的部分作为 JSON 存进那一格 |
 | `yunwu-client.ts`（`/v1/models` 校验令牌） | 50 | **活** | 登录时确认令牌真能调 |
 | `Activate.tsx` 的四步编排 | 513 | **大部分死** | 内核的引导队列接管排序与弹窗；只剩登录表单本身 |
 | `store.ts` / `activation.json` | 106 | **死** | 三样东西各归各位：凭据进凭据库、baseURL 进组合基座、模型选择进 settings，不再攒一个大 JSON（顺带解决老壳「渲染进程内存里有明文 `sk-`」那个问题） |
