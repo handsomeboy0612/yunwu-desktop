@@ -777,12 +777,62 @@ web-app 组合里 `storage` + `storage-json` + `storage-domain` 三个都挂着�
 
 一条要记住的时序：控制台**先查人机验证再查密码**，所以登录表单不能等密码错了才弹验证码。
 
+#### 登录步的界面：内核给什么用什么，剩下的才是我们的（2026-08-17 真机）
+
+**先补了 host 那半一个漏子。** `rpc.handle` 的 handler 一旦抛异常，上游只会回一个
+纯文本 500（`client/connection/src/rpc-host.ts:183-185`），控制台自己的报错文案在路上就没了——
+而 `fetchCaptcha` / `fetchCaptchaConfig` 恰恰是靠抛来报错的。现在整个分发包在一层 try 里，
+真意外折进 error 分支并把原文带过去；业务判别式（`rejected` / `passed:false`）照旧走成功分支。
+
+**样式不用 CSS module，是查出来的，不是图省事。** 内核 UI 包里 `import css from './X.module.css'`
+那套哈希类名来自编译 `src` 的打包管线，`ui-primitives/tsdown.config.ts:3-10` 写得很直白：
+它自己的 lib 构建**把 CSS 打成空模块**，因为「哈希类名只在 bundler 上下文里有意义」。
+我们这个仓外包走的是自己的 tsdown，没有那层转换。模块加载器倒是**期望**插件在工厂闭包里
+自己注入 `<style>` 并会认领它（`client/modules/src/client/system.ts:41-48`），但那要先有
+一个 CSS 插件把样式变成字符串——为了几十行布局引一套构建机制不划算。所以：**凡是有交互的
+一律用内核原子**（`Button` / `Input` / `OnboardingSurface`），我们只剩布局，用内联样式，
+颜色全部走 `--dsw-alias-*` 变量，主题跟着内核走。
+
+**纵向节奏归步骤自己。** `OnboardingSurface` 的舞台是 `display:flex; justify-content:center`，
+**没有 `align-items`**（默认拉伸），注释里说得明白：这一步「拥有完整工作区」。内核里没有
+第二个步骤用过它，所以居中是我们自己给的一行 `justifyContent: 'center'`，不是抄来的。
+
+**验证码三族的坐标口径原样继承老壳**，那套是对着同一个后端在生产里跑过的：题面按 1:1 画，
+点选交 `x1,y1;x2,y2`（图坐标），滑块交 `x,tileY`，旋转交 `angle`。五种题型都问了一遍
+控制台，坐标数学要的字段全在：
+
+| 题型 | 真机返回 | 渲染要的量 |
+|---|---|---|
+| `click-text` / `click-shape` | 300x220 + 150x40 缩略 | 提示条 + 点击点 |
+| `slide-basic` | 300x220，`tile 42x42@y=87` | travel = 300−42，答案 y 取 87 |
+| `slide-region` | 300x220，`tile 60x60@y=41` | 同上，换一组数 |
+| `rotate` | **220x220 方图**，`thumbSize 150` | 圆形舞台 + 150px 中心盘 |
+
+站点当前只发 `click-shape`，另外四种的渲染没在真机上点过——但输入参数是真的，数学是搬的。
+
+**真机五步（CDP 驱动，截图存 `.tmp-probe/signin-0*.png`）**：
+
+| 步 | 结果 |
+|---|---|
+| 缺 `OPENLUX_API_KEY` 时开机 | 登录步画出来，`#root` 被冻住，无对话框 |
+| 填账号密码点登录 | 直接出验证码（不是密码错了才弹），题面 `naturalWidth` 300 = 声明宽度，**没有缩放错位** |
+| 图上点三下 | 三个序号标记精确落在点击处 |
+| 点确认（故意答错） | 判掉、显示「验证未通过，请重试」、**自动换新题**（图 88135 → 71455 字节） |
+| 点两次「稍后」 | 我们这步消失、`#root` 解冻、队列交给内核那步，工作区可用 |
+| 放回 `OPENLUX_API_KEY` 重启 | `apiKeyConfigured:true` → 这步**一个像素都不画**，直接进工作区 |
+
+最后一条是这一步的承重设计：**该不该出现由步骤自己判**，判据是 host 侧问凭据库——
+所以从环境变量来的、在模型页手填的密钥同样算数，登录步没资格拦一个已经把密钥给了内核的人。
+七条 host 探针在 try/catch 重构后全数复通。
+
+还差一条真登录（要真账号密码），留给用户自己点。
+
 #### 老代码重新判定：活下来的比原先估的少
 
 | 老代码 | 行数 | 命运 | 理由 |
 |---|---|---|---|
 | `yunwu-auth.ts`（登录 + 换 `sk-`） | 246 | **活，几乎原样** | 纯 fetch，内核不做账号，没有对应物 |
-| `yunwu-captcha.ts` + `Captcha.tsx`（go-captcha 五模式） | 157 + 323 | **活，换宿主** | 内核没有人机验证；从 renderer 组件变成引导步里的一段 |
+| `yunwu-captcha.ts` + `Captcha.tsx`（go-captcha 五模式） | 157 + 323 | **活，换宿主**（已完） | 内核没有人机验证；已从 renderer 组件变成引导步里的一段，坐标口径原样继承，样式换成内核原子 + 内联布局 |
 | `yunwu-account.ts`（余额四档降级） | 254 | **活** | 挂进侧栏槽位 |
 | `account-session.ts` + `secret-box.ts` | 87 + 47 | **死**（2026-08-17 改判） | 会话 cookie 改存内核凭据库，两个手工搭的性质都白送：`resolve` 故意不上协议 → cookie 结构上出不了 host；`0700` 目录 + `0600` 文档且拒读他人可读的文件 → 不必再引 `safeStorage`。按 `userId + baseUrl` 记账的部分作为 JSON 存进那一格 |
 | `yunwu-client.ts`（`/v1/models` 校验令牌） | 50 | **活** | 登录时确认令牌真能调 |

@@ -28,8 +28,8 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-// Type-only: merges `ctx.connection` (the Host handle) into this program.
-import type {} from '@deepseek-ai/dsh-client-connection'
+// Also merges `ctx.connection` (the Host handle) into this program.
+import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { signIn } from './account/auth.ts'
 import { BalanceReader } from './account/balance.ts'
@@ -80,45 +80,84 @@ export function apply(ctx: Context, config: Config = {}): void {
   // `handle` registers through the calling fiber's own effect, so the route
   // and its disposal already follow this plugin's lifetime.
   ctx.connection.rpc.handle(ACCOUNT_CHANNEL, async (endpoint, payload, signal) => {
-    switch (endpoint) {
-      case 'status':
-        return { ok: true, value: await readStatus(ctx, baseUrl) }
-
-      case 'captcha.config':
-        return { ok: true, value: await fetchCaptchaConfig(ctx, baseUrl, signal) }
-
-      case 'captcha.challenge':
-        return { ok: true, value: await fetchCaptcha(ctx, baseUrl, captchaTypeOf(payload), signal) }
-
-      case 'captcha.verify':
-        return { ok: true, value: await runVerifyCaptcha(ctx, baseUrl, payload, signal) }
-
-      case 'sign-in':
-        return { ok: true, value: await runSignIn(ctx, baseUrl, payload, signal) }
-
-      case 'sign-out':
-        return { ok: true, value: await runSignOut(ctx, balance) }
-
-      case 'balance':
-        return { ok: true, value: await balance.read(forceOf(payload), signal) }
-
-      default:
-        // The error-code union belongs to the kernel and cannot grow a row from
-        // out here, so an unroutable endpoint reuses the code the kernel's own
-        // envelope check uses for the same class of mistake
-        // (`client/connection/src/rpc-host.ts:173-177`). Account *business*
-        // failures must not come through here at all: they ride the success arm
-        // with their own discriminant, the way the kernel's own services do.
-        return {
-          ok: false,
-          error: {
-            code: 'bad-request',
-            message: `unknown account endpoint ${JSON.stringify(endpoint)}`,
-            details: { issues: [] },
-          },
-        }
+    try {
+      return await route(ctx, baseUrl, balance, endpoint, payload, signal)
+    } catch (error: unknown) {
+      // A handler that throws becomes a plain-text 500 upstream
+      // (`client/connection/src/rpc-host.ts:183-185`), and the browser sees a
+      // transport fault with the console's own wording gone. Anything that
+      // reaches here is a genuine fault rather than an account outcome —
+      // those ride the success arm below — so the error arm is the right
+      // place for it, as long as the text survives the trip.
+      return {
+        ok: false,
+        error: {
+          code: 'internal',
+          message: error instanceof Error ? error.message : String(error),
+          details: {},
+        },
+      }
     }
   }, { authority: 'loopback' })
+}
+
+/**
+ * Dispatch one account endpoint.
+ * @param ctx - host context.
+ * @param baseUrl - console origin.
+ * @param balance - the per-process balance cache.
+ * @param endpoint - method name within this plugin's channel.
+ * @param payload - request body, shaped per endpoint.
+ * @param signal - caller cancellation.
+ * @returns the RPC result for this call.
+ */
+async function route(
+  ctx: Context,
+  baseUrl: string,
+  balance: BalanceReader,
+  endpoint: string,
+  payload: unknown,
+  signal?: AbortSignal,
+): ReturnType<ConnectionRpcHandler> {
+  switch (endpoint) {
+    case 'status':
+      return { ok: true, value: await readStatus(ctx, baseUrl) }
+
+    case 'captcha.config':
+      return { ok: true, value: await fetchCaptchaConfig(ctx, baseUrl, signal) }
+
+    case 'captcha.challenge':
+      return { ok: true, value: await fetchCaptcha(ctx, baseUrl, captchaTypeOf(payload), signal) }
+
+    case 'captcha.verify':
+      return { ok: true, value: await runVerifyCaptcha(ctx, baseUrl, payload, signal) }
+
+    case 'sign-in':
+      return { ok: true, value: await runSignIn(ctx, baseUrl, payload, signal) }
+
+    case 'sign-out':
+      return { ok: true, value: await runSignOut(ctx, balance) }
+
+    case 'balance':
+      return { ok: true, value: await balance.read(forceOf(payload), signal) }
+
+    default:
+      // The error-code union belongs to the kernel and cannot grow a row from
+      // out here, so an unroutable endpoint reuses the code the kernel's own
+      // envelope check uses for the same class of mistake
+      // (`client/connection/src/rpc-host.ts:173-177`). Account *outcomes* must
+      // not come through here at all: a wrong password or a missed challenge
+      // rides the success arm with its own discriminant, the way the kernel's
+      // own services do.
+      return {
+        ok: false,
+        error: {
+          code: 'bad-request',
+          message: `unknown account endpoint ${JSON.stringify(endpoint)}`,
+          details: { issues: [] },
+        },
+      }
+  }
 }
 
 /**
