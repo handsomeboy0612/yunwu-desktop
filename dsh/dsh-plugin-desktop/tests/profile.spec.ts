@@ -115,7 +115,12 @@ describe('desktop profile composition', () => {
     }))
     expect(patches).toContainEqual(expect.objectContaining({
       id: 'agent-presets',
-      config: expect.objectContaining({ roots: [expect.objectContaining({ trust: 'system' })] }),
+      config: expect.objectContaining({
+        roots: [
+          expect.objectContaining({ trust: 'system' }),
+          expect.objectContaining({ trust: 'system' }),
+        ],
+      }),
     }))
     expect(readFileSync(prepared.rootConfig, 'utf8')).toBe('[]\n')
     expect(prepared.homeDir).toBe(home)
