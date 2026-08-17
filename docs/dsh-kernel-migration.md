@@ -581,6 +581,37 @@ loopback **HTTP 200 / 12301 字节**；`typecheck` 干净。
 
 原计划里「新写把 `sk-` 与 baseUrl 落进 dsh 配置的那一层」**缩成一次 `credentials.set`**。
 
+#### 承重墙已验（2026-08-17 真机，验完即撤，`git status` 干净）
+
+上面整节都压在两句读来的话上：「注册进队列就能拦」和「写完凭据内核那步自己消失」。
+读来的只是假设，动手前各验了一次。
+
+**内核凭据步的自消语义（不写一行代码就能验）**：把 `.credentials.yaml` 移走重启——
+弹出「添加一个 API Key 开始使用」，两个按钮「稍后配置 / 保存并继续」，**且 `#root` 带 `inert`**，
+即它是真拦不是提示；凭据放回重启——**对话框 0 个、`#root` 不冻结**。它自己完成了，我们不用压制。
+
+**我们能不能插一步**：在 `dsh-plugin-desktop` 已有的客户端半边（`src/client/index.ts`，
+tsdown 按 browser 单独打成 `lib/client.js`）里注册一个 order `-50` 的探针步。四条都成立：
+
+| 要问的 | 真机结果 |
+|---|---|
+| 注册生效吗 | 整屏挂上，`step id: yw-onboarding-probe · order -50` 如实渲染 |
+| order 真落位吗 | 落在内核 `welcome-notice`(-100) 与 `deepseek-official`(0) 之间 |
+| 能拦住应用吗 | `OnboardingSurface` 在自己挂载期间把 `#root` 置 `inert`，卸载即还原 |
+| 交棒对吗 | 点完成 → 探针消失、`#root` 解冻，**没有别的步顶上**（内核凭据步自判不渲染） |
+
+顺带钉死三件实现事实：`ui-primitives` 的 `Button` 直接可用且长得就是原生样式；组件在
+「还没想好」时返回 `null` 就既不画也不拦（这是 `OnboardingSurface` 头注释写明的契约）；
+运行期要用到的模块得进 `package.json` 的 `dsh.client.inject`，那是模块加载序，
+和导出的 `inject`（cordis 服务）是两回事，别混。
+
+**尚未定的一件事：这个插件该住哪。** 探针借了 `dsh-plugin-desktop`，因为启动器会把它
+junction 进 profile（`profile-manager.ts` 里写明该包 launcher-owned、不许出现在
+`dsh.profile.bundles`），所以零安装就能跑。但那是上游包，我们往里塞业务代码会让
+`git subtree pull` 变脏——`brand.ts` 那次收口就是为了躲这个。真实现更该是我们自己的包，
+代价是要解决它怎么进 profile 的依赖树（profile 是 pnpm 工作区，`packages: - .`）。
+两条路都通，动手前挑一条。
+
 #### 老代码重新判定：活下来的比原先估的少
 
 | 老代码 | 行数 | 命运 | 理由 |
