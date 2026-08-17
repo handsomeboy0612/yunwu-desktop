@@ -281,6 +281,61 @@ fork `deepseek-harness-desktop`，改品牌（上面那七处）、接签名证�
    诊断得往文件写。改完 `PRODUCT_NAME` 之后 userData 目录换名，这条自然消失。
 3. `.yarnrc.yml` 是 `nodeLinker: node-modules` + `enableScripts: false`，
    靠 `dependenciesMeta.*.built` 逐包放行；换句话说加新依赖如果要跑安装脚本，得在那里显式开。
+   **副作用：`yarn install` 不会当场跑 electron 的安装脚本**，`dist/electron.exe` 缺着，
+   要在这个 workspace 里跑过一次 yarn 脚本才补上（`yarn rebuild electron` 不触发）。
+   第一次 `yarn start` 打「Downloading Electron binary...」就是它在补。
+
+#### 落地：外壳已并入 `dsh/`，品牌已换（提交 `77272d9c`）
+
+**布局**：用户 2026-08-17 定在 `yunwu-desktop` 的 `feature/dsh-kernel` 分支上开一个顶层目录。
+做法是 `git subtree add --prefix=dsh dsh-upstream master --squash`，remote 指本地克隆
+（不走网络）。以后跟上游合用 `git subtree pull`，所以**对上游的偏离要尽量小**：
+品牌值收在 `dsh/dsh-plugin-desktop/src/brand.ts` 一处，各调用点只多一行 import。
+
+坑：`git subtree add` 会因为 CRLF 归一化报 `working tree has modifications`，
+而 `git status` 是干净的——它用 `git diff-index` 比 `status` 严格且不刷索引。
+先 `git update-index --really-refresh`。
+
+顺带删掉了 `dsh/deepseek-harness` 那个 submodule 与 `dsh/.gitmodules`（照上面第 1 条，用不上）。
+
+| 改了什么 | 值 / 做法 |
+|---|---|
+| `APP_ID` | `ai.yunwu.desktop`（与旧项目 `src/main/index.ts:278` 一致） |
+| `PRODUCT_NAME` | `Yunwu Desktop` —— 同时决定 userData 目录名 |
+| `WINDOW_TITLE` / `SHORTCUT_NAME` | `云雾` |
+| `INSTALLER_STEM` | `Yunwu-Desktop` |
+| 更新插件 | `cordis.patch.yml` 里**整行摘掉** `desktop-updates`，不是设 `enabled: false` —— 要让没有代码路径能碰到那三个 `www.dshdesktop.cn` 常量。包导出保留（打包校验器 `verify-packaged-runtime.ts:102` 仍要解析它）；`runtime.updates.notify` 不受影响，它是 `ElectronDesktopRuntime` 的方法 |
+| 字标 | 未动，见「字标是唯一一处真冲突」，内测期先挂着 |
+
+**上游的测试逮住了这次改动，这是好事**：两处断言更新那一行**必须存在**
+（`tests/package.spec.ts:102`、`tests/profile.spec.ts:161`），两处断言品牌字面量
+（`package.spec.ts` 的 *fixes the installed application identity*、`plugin.spec.ts:187`）。
+都翻成我们的意图了 —— 尤其 `package.spec.ts` 改成拿 manifest 的 `build` 块**对 `brand.ts` 比**，
+守的是那条真不变量：electron-builder 按 manifest 出安装包、运行时
+`app.setName(PRODUCT_NAME)` 决定 userData，两边不一致会把一份安装劈成两个状态目录。
+
+**测试基线要记住**：本机 Windows 上**未改动的上游**就是 `4 失败 / 297 通过`，
+四条全在 mac 专属（`mac-universal.spec.ts` 2 条 + `verify-mac-smoke.spec.ts` 2 条，
+要 mac 的权限位与 `lipo`）。我们改完之后逐条一致 —— 判断有没有回归要拿这个数比，
+不是拿「全绿」比。
+
+**复验（真机）**：`dsh/` 里装 9.0s、构建 0.3s；起进程窗口标题码点
+**U+4E91 U+96FE**（= 云雾）、userData 落在 `%APPDATA%\Yunwu Desktop`、
+loopback **HTTP 200 / 12301 字节**；`typecheck` 干净。
+
+**三份 userData 互不相撞，本机可以并排跑**（对着一个活的上游正式版比对很有用，别关它）：
+
+| 谁 | userData |
+|---|---|
+| 已装的上游正式版 | `%APPDATA%\DSH Desktop` |
+| 我们的新壳 | `%APPDATA%\Yunwu Desktop` |
+| 旧项目 | `%APPDATA%\yunwu-desktop` —— 它只调 `setAppUserModelId`、**没调 `app.setName`**，所以目录名是 package.json 的 `name` |
+
+唯一共享的是 `AppUserModelId`（旧项目与新壳都是 `ai.yunwu.desktop`）：Windows 任务栏归组
+与通知身份，不挡开发，但看到两者挤同一个任务栏位置就是这个原因。
+
+**阶段 0 剩下的**：用云雾的 key 跑通一条对话；接 Windows 代码签名证书
+（`scripts/package-win.ts` 支持 PFX `win_csc_link`）；出一次安装包验能装能起。
 
 ### 阶段 1 · 登录与账号（2 周）· 闸门已通过
 
