@@ -206,6 +206,62 @@ frontmatter 手术随之消失。
 出厂档是只读的（`system` 信任，升级会覆盖），用户/市场装的写在
 `$DSH_HOME/.agent-presets/<id>/`，名录会报每个档的真实路径。
 
+#### 这条链已在真机上走通（2026-08-17，`DeepSeek-V4-Flash` 经 `api.openlux.ai`）
+
+拿 `standard` 整目录拷成 `yw-finance`（内核自己的规矩：**创作即复制**，
+`copy(from, id, name?)` 是唯一的创作写入，服务从不接受调用方给的组装文本），
+只改三处：persona 换成带代号 `KUMO-FIN-3` 的中文人设、`skill-filesystem` 加
+`customSkillDirs` 指向档内 `skills/`、放一个 `yw-invoice-redflush` 技能，
+正文里埋一句校验口令。四条判据逐条对上：
+
+| 判据 | 真机结果 |
+|---|---|
+| 发现 | preset 目录是在**应用已经跑起来之后**才写到盘上的，选择器里立刻出现「云雾财务专家」并显示我们写的中文描述 —— 实证了 README 那句「发现过程不做缓存」，**不用重启** |
+| 人格接管 | 模型第一句「我是「云雾财务专家」，代号 KUMO-FIN-3，只负责发票与红冲相关的工作。」，原文出自 persona 行 |
+| 自带技能进名录 | 该会话多出第三段上下文注入 `skill-catalog`，正文是 `<available_skills> yw-invoice-redflush: <完整描述>` |
+| 技能真能加载 | 轨迹页 `TOOL skill {"name":"yw-invoice-redflush"} → <skill_content name="yw-invoice-redflush"> <skill_resources> Base directory for…` |
+| **兄弟档看不到** | 同一台机器、同一模型、同一份 `DSH_HOME`，隔九分钟另开一条 `标准模式` 会话：上下文注入**只有两段**（`AGENTS.md/CLAUDE.md` + `system-prompt`），**根本没有 `skill-catalog` 这一段**，`yw-invoice-redflush` 全文不出现 |
+
+最后一行就是结论：**会话级技能作用域是内核原生的，不用我们拼。** openclaw 上我们靠
+`disable-model-invocation` + `before_prompt_build` 才拼出同样的结果
+（见技能册「技能随专家走」），那 212 行 `skill-visibility.ts` 到这里整件事消失。
+
+**三条会误判的观察，记下来省得下次重查：**
+
+- **`Error: unknown tool ""` 不是配错。** 第一次调用时模型只发了参数
+  `{"name":"yw-invoice-redflush"}`、漏了函数名，内核照实报 `UNKNOWN_TOOL`；
+  **同一轮的下一步它自己补上 `skill` 这个名字就成功了**。判这个只能看轨迹页的两行，
+  对话页把失败和成功渲染成挨着的两块，看着像一次失败。同一模型同一中转跑
+  `todo_write` 一次就成，所以不是工具调用整体坏了。
+- **新会话不记忆上次选的档**，回到部署默认值 `standard`
+  （`bundle/web-app/cordis.patch.yml:424`）。默认值是用户设置
+  `agent-presets.default`，要改默认专家改它。
+- **代际只以 `agent.cordis.yml` 为键。** 改旁边的 `SKILL.md` **不会**送达新会话，
+  要等组装文件本身变动或进程重启（README「已知限制」第三条）。
+  技能全部重写那一轮会反复踩这个 —— 改完技能顺手 `touch` 一下组装文件。
+
+**一条待追**：技能加载成功之后那一步 `已重试模型请求（2/2）` 耗尽、最终那句话没出来
+（输入已到 26.9K tok）。是中转还是上下文长度，没查，单独排。
+
+#### GUI 探针手法（这套东西验界面只能这么验，记方法不记文件）
+
+无头那条 `dsh --profile headless` **挂不了 preset** —— 它是平铺组装，
+`--dump-config` 里没有 `agent-presets` 行，技能和 persona 直接写在 profile 里。
+preset 只活在 web-app 那套组装里，也就是我们的壳。所以专家相关的东西**只能驱动 GUI 验**：
+
+- Electron 收 `--remote-debugging-port=9333`，`http://127.0.0.1:9333/json/list` 拿到页面
+  target 的 WebSocket 地址。Node 24 自带全局 `WebSocket`，**不需要装任何包**就能说 CDP。
+- **`Runtime.evaluate` 里的 `el.click()` 对 preset 选择器无效** —— 这类 `role="option"`
+  的菜单监听 pointerdown。要用 `Input.dispatchMouseEvent` 的
+  `mouseMoved` → `mousePressed` → `mouseReleased` 按坐标点，那条路径跟真鼠标同一个入口。
+  输入用 `Input.insertText`，发送用 `Input.dispatchKeyEvent` 的 Enter。
+- **判断有没有点中要隔一拍再读**：点完立刻查选择器标签会读到旧值，
+  我因此误判过一次「没选上」，其实已经选上了。
+- **会话日志读不了别硬啃**：`$DSH_HOME/sessions/**/session.jsonl.zstd` 用
+  `zstdDecompressSync` 和流式 `createZstdDecompress` 都只解出一行 `session` 头
+  （31.6 KB 压缩 → 223 字符），不是简单的多帧拼接。要看工具调用原文走界面的**轨迹页**，
+  那里逐行列着 `TOOL <名字> <入参> → <返回>`。
+
 ### 侧栏能往哪儿加：三个具名槽位
 
 `ui-sidebar/src/client/SidebarRoot.tsx` 自己只管列几何与折叠动画，内容归注册方：
