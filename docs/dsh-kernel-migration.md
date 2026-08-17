@@ -180,10 +180,8 @@ DeepSeek Harness；网页 `<title>DeepSeek Harness</title>` 是运行时生成�
 | 主题 | `-theme` | 已挂 |
 | 追踪 / 问答卡 / 权限档 / 消息反馈 | `-trajectory` / `-user-questions` / `-permission-presets` / `-message-feedback` | 已挂 |
 
-**所以「把专家·技能·连接器加上去」加的不是界面，是我们自己的内容。**
-唯一真缺的一条是 MCP：`packages/mcp/mcp-client` 在内核里存在，但
-`packages/bundle` 下三份组合（base / headless / web-app）**一处都没挂它**，
-要连接器就得自己加这一行。
+**所以「把专家·技能·连接器加上去」加的不是界面，是我们自己的内容 —— 连接器除外。**
+连接器是这份名录里唯一一处真的缺东西，而且缺的不止一行组合，详见下一节。
 
 ### 专家与技能的落点：agent preset 目录（内核原生形状）
 
@@ -228,11 +226,9 @@ frontmatter 手术随之消失。
 
 **三条会误判的观察，记下来省得下次重查：**
 
-- **`Error: unknown tool ""` 不是配错。** 第一次调用时模型只发了参数
-  `{"name":"yw-invoice-redflush"}`、漏了函数名，内核照实报 `UNKNOWN_TOOL`；
-  **同一轮的下一步它自己补上 `skill` 这个名字就成功了**。判这个只能看轨迹页的两行，
-  对话页把失败和成功渲染成挨着的两块，看着像一次失败。同一模型同一中转跑
-  `todo_write` 一次就成，所以不是工具调用整体坏了。
+- **`Error: unknown tool ""` 不是配错，也不是模型抽风 —— 是中转的分片写法和内核对不上，
+  必现。** 详见下面「中转分片错位」一节。判这个只能看轨迹页的两行，
+  对话页把失败和成功渲染成挨着的两块，看着像一次失败。
 - **新会话不记忆上次选的档**，回到部署默认值 `standard`
   （`bundle/web-app/cordis.patch.yml:424`）。默认值是用户设置
   `agent-presets.default`，要改默认专家改它。
@@ -240,8 +236,120 @@ frontmatter 手术随之消失。
   要等组装文件本身变动或进程重启（README「已知限制」第三条）。
   技能全部重写那一轮会反复踩这个 —— 改完技能顺手 `touch` 一下组装文件。
 
-**一条待追**：技能加载成功之后那一步 `已重试模型请求（2/2）` 耗尽、最终那句话没出来
-（输入已到 26.9K tok）。是中转还是上下文长度，没查，单独排。
+**那次 `已重试模型请求（2/2）` 是外部的，根因已定位到具体渠道**：`llm/retry` 事件里两次失败是
+`DeepSeek stream idle timeout after 300000ms`（`TIMEOUT`）和
+`model returned a completed response with no content`（`EMPTY_RESPONSE`），跟上下文长度无关。
+原样重打一遍就通了（3 步 3m46s，口令原样答出）。
+
+查 `yw_zhoucongjie` 当天 3 小时的消费日志（`run_query__openlux_log`，按 `channel_id` 聚合），
+坐实是**渠道池里有坏成员，而且坏的恰好排在最前**：
+
+| 渠道 | 名称 | 优先级 | 上游 | 请求 | 平均耗时 | 最长 |
+|---|---|---|---|---|---|---|
+| 5976 | PICO-开源-0.3对私 | **294（最高）** | `142.0.143.129:3000` | 30 | **107.7s** | **812s** |
+| 6111 | PICO-开源-0.5稳定 | 289 | 同上 | 5 | — | **5/5 全 429** |
+| 6023 | dataeyes-glm*0.45 | 286 | `cloud.dataeyes.ai` | 3 | 13.0s | 23s |
+| 6264 | ominiai-glm-5.2*45折 | 285 | `api.ominiai.cn` | 7 | 38.1s | 153s |
+| 5978 | PICO-deepseek-v4-flash-0731 | 220 | `142.0.143.129:3000` | 2 | 47.5s | 65s |
+| 6083 | dataeyes-deepseek*0.65 | 220 | `cloud.dataeyes.ai` | 1 | 350s | 350s |
+
+服务端自己记下了 812 秒的请求，所以不是客户端错觉。6111 与 6083 的 `test_time` 为 0，
+健康检查从未跑过。**排查期的经验教训：撞到超时先查这张表再怀疑代码**
+——同一个探针脚本一小时内跑出过 38s / 2.9s / 90s 超时三种结果，差别只是落到哪条渠道。
+
+#### 中转分片错位：`unknown tool ""` 与空 callId 同一个根因（2026-08-17 查实）
+
+**必现，不是噪声。** 三条会话逐一挖出 `tool/call` 事件，第一步全是 `name: ""` → `UNKNOWN_TOOL`，
+换成 `todo_write` 也一样：
+
+| 会话 | 第 1 步 | 第 2 步（模型自纠） |
+|---|---|---|
+| 32abde65 | callId 正常，name `""` | callId **空**，name `skill` |
+| 4df8b516 | callId 正常，name `""` | callId **空**，name `todo_write` |
+| f86719e3 | callId 正常，name `""` | callId 正常，name `skill` |
+
+直接打中转看原始 SSE（`https://api.openlux.ai/v1`，`deepseek-v4-flash`，带一个 `skill` 工具定义），
+分片长这样：
+
+```
+delta #0: []
+delta #1: [{"id":"call_00_mdyGbDPV…","type":"function","function":{"name":"skill","arguments":""},"index":0}]
+delta #2: [{"function":{"name":"","arguments":"{"},"index":0}]
+```
+
+首片带齐 `id` 和 `name`（合规）；续片**省略 `id`**（也合规），但**带了 `"name": ""`**
+—— OpenAI 的约定是续片不带 `name`，发空串不合规。内核这边
+`llm-deepseek/src/translate.ts:159-160` 判的是 `!== undefined` 而不是真假：
+
+```ts
+if (call.id !== undefined) block.callId = call.id
+if (call.function?.name !== undefined) block.name = call.function.name
+```
+
+于是空串照样赋值，把首片的 `skill` 冲成 `""`。首片给 `id`、续片不给 → callId 活下来；
+反过来某些轮首片没给 `id`，`CallId(block.callId ?? '')` 就落成空串。表里两种形状都齐了。
+
+**两个后果轻重差得远：**
+
+- `unknown tool ""` —— 每次调工具白费一步，模型自己纠回来。纯浪费，能忍。
+- **空 callId —— 整条会话重载时读不出来。** `core/session/src/index.ts` 校验
+  `tool/result` 必须有非空 `source.callId`，写的时候不拦、读的时候拒收，
+  于是会话永久打不开。上表三条里已经死了两条。
+
+**解法：换适配器，不打补丁，也不用等中转。** 内核带了**两个** OpenAI 兼容适配器，
+我们默认用的 `llm-deepseek` 是严格的那个，旁边的 `llm-pi-ai` 在同一位置本来就是宽容写法：
+
+```ts
+// llm-pi-ai/src/stream.ts:168-169
+id: CallId(known?.id ?? ''),
+...known?.name !== undefined && known.name.length > 0 ? { name: known.name } : {},
+```
+
+`known.name.length > 0` 显式挡空串。更要紧的是它的 id/name 在 `toolcall_start` 时
+从 partial 一次取定（`toolIds` map），后续 delta 只贡献 arguments，
+**续片的空 name 结构上就没有写入路径**。上面两种坏形状它都不会中招。
+
+`llm-pi-ai` 已经挂在 base bundle 里，dormant 状态——零路由，直到 `settings.yaml`
+给出 provider profile 才热注册。base 的注释把用法写死了：
+
+> mounted dormant … then those routes register live … **Supplying those profiles is
+> exactly what the web Models page does.** Which adapters exist is composition;
+> which providers run is the user's settings document.
+
+所以这是一段用户设置，不是改代码，写进 `$DSH_HOME/settings.yaml` 即可（热重载，免重启）：
+
+```yaml
+llm-pi-ai:
+  providers:
+    yunwu:
+      displayName: 云雾
+      apiKeyEnv: DEEPSEEK_API_KEY
+      api: openai-completions          # 目录里没有的路由必须自报协议
+      baseURL: https://api.openlux.ai/v1
+      streamIdleTimeoutMs: 90000       # 顺手治渠道挂死拖满 300s
+      models:
+        - { id: deepseek-v4-pro,   name: 云雾 V4-Pro }
+        - { id: deepseek-v4-flash, name: 云雾 V4-Flash }
+```
+
+**真机复验（2026-08-17）：** 写入后 6 秒内选择器从 2 个模型变 4 个，没重启；
+两个模型各跑一次 MCP 工具调用，**首次即成，`unknown tool ""` 一次都没再出现**：
+
+| 模型 | 结果 | 用时 / 首 token |
+|---|---|---|
+| 云雾 V4-Pro | `mcp__ywprobe__ping · hello` → 口令 TOPAZ-9 | 9s / 5.2s |
+| 云雾 V4-Flash | `mcp__ywprobe__ping · second` → 口令 TOPAZ-9（带备注） | 9s / 5.3s |
+
+对照组是同一个探针在 `llm-deepseek` 下必现卡第一步。设置→模型页里这条路由显示为
+带「编辑 / 删除」的自定义提供方，用户以后在界面上管，不碰 YAML。
+
+**定为出厂默认**：云雾侧的模型走 `llm-pi-ai` 路由，`llm-deepseek` 留着不动（它对官方直连
+仍是对的）。中转那两条（续片不该发 `name` 空串、首片必须带 `id`）仍值得报过去，
+修了对所有客户端都好，但**不再阻断我们**，优先级降到「有空再说」。
+
+顺带记一条教训：这一处差点就去打 yarn `patch:` 了。`dsh/package.json` 的 `resolutions`
+里确实挂着两个先例（`app-builder-lib`、`dsh-sandbox-windows-acl`），路是通的——
+正因为通，才容易在内核明明留了旋钮的时候直接上手改，给每次跟上游同步埋刺。
 
 #### GUI 探针手法（这套东西验界面只能这么验，记方法不记文件）
 
@@ -257,10 +365,13 @@ preset 只活在 web-app 那套组装里，也就是我们的壳。所以专家�
   输入用 `Input.insertText`，发送用 `Input.dispatchKeyEvent` 的 Enter。
 - **判断有没有点中要隔一拍再读**：点完立刻查选择器标签会读到旧值，
   我因此误判过一次「没选上」，其实已经选上了。
-- **会话日志读不了别硬啃**：`$DSH_HOME/sessions/**/session.jsonl.zstd` 用
-  `zstdDecompressSync` 和流式 `createZstdDecompress` 都只解出一行 `session` 头
-  （31.6 KB 压缩 → 223 字符），不是简单的多帧拼接。要看工具调用原文走界面的**轨迹页**，
-  那里逐行列着 `TOOL <名字> <入参> → <返回>`。
+- **会话日志能直接解，别只靠轨迹页**：`$DSH_HOME/sessions/**/session.jsonl.zstd`
+  是**一次 flush 一个 zstd 帧、首尾相接拼起来的**。`zstdDecompressSync` 和流式
+  `createZstdDecompress` 都在第一帧结束就停（31.6 KB 压缩只解出 223 字符的 `session` 头），
+  看着像格式怪，其实只是没喂后面的帧。按魔数 `28 b5 2f fd` 切开、逐帧解、把结果拼起来，
+  就是完整的 JSONL，每行一个带 `seq` 和 `type` 的事件。
+  这条是查上面那个分片错位的唯一途径 —— 轨迹页只渲染人看的摘要，
+  `tool/call` 里的 `callId` 和 `name` 到底是不是空串，只有原始事件里看得到。
 
 ### 侧栏能往哪儿加：三个具名槽位
 
@@ -280,6 +391,33 @@ preset 只活在 web-app 那套组装里，也就是我们的壳。所以专家�
 `settings/Market.tsx` 948 行）就挂这些槽位。专家团成员条 `TeamMemberBar.tsx` 163 行
 与问答卡 `AskUserModal.tsx` 239 行**先比对内核的 `-subagent` / `-user-questions`
 再决定留不留**——按上面那条铁律，默认是不留。
+
+### 连接器：能力有、界面无、热重载也没有（2026-08-17 真机验完）
+
+这是全份名录里唯一一处内核真的缺东西的地方，而且**我们现在就有这个功能，直接迁会丢**。
+现状（`src/main/market/connector-installer.ts`）：连接器是市场里的一个条目类型，
+manifest 带 MCP server 配置，安装 = `openclaw mcp set <名字> <json>` →
+（OAuth 型再 `mcp login`）→ `mcp reload`，卸载 = `mcp unset` + reload，
+`market-connectors.json` 记安装态。**openclaw 内核自带运行时增删 MCP 服务器的通路和授权流。**
+
+DSH 侧逐条实测：
+
+| 问题 | 答案 | 证据 |
+|---|---|---|
+| 挂上去能不能连 | **能** | profile 用户层写一行 → 重启 → 自写的零依赖 stdio 探针收到 `initialize from dsh-mcp-client` 与 `tools/list`，即内核侧已连上并取走工具清单 |
+| 模型真能调到吗 | **能，最后一公里已通** | 换 `llm-pi-ai` 路由后（见「中转分片错位」一节），V4-Pro / V4-Flash 各一次 `mcp__ywprobe__ping`，**首次即成**，探针进程侧 `tools/call ping` 对得上，口令原样返回，各 9 秒。此前卡住的不是 MCP，是 `llm-deepseek` 撞中转分片错位 |
+| 要不要装包 | **不要** | `$DSH_HOME/profiles/node_modules/@deepseek-ai/dsh-mcp-client` 随 bundle 依赖树就在，早于我们任何安装动作 |
+| 往哪儿写 | `$DSH_HOME/profiles/<档>/cordis.patch.yml` | 文件头自己写着「Your patch layer for this dsh profile, applied after every bundle layer」，允许 `!!js`，默认是空数组 `[]`。**这是用户拥有、运行时可写的组合文件，等价于 `mcp set` 的落点** |
+| 改了能不能免重启生效 | **不能** | 应用运行中写入，等 16 秒探针进程没被拉起；重启后立刻拉起。`mcp-client` README 说的 HMR 指的是 loader 侧热替换，desktop 档的这个文件不在监听范围内。**`mcp reload` 没有对应物** |
+| 有没有现成界面 | **没有，而且上游是故意的** | `mcp-client` 无浏览器半侧；插件设置页只渲染插件自己注册的手写卡片（WebSearch / Bash / AgentLoop 三张），不枚举命名空间；就算写了卡片，命名空间还得进 `apiproxy` 里写死的 `WEB_SETTINGS_NAMESPACES`；preset 那条路上游明说「浏览器不再编辑任何组装文本」 |
+
+**所以连接器这条这样做**：界面沿用我们本来就要保留的市场页，安装 = 往 profile 用户层写一行、
+卸载 = 删掉那一行，落点全在我们自己的壳里，不动内核。两处净增成本要认：
+
+1. **生效要重启。** openclaw 是 `mcp reload` 立即生效，DSH 得重启应用。
+   装完提示「重启后生效」是最省的做法；想做到即时，得自己找 loader 的重载入口，属于未验的活。
+2. **OAuth 型要自己走。** openclaw 有 `mcp login` 内核代劳，`mcp-client` 只认静态
+   `headers` / `env`，授权那一趟得我们自己跑完再把 token 写进配置。
 
 ### 字标是唯一一处真冲突
 
@@ -458,6 +596,12 @@ schema 默认 → 注册方的 composition `base`（来自 `cordis.yml`）→ �
 落点是 `llm-pi-ai` 的目录层（`packages/llm/llm-pi-ai/src/catalog.ts`）。
 **结论：能一对一表达我们全部四个维度，而且比我们现在的形状更直白。**
 真机跑了 8 项自写探针 + 内核 `catalog.spec.ts` 52 项，共 60 项全绿（探针已删）。
+
+**这条闸门顺带把适配器选型也定了**：思考档位落在 `llm-pi-ai` 的目录层，
+运行时就该走 `llm-pi-ai` 的路由，两件事本来是一件事。后来「中转分片错位」那一节
+独立地又指向同一个结论（它对坏分片结构免疫），并已在真机上验过。
+阶段 2 因此不必再纠结「复用还是自留模型选择器」的适配器前提——路由已经跑起来了，
+剩下的是把 1,429 行判据翻成 `models[] + compat` 而已。
 
 | 我们现在怎么表达 | dsh 怎么表达 | 真机验到 |
 |---|---|---|
