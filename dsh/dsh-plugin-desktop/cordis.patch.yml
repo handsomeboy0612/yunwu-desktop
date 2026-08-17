@@ -78,3 +78,17 @@
             name: OpenLux V4-Pro
           - id: deepseek-v4-flash
             name: OpenLux V4-Flash
+
+# Point new installs at our route. The base bundle ships
+# `provider: deepseek-official` (bundle/base/cordis.patch.yml:63-67), which asks
+# for a DEEPSEEK_API_KEY nobody signing in with an OpenLux account will ever
+# have — a machine with no settings.yaml answered its first message with
+# MISSING_CREDENTIAL while the picker cheerfully read "DeepSeek-V4-Flash".
+#
+# This row is the composition entry `agent-default-model` installs as its
+# settings base, so a user who picks another model still overrides it through
+# the user layer; only the factory floor moves.
+- id: agent-default-model
+  config:
+    provider: openlux
+    model: deepseek-v4-flash

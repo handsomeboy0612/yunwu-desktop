@@ -885,6 +885,54 @@ useEffect(() => { if (onboardingActive) return; setCompletedOnboarding(new Set()
 
 宽栏下不挂 Tooltip：图标旁边已经把那个数印出来了，悬浮再重复一遍是噪音。
 
+#### 空家复验：不带任何既有状态从零走一遍（2026-08-17）
+
+前面所有真机验证都跑在同一个用了几天的 `DSH_HOME` 上，那里面攒了四样东西是新用户不会有的：
+欢迎提示的已读版本号、`llm-deepseek.baseURL`、`locale: zh`、默认模型
+`openlux / deepseek-v4-flash`。所以另起一个空目录重跑：
+
+| 查什么 | 结果 |
+|---|---|
+| 首屏是不是登录页 | 是。`#root` 冻住，标题「登录 OpenLux」，侧栏那行已经是「未登录」 |
+| 环境里的 `YUNWU_API_KEY` 会不会遮蔽 | **不会**。凭据名改成 `OPENLUX_API_KEY` 之后它就不相干了 |
+| 点「稍后」之后交给谁 | 内核自己的凭据步（「保存并继续 / 稍后配置」），顺序对 |
+| 没有 `settings.yaml` 还有没有出厂路由 | **有**。模型页照样列出 OpenLux 提供方与 v4-flash / v4-pro——它来自组合层 `cordis.patch.yml`，不是用户态 |
+
+**顺带纠正一条早先的误判**：之前登录页没出现，我一度归咎于环境变量 `YUNWU_API_KEY` 遮蔽凭据。
+空家实测证否——真实原因就是当时用户已经登录了，凭据库里有 `OPENLUX_API_KEY`。
+
+##### 抓到一个真缺陷：新装机第一条消息必然失败
+
+真账号在空家登录后（`sk-` 又复用了同一把，没新建重复令牌；侧栏立刻亮成 `$84.70`，
+不用重启），发第一条消息直接报：
+
+```
+provider route "deepseek-official"; store DEEPSEEK_API_KEY through the credentials service
+MISSING_CREDENTIAL
+```
+
+**默认模型落在内核自带的 `deepseek-official` 上。** 基础组合包写死
+`provider: deepseek-official`（`bundle/base/cordis.patch.yml:63-67`），
+而拿 OpenLux 账号登录的人永远不会有 `DEEPSEEK_API_KEY`。旧家之所以一直没暴露，
+是因为它的 `settings.yaml` 攒了一行 `agent-default-model: provider openlux`——纯用户态。
+更阴的是模型选择器当时显示「DeepSeek-V4-Flash」，看着像配好了。
+
+修法和当初压 `llm-pi-ai` 同一招：组合层按 id 覆盖那一行。它是
+`agent-default-model` 装进设置系统的 base 层，所以用户改选别的模型照样能盖过去，
+动的只是出厂地板：
+
+```yml
+- id: agent-default-model
+  config:
+    provider: openlux
+    model: deepseek-v4-flash
+```
+
+改完复验：选择器变成 **OpenLux V4-Flash**，同一条消息 7 秒回「空家已通。」，首 token 7.9s。
+
+**教训是流程性的**：所有真机验证都跑在同一个用了几天的 home 上时，用户层会把出厂层的
+窟窿盖住。凡是「新用户第一次打开」的判断，必须在空 `DSH_HOME` 上重跑一遍。
+
 #### 老代码重新判定：活下来的比原先估的少
 
 | 老代码 | 行数 | 命运 | 理由 |
