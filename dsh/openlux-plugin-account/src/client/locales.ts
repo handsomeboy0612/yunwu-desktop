@@ -36,6 +36,22 @@ export const zh = {
   'captchaRetry': '验证未通过，请重试',
   'captchaRetryAgain': '还是没过，换一张试试',
   'captchaAngle': '旋转角度',
+
+  'triggerAria': '账号与余额',
+  'panelAria': '账号',
+  'signedIn': '已登录',
+  'signedOut': '未登录',
+  'signIn': '登录',
+  'signOut': '退出登录',
+  'sessionExpired': '登录已过期，重新登录',
+  'balance': '余额',
+  'balanceLoading': '获取中…',
+  'balanceStale': '缓存',
+  'balanceStaleTitle': '这次没取到最新余额，显示的是上次的数',
+  'balanceFailed': '获取失败',
+  'refresh': '刷新余额',
+  'used': '累计已用',
+  'group': '用户分组',
 } satisfies Record<string, string>
 
 /** Key union of this package's copy. */
@@ -69,4 +85,20 @@ export const en = {
   'captchaRetry': 'That was not right — try again',
   'captchaRetryAgain': 'Still not right; here is a new challenge',
   'captchaAngle': 'Rotation angle',
+
+  'triggerAria': 'Account and balance',
+  'panelAria': 'Account',
+  'signedIn': 'Signed in',
+  'signedOut': 'Not signed in',
+  'signIn': 'Sign in',
+  'signOut': 'Sign out',
+  'sessionExpired': 'Session expired — sign in again',
+  'balance': 'Balance',
+  'balanceLoading': 'Loading…',
+  'balanceStale': 'cached',
+  'balanceStaleTitle': 'This refresh failed; showing the previous value',
+  'balanceFailed': 'Could not read',
+  'refresh': 'Refresh balance',
+  'used': 'Total used',
+  'group': 'User group',
 } satisfies Record<AccountKey, string>
