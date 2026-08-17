@@ -677,6 +677,51 @@ universal 那组的既有失败，与上游基线一致；`profile.spec.ts` 没�
 import 了 katex 的样式表）。试过把它们逐个声明上：警告从 7 涨到 21 再涨到 30，是发散的。
 `skipLibCheck` 只跳过 `.d.ts` 内部的检查，不影响我们自己的源码被完整检查。
 
+#### 浏览器怎么调宿主：自建 RPC 通道，不走 Typert（2026-08-17 验通）
+
+登录、图形验证码、余额三个接口都不带 CORS 头，浏览器直接 fetch 会被挡，所以这三件事必须落在
+host 半边，browser 半边得能调过去。
+
+**内核的标准答案是 Typert Remote**：host 侧 `class X extends TypertRemoteService` + 方法上打
+`@Remote`，browser 侧 `ctx.remote.<ns>.<method>()`。查下来这条路我们走不了，卡在两处，
+**都是先验后判、不是猜的**：
+
+| 卡点 | 出处 | 实测 |
+|---|---|---|
+| browser 侧挂载前强制每个入参与返回值都有 codegen 出的 strict codec | `api/gateway/src/client/index.ts:549-564`；README:39 明说 SRC 标记在客户端面无 codec | SRC 回退产出的全是 `mode:'src-json'`（`gateway/src/index.ts:300,306,355`），必然抛 |
+| strict codec 只能由内核的 typert 生成器产出，种子是内核仓自己的 `tsconfig.host.json` | `typert/generator/README.md:19-21` | 我们的包在 `dsh/` 独立 workspace，进不了那条流水线 |
+
+绕过 browser 面直接打底层 `rpc.call('/api', 'ns/method', {args})` 也试过，**在编译这一关就先死了**：
+`@Remote` 是 TC39 标准装饰器，V8 至今没实现，得靠构建期降级成 `__esDecorate`。内核自己走 `tsc`
+所以自动降级（对照它的产物：`dsh-message-feedback/lib/index.js` 里 `list(request)` 前面干干净净，
+文件顶部有 `__esDecorate` 辅助）；我们走 tsdown（rolldown/oxc），**`@Remote("ping")` 原样留在产物里**，
+Node 直接 `SyntaxError: Invalid or unexpected token`。把 target 从 es2024 降到 es2022 也不触发转换。
+
+**所以改用内核给插件预留的另一个口子**：`ctx.connection.rpc.handle('/openlux', handler, { authority: 'loopback' })`。
+它自己注册 webserver 前缀路由、校验请求信封、按 authority 拒非回环来源（`client/connection/src/rpc-host.ts:90-115`），
+注册走的是调用方 fiber 的 `effect`，随插件一起销毁。`/api` 是保留字，自建通道必须另起名
+（`:220-224`）。这条路没有装饰器、没有 codegen、不靠解析函数源码取形参名，比 Typert 少三层假设。
+
+**它不是野路子**：内核自己的契约测试把 `rpc.handle` 的成功、403、方法不匹配、处理器抛错四条路径
+全测了（`client/connection/tests/node-half.host.spec.ts:227-418`）。代价是没有生成的类型投影——
+但那本来就拿不到，Typert 在我们这儿不提供任何我们能用的东西。
+
+**一条硬约束要记住**：`RpcErrorDetailsMap` 是内核里的闭合联合（`host/apiproxy/src/api/rpc.ts:32-110`），
+仓外加不了新错误码。所以**业务失败不能走 error 分支**，得跟内核自己的服务一样，从 `ok:true` 里带
+自己的判别式返回（`message-feedback/src/index.ts:190-196` 是范本）；error 分支只留给真正的意外。
+验证码错、密码错、账号锁定这些将来都走前者。
+
+顺带两条同源事实：**超时内核一处都没有**（浏览器 `rpc.call` 只透传调用方 signal，
+`client/connection/src/client/rpc.ts:30-38`），要自己用 `util/timeout` 的 `deadline()`；
+**写凭据根本不用新增 host 方法**——`credentials.set` 早在 apiproxy 协议上
+（`api/rpc-map.ts:71-73`），而且它把 `assertUnshadowed` 抛的裸 `Error` 映射成了有码的
+`credential-rejected`（`api-proxy.ts:3274-3288`）。只有**读回**凭据明文是故意不上协议的
+（`api/credentials.ts:3-7`）。
+
+**真机复验**：登录步里那行显示「宿主应答 AMBER-4471，回声「来自登录步」，凭据服务在」——
+一次调用同时证明了通道通、payload 过河完整、host 侧 `ctx.credentials` 在场。
+测试 297 通过 / 4 失败，与上游基线一致。
+
 #### 老代码重新判定：活下来的比原先估的少
 
 | 老代码 | 行数 | 命运 | 理由 |
