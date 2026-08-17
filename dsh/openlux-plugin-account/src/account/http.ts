@@ -134,6 +134,80 @@ export async function requestJson(
 }
 
 /**
+ * Fetch bytes under a deadline, refusing a body that outgrows a cap.
+ *
+ * `arrayBuffer()` would take the server's word on how much is coming: a body
+ * that keeps arriving fills this process before anyone gets to look at it. So
+ * the cap is what decides, `content-length` is only the polite case's early
+ * refusal, and the reader is cancelled the moment the cap is passed rather than
+ * after the transfer finishes.
+ *
+ * Unlike {@link requestJson}, a non-2xx status *is* a failure here: an artifact
+ * route answers with the bytes or with nothing, and a signed link that has
+ * expired must not reach the caller as a zero-length archive.
+ * @param ctx - host context, read for the language to request.
+ * @param url - absolute request URL.
+ * @param timeoutMs - budget for this request.
+ * @param maxBytes - hard cap; the transfer is cancelled once it is exceeded.
+ * @param upstream - caller cancellation, fused in.
+ * @returns the body bytes.
+ * @throws {AccountRequestError} when no usable body arrived.
+ */
+export async function requestBytes(
+  ctx: Context,
+  url: string,
+  timeoutMs: number,
+  maxBytes: number,
+  upstream?: AbortSignal,
+): Promise<Uint8Array> {
+  using budget = deadline(upstream, timeoutMs, 'openlux-market')
+  let response: Response
+  try {
+    const headers = new Headers({ 'Accept-Language': acceptLanguage(ctx) })
+    response = await fetch(url, { headers, signal: budget.signal })
+  } catch (error: unknown) {
+    if (timeoutOf(budget.signal) !== undefined) {
+      throw new AccountRequestError(`下载超时（${Math.round(timeoutMs / 1000)} 秒未完成）`, 'timeout')
+    }
+    if (upstream?.aborted === true) throw new AccountRequestError('下载已取消', 'cancelled')
+    throw new AccountRequestError(
+      `无法下载制品：${error instanceof Error ? error.message : String(error)}`,
+      'unreachable',
+    )
+  }
+  if (!response.ok) {
+    throw new AccountRequestError(`下载失败（HTTP ${response.status}）`, 'unreachable')
+  }
+  const declared = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new AccountRequestError(`制品声明的大小超过上限（${declared} > ${maxBytes} 字节）`, 'unreachable')
+  }
+  if (response.body === null) throw new AccountRequestError('制品响应没有内容', 'unreachable')
+
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value === undefined) continue
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel()
+        throw new AccountRequestError(`制品超过大小上限（>${maxBytes} 字节）`, 'unreachable')
+      }
+      chunks.push(value)
+    }
+  } finally {
+    // Releasing a cancelled reader is allowed; guarding it keeps a release
+    // fault from replacing the refusal that caused it.
+    try { reader.releaseLock() } catch { /* the stream is already gone */ }
+  }
+  return Buffer.concat(chunks)
+}
+
+/**
  * Read the console's envelope, tolerating routes that answer bare objects.
  * @param body - parsed response body.
  * @returns the envelope view, never undefined.

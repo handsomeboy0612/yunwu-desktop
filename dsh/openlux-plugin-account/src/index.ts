@@ -35,6 +35,7 @@ import { signIn } from './account/auth.ts'
 import { BalanceReader } from './account/balance.ts'
 import { fetchCaptcha, fetchCaptchaConfig, verifyCaptcha, type CaptchaType } from './account/captcha.ts'
 import { clearSession, readSession } from './account/session.ts'
+import { installPreset, readInstallTarget, type InstallOutcome, type InstallRequest, type InstallTarget } from './market/install.ts'
 import { syncModels } from './models/sync.ts'
 
 /**
@@ -78,11 +79,22 @@ export function apply(ctx: Context, config: Config = {}): void {
   const baseUrl = (config.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '')
   const balance = new BalanceReader(ctx)
 
+  // Installs run one at a time. They stage inside the same preset root and
+  // verify by re-reading the roster, so two in flight could rename over each
+  // other's verification window — serialising is also what the upstream market
+  // shell requires of a host (`dsh-community-market/docs/market-shell.zh.md`).
+  let queue: Promise<unknown> = Promise.resolve()
+  const serialize = <T>(task: () => Promise<T>): Promise<T> => {
+    const result = queue.then(task, task)
+    queue = result.catch(() => undefined)
+    return result
+  }
+
   // `handle` registers through the calling fiber's own effect, so the route
   // and its disposal already follow this plugin's lifetime.
   ctx.connection.rpc.handle(ACCOUNT_CHANNEL, async (endpoint, payload, signal) => {
     try {
-      return await route(ctx, baseUrl, balance, endpoint, payload, signal)
+      return await route(ctx, baseUrl, balance, serialize, endpoint, payload, signal)
     } catch (error: unknown) {
       // A handler that throws becomes a plain-text 500 upstream
       // (`client/connection/src/rpc-host.ts:183-185`), and the browser sees a
@@ -120,6 +132,7 @@ export function apply(ctx: Context, config: Config = {}): void {
  * @param ctx - host context.
  * @param baseUrl - console origin.
  * @param balance - the per-process balance cache.
+ * @param serialize - runs one task at a time across this channel.
  * @param endpoint - method name within this plugin's channel.
  * @param payload - request body, shaped per endpoint.
  * @param signal - caller cancellation.
@@ -129,6 +142,7 @@ async function route(
   ctx: Context,
   baseUrl: string,
   balance: BalanceReader,
+  serialize: Serializer,
   endpoint: string,
   payload: unknown,
   signal?: AbortSignal,
@@ -160,6 +174,15 @@ async function route(
     case 'models.sync':
       return { ok: true, value: await syncModels(ctx, { baseUrl, apiKey: () => apiKey(ctx) }, signal) }
 
+    // Where an install would land, and what the roster already holds. The
+    // gallery needs both before it can mark a card installed, and the
+    // confirmation dialog needs the resolved directory to name its target.
+    case 'market.target':
+      return { ok: true, value: await marketTarget(ctx) }
+
+    case 'market.install':
+      return await marketInstall(ctx, serialize, payload, signal)
+
     default:
       // The error-code union belongs to the kernel and cannot grow a row from
       // out here, so an unroutable endpoint reuses the code the kernel's own
@@ -176,6 +199,96 @@ async function route(
           details: { issues: [] },
         },
       }
+  }
+}
+
+/** Runs one task at a time, in the order the calls arrived. */
+type Serializer = <T>(task: () => Promise<T>) => Promise<T>
+
+/**
+ * Report where a market install would land.
+ *
+ * A deployment that composed no preset roster is not a fault — the kernel
+ * supports that shape, with the model-facing rows sitting in the host
+ * composition instead — so it answers as a target that cannot accept installs,
+ * on the success arm, the way every other outcome here does.
+ * @param ctx - host context.
+ * @returns the install target.
+ */
+async function marketTarget(ctx: Context): Promise<InstallTarget> {
+  // `ctx.get` rather than `ctx.agentPresets`: the roster is consumed
+  // opportunistically, and an undeclared property read fails the reflect proxy
+  // outright ("cannot get property without inject") — the kernel's own gateway
+  // notes the same distinction (`host/apiproxy/src/api-proxy.ts:3172-3176`).
+  const presets = ctx.get('agentPresets')
+  if (presets === undefined) return { authorable: false, installed: [] }
+  return await readInstallTarget(presets)
+}
+
+/**
+ * Install one preset from the catalog.
+ * @param ctx - host context.
+ * @param serialize - the channel's install queue.
+ * @param payload - the request as the browser sent it.
+ * @param signal - caller cancellation.
+ * @returns the RPC result; install refusals ride the success arm as values.
+ */
+async function marketInstall(
+  ctx: Context,
+  serialize: Serializer,
+  payload: unknown,
+  signal?: AbortSignal,
+): ReturnType<ConnectionRpcHandler> {
+  const presets = ctx.get('agentPresets')
+  if (presets === undefined) {
+    const refused: InstallOutcome = {
+      kind: 'refused',
+      reason: 'not-authorable',
+      message: '当前部署没有组合 agent 预设，无法安装专家。',
+    }
+    return { ok: true, value: refused }
+  }
+  const request = installRequestOf(payload)
+  if (request === undefined) {
+    // A malformed request IS the caller's mistake, so this one is an error
+    // rather than an outcome: no user action fixes a missing digest.
+    return {
+      ok: false,
+      error: {
+        code: 'bad-request',
+        message: '安装请求缺少必要字段（id / url / sha256 / itemId）',
+        details: { issues: [] },
+      },
+    }
+  }
+  return { ok: true, value: await serialize(() => installPreset(ctx, presets, request, signal)) }
+}
+
+/**
+ * Read an install request off the wire.
+ *
+ * Every field is required and every field is a string: the catalog is what
+ * supplies them, so a missing one means the gallery sent a half-built request
+ * rather than that the user typed something wrong.
+ * @param payload - the request body.
+ * @returns the request, or undefined when it is not one.
+ */
+function installRequestOf(payload: unknown): InstallRequest | undefined {
+  const raw = payload as Record<string, unknown> | null
+  const text = (key: string): string | undefined => {
+    const value = raw?.[key]
+    return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+  }
+  const [id, url, sha256, itemId] = [text('id'), text('url'), text('sha256'), text('itemId')]
+  if (id === undefined || url === undefined || sha256 === undefined || itemId === undefined) return undefined
+  const [version, kernelApi] = [text('version'), text('kernelApi')]
+  return {
+    id,
+    url,
+    sha256,
+    itemId,
+    ...version === undefined ? {} : { version },
+    ...kernelApi === undefined ? {} : { kernelApi },
   }
 }
 

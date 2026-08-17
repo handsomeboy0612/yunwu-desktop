@@ -1238,6 +1238,65 @@ Off/Low/Medium/High/Xhigh。发一条真消息（GPT-5.4 经 `api.openlux.ai`）
 - **仍待定性的一条**：并行工具调用时 `name`/`id` 流式组装丢字段
   （`unknown tool ""`，重试自愈，尚未定性）。
 
+#### 阶段 3 闸门已通过（2026-08-18）：真专家团一轮，六条判据全过
+
+先按规矩查了官方文档（`deepseek-harness.github.io` 的 subagent / capability-seams 两页），
+再回 rc.6 的类型与组合文件核了一遍——文档站是 rc.7，两边对得上的才敢用。
+
+**一条决定形状的事实：web-app 部署把所有面向模型的委派与技能工具都 `disabled`，改由 preset 逐行挂载。**
+出处 `packages/bundle/web-app/cordis.patch.yml:321-425`，它自己的注释写得很清楚：
+「What a preset chooses is which delegation TOOLS its agent sees」。所以
+
+| 我们要的结果 | 老壳怎么做的 | 新内核原生怎么给 |
+|---|---|---|
+| 一条会话一个专家人设 | 插件按 sessionKey 注入 | preset 里一行 `dsh-persona`，遮蔽部署级人设 |
+| 技能随专家走 | 藏起全部市场技能再按专家注入 | preset 自带 `skills/` 目录 + 自己那行 `skill-filesystem`（注册进本 preset 的层） |
+| 模型只看到该角色的工具 | `disable-model-invocation` + 提示词 | preset 挂哪几行，模型就只有哪几个工具 |
+| 专家团成员各自人设 | leader 自 spawn + label 路由 | 一成员一行 `dsh-tool-subagent`，各配 `toolName` / `persona` / `toolFilter` |
+| 成员产出回到 leader | 自己写 `team-relay.ts` 投 `<teammate-message>` | 前台一次性委派：成员产出**就是**工具结果。后台可继续的另有内核原生 `reportFrom()` |
+
+`persona` 与 `toolFilter` 是 **tool 实例的配置，不是模型能填的参数**
+（`dsh-tool-subagent/lib/types/index.d.ts:40-55`，原文 "applied to every child"），
+所以"一成员一行"不是我们的发明，是这个工具唯一的用法。
+
+**真机跑的那一轮**（preset `yw-team`：组长 KUMO-LEAD-7 + 组员 SCRIBE-4 / AUDIT-9，
+deepseek-v4-flash，1 轮 2 步 38 秒）：
+
+1. **组长人设接管**——回答首行 `[KUMO-LEAD-7]`，且 `request/header.system` 里能看到
+   部署提示词后面接着 preset 的人设正文。
+2. **两个成员各自人设生效**——工具结果原文分别以 `SCRIBE-4` 和 `我的代号是 AUDIT-9` 开头。
+3. **`toolFilter` 逐成员生效**——allow 那个只剩 `TOOLS=<skill>` 一件；deny 那个是全局九件
+   减掉 `pwsh`/`write`/`edit`，剩六件，一件不差。
+4. **产出回到组长**——前台一次性委派，成员产出直接是 `tool/result`，组长下一步就转述了。
+   老壳那条 `team-relay.ts` 连同它带出来的重复投递，在这条路上根本不存在。
+5. **成员继承 cwd 与谱系**——子会话头一行就是判据：
+   `{"parentSession":"session-cce…","origin":"subagent","delegationDepth":1,"agentPreset":"yw-team","cwd":"…\\dsh-plugin-desktop"}`。
+6. **界面自带成员入口**——会话里出现内核自己的「2 个子代理」按钮（`dsh-client-ui-subagent`），
+   不用我们做。
+
+**四条会咬人的默认行为，抄之前先处置：**
+
+- **成员默认看得见其他成员的委派工具。** AUDIT-9 的名录里有 `delegate_writer` 和
+  `delegate_auditor`——成员能互相派活，也能自己套自己（默认 `maxDepth: 3`）。
+  做专家团时成员这一行必须显式 deny 掉全部 `delegate_*`，或者干脆用 allow 白名单。
+- **成员默认看得见我们挂的连接器工具。** `mcp__ywprobe__ping` 就在成员名录里。
+  连接器是按全局工具注册的，不过滤就会漏进每个成员。
+- **`toolFilter` 写错名字是 loud 失败，而且会把已知工具名全列出来**——
+  `tools.restrict() names unknown global tool "x"; known global tools: …`。
+  这既是保护，也是最省事的工具名发现手段（我们这次就是这么拿到那九个名字的）。
+- **系统提示词里在自报 DeepSeek Harness。** 真机 `request/header.system` 开头是
+  "You are an AI agent powered by DeepSeek Harness"，后面还跟着本地 checkout 路径和
+  `http://127.0.0.1:63385` 这个 GUI 地址。对外发版之前这段必须换掉，落点是
+  `system-prompt` 那行的 `persona`（base 里是空串，web-app 的 patch 填的）。
+
+**preset 免不免重启：内核免，客户端不免。** `dsh-agent-presets` 的类文档写着
+「Discovery is unmemoized: `list()` and `resolve()` re-read the roots on every call」，
+真机复验的结果精确到这一步：进程运行期新写的 preset，**不刷新看不到；刷新一次页面就出现，
+不用重启进程**——缓存在浏览器侧的选择器里。所以专家市场装完一个专家，代价是一次页面刷新。
+另外两条同源事实：改 preset 文件对**之后新建的会话**生效（每一代记文件戳，戳变了起新一代，
+已经跑着的会话留在原来那一代）；`copy()` 是唯一的写入口且只能整目录复制，
+市场安装只能自己往可写根目录落文件——跟我们这次探针的做法一样。
+
 ### 阶段 4 · 媒体（4~6 周）· 四条闸门已通过
 
 **原本判定这是全案最大的不确定性，因为风险不在"要写多少行"，在"dsh 有没有承载它的能力"。
@@ -1419,6 +1478,148 @@ dsh 的工具收窄是运行时 API `ctx.tools.restrict({ allow?, deny? })`，�
   「思考预算 + 正文」给。实测 1200 时 `reasoning_tokens` 一次就烧 1149，正文只剩 45 个 token，
   答案截断成半句，而 `finish_reason` 仍是 `stop`、回执结构完好——**不报错的失败**，上层不会换后端。
 
+#### 阶段 3 / 5 定案（2026-08-18）：内容用 WorkBuddy 的，分发走内核的目录，不造市场内核
+
+联网查了官方仓库、文档站（skills / agent-presets / core）、以及社区那几家
+「DSH 插件市场」（dshplugin.world、w2112515/dsh-plugin-marketplace、NanmiCoder/dsh-plugin-market）。
+再回 rc.6 的类型与 README 核对。三条必须分开的事实：
+
+1. **DSH 官方没有专家/技能商店。** 官方发现渠道是 GitHub topic `dsh-plugin`，
+   安装命令是 `dsh plugin add github:owner/repo`——那是 **Cordis 插件**（改运行时能力），
+   不是人设内容。社区那几家市场也是在扫这个 topic、往 profile 里 `pnpm add`。
+   **不能拿它们当专家市场来抄**，产品不是一回事。
+2. **专家的分发单位内核已经定死：一个 preset 目录。**
+   `copy()` 是内核唯一的创作写入，而且**拒绝调用方提交组装文本**
+   （`dsh-agent-presets/lib/types/authoring.d.ts:8-11`）——所以市场安装不能走 `copy()`，
+   只能自己把目录写进可写根。发现不做缓存，写完刷新页面即可。
+3. **WorkBuddy 的内容形状已经在本机。**
+   `C:\\Users\\000\\.workbuddy\\plugins\\marketplaces\\experts\\plugins\\<slug>\\`
+   共 22 个包。单体专家是 `agents/<name>.md` + `skills/` + `plugin.json`
+   （`expertType: agent`）；专家团多几个 `agents/*.md` 和 `teamInfo.leadAgent / memberAgents`
+   （`expertType: team`）。旧壳错在把这些平铺进 `~/.openclaw/skills` 再用
+   `skill-visibility.ts` 藏名录——内容没错，落点错了。
+
+**三落点，对内核三套根，不要混：**
+
+| 装什么 | 落到哪 | 内核怎么看见 | 信任 |
+|---|---|---|---|
+| 出厂几个专家 / 专家团 | 桌面包自己的 `config/agent-presets/<id>/`，组合里加一条 `system` 根（**不要**写进 `@deepseek-ai/dsh/config/agent-presets`，升级会覆盖） | `ctx.agentPresets.list()` | `system`，只读、升级覆盖、选择器不当作用户创作 |
+| 市场装的专家 / 专家团 | `$DSH_HOME/.agent-presets/<id>/` | 同上，`includeUserRoot` 默认就会扫 | `user`，可删；卸载走 `ctx.agentPresets.remove(id)` |
+| 市场装的**独立**技能 | `$DSH_HOME/skills/<id>/` | 出厂 `standard` / `code` / `cordis` 的 `skill-filesystem` 默认 `includeDefaultRoots: true` | 用户技能根。专家 preset 必须 `includeDefaultRoots: false`，只扫自己的 `skills/`，否则独立技能会漏进每个人设 |
+| 连接器 | profile 用户层一行 MCP（阶段 5 已定） | `dsh-mcp-client` | 与专家无关 |
+
+**WorkBuddy 包 → preset 目录的映射（内容保留，机制换掉）：**
+
+| WorkBuddy | DSH preset |
+|---|---|
+| `plugin.json` 的 `displayName.zh` / `displayDescription.zh` | `preset.yml` 的 `name` / `description`；`id` 是目录名，必须 `[a-z0-9][a-z0-9-]*` |
+| `agents/<lead>.md` 正文 | `dsh-persona` 的 `text`（身份指令里的 CodeBuddy 换成 OpenLux） |
+| `skills/*` | 档内 `skills/` + `skill-filesystem.customSkillDirs` 指向 `new URL('skills/', baseUrl)`，`includeDefaultRoots: false` |
+| 专家团 `teamInfo.memberAgents` | 一成员一行 `dsh-tool-subagent`：`toolName` / `persona` / `toolFilter`（**显式 deny 全部 `delegate_*` 和 MCP 工具**，闸门已踩过） |
+| 成员加入哪份组装 | **不要**给成员单独 preset。内核规定子代理 `composeFrom()` 加入父方常驻组装（README「组装子 agent」），成员技能名录 = 团的 `skills/` |
+| 头像 / 开场白 / 快捷提示 | 内核 `preset.yml` 只有 name/description/order。这些是**市场画廊**的字段，挂我们自己的 gallery，不要塞进组装文件 |
+| 已安装列表 | **不要再养一份 `experts.json`。** WorkBuddy 自己也没有；内核 roster（盘上有哪些 preset 目录）就是已装列表 |
+
+**界面：内核已有的用内核的，市场画廊才是我们加的。**
+
+- 选择专家 = 内核的新建会话 chip + 设置页「Agent 预设」卡片（复制 / 删除 / 设默认 / 打开目录）。**不重做选择器。**
+- 浏览 / 安装 / 更新 = 我们的市场画廊（WorkBuddy 专家中心那个结果）。内核没有商店 UI，这是被逼自己做的那一层；槽位走 `settings.section` 或侧栏，具体挂哪等画廊动手时再对 WorkBuddy 解包，不提前发明。
+- 装完刷新一次页面——缓存在浏览器选择器，不在内核。
+
+**admin-server 制品：格式加版本，不能一刀切。** 旧客户端还在拉 openclaw 形状的 zip。
+新制品是 preset 目录的 zip（`preset.yml` + `agent.cordis.yml` + `skills/`）。
+`desktop_market_item` 加内核/格式字段，snapshot 按客户端能力过滤。下载直链机制不动。
+转换器跑在导入侧（`ImportExpertCenter`），本机 WorkBuddy 包是输入，preset 目录是输出——
+客户端不要在运行时解析 `agents/*.md`。
+
+**先内置、后市场。** 出厂先落 1 个单体 + 1 个专家团，用真 WorkBuddy 内容把
+「人设接管 / 技能只在该专家名录 / 团员 toolFilter」再跑一轮；过了再接 snapshot 安装。
+
+#### 市场安装重判（2026-08-18）：管理那半边内核已经做完了，我们只做「浏览 + 安装」
+
+上一节写"内核没有商店 UI"是对的，但漏了一件更值钱的事：**「已装专家的管理」内核自带一整套**，
+而且我们仓里就躺着上游自己的市场规范。两处都要拿来用。
+
+**一、上游 `dsh-community-market` 是我们 subtree 进来的包，规范先于实现。**
+`yunwu-desktop/dsh/dsh-community-market/`（归属 `anywhere-labs/deepseek-harness-desktop`）只有
+文档、没有 src，自称 Phase 0「文档优先的初始化工程，现在不要加进 DSH profile」。它给了两样东西：
+
+- **市场壳设计**（`docs/market-shell.zh.md`）：Host 管目录 I/O、校验、标准化、安装编排、取消、
+  串行化；renderer 只经普通 route/RPC 收标准化纯数据，拿不到 Electron / fs / 包管理器。
+  安装必须两步意图，确认框展示锁定后的精确目标 + 当前 profile + 「以用户权限本地运行」提示。
+  **绝不执行目录返回的命令字符串**；远程字段只当文本渲染。失败矩阵逐条列了副作用。
+  这套规则与我们的专家市场完全适配，**照它做**。
+- **目录提供方合同**（`docs/catalog-provider-contract.zh.md` + 4 个 JSON Schema）：来源 manifest、
+  query、不可信 provider page、Host 标准化响应。
+
+**但它的 wire 条目装不了"专家"**：`catalog-provider-page.schema.json` 的 item 是
+`additionalProperties: false`，且 `anyOf` 要求必须带 `repository` 或 `package`（`registry` 写死
+`const: "npm"`）。专家是内容制品（tar/zip + 版本 + 摘要），既不是 npm 包也不是 git 仓库，
+**结构上表达不出来**。它的安装路径也是 `desktopPnpm.runPlugin('add')` → 装 Cordis 插件 → 提示重启，
+跟"写一个 preset 目录、立即可用"是两件事。所以：**壳规则照搬，wire 格式自己定**——
+这是"查不到先例才自己设计"的那一类，代码注释里要写明被什么逼的。
+
+**二、内核已有的管理界面（真机 2026-08-18 实见，advanced 模式）。**
+设置页第四栏「Agent 预设」（`settings.section`，排在「模型」之后）就是完整的已装列表：
+
+| 行的信任 | 内核给的动作 |
+|---|---|
+| `system`（出厂） | 设为默认 / 查看（只读查看器） / 复制 |
+| `user`（市场装的、手工创作的） | 设为默认 / **打开目录** / 复制 / **删除** |
+
+`broken` 行渲染成红框标记卡、原样展示原因、禁用设默认与复制，但**保留删除**（这正是清幽灵目录的入口）；
+没有可写根时整栏降级为只读浏览（`authorable: false`）。`agentPreset.read/copy/openDocument/remove`
+钉在环回地址，`list` 不钉（局域网客户端的选择器要用）。
+
+**所以卸载、改默认、打开目录、看组装、坏档处置，一律不做**——我们做的只有"浏览市场 + 装进来"。
+
+**三、安装机制已在真机验通，零代码、零重启、零刷新。**
+拿一个没上过的真制品 `ad-creative-strategist`（`%TEMP%\ec-sweep\ex\` 下共 **409** 个 tar 解包目录，
+形状就是 WorkBuddy 专家包）：物化 → 整目录放进内核报告的可写根
+`$DSH_HOME/.agent-presets/ad-creative-strategist/`。应用全程没重启、页面没刷新，
+再开设置页就看见「点睛睛」落在**自定义**组，描述正确，四个动作齐全（设为默认 / 打开目录 / 复制 / 删除）。
+名录在**自身操作、`settings/changed`、`connection/reset`** 时重读（`dsh-client-ui-agent-preset`
+README「已知限制」），所以装完不必让用户刷新页面——上一节那句"装完刷新一次页面"就此作废。
+
+安装器因此只有五步，每步都压在内核既有判据上：
+
+1. `ctx.agentPresets.authorable` 为假直接拒绝并说明原因（别给一个点了必然失败的按钮）。
+2. 落点取 `writableRoot(ctx.agentPresets.roots)`，**不要硬编码 `$DSH_HOME/.agent-presets`**——
+   内核注释明说这条根是 `includeUserRoot` 的默认值，路径归它。
+3. id 用内核的 `PRESET_ID` 校验；已被占用就拒绝（对齐 `copy()` 从不覆写）。
+4. 先解到临时目录再原子改名进可写根，避免半个解包占住 id 变成 `broken` 幽灵。
+5. 装完用 `list()` 复验：新行必须在、`broken` 必须为空；不然按内核给的 reason 报错并回滚。
+
+卸载不写代码（内核卡片的删除按钮就是）；要在自己界面上提供入口时调 `ctx.agentPresets.remove(id)`，
+它会拒绝出厂档，也会顺手清掉指向它的默认值。
+
+**四、市场归属记在 sidecar，不能进 `preset.yml`。**
+`preset.yml` 按内核定义**只承载显示文本**（name / description / order），而 `copy()` 会重写它的
+name 与 order。所以"这条是市场装的、版本多少"写成档内独立文件 `openlux-market.json`。
+这与旧册子那条教训同源：归属别写进会被整目录换入冲掉的正文。
+
+**五、对账判据换成内核的健康结论。** 旧壳的自愈判据是"不只比版本号，还要看人设在不在盘上"；
+DSH 上这件事内核替我们做了——`list()` 里 `broken` 带原因就是权威结论。
+下架清理只扫「`user` 行 + 有我们 sidecar + id 命中目录快照」这三者的交集，
+手工创作的副本（别的 id、没 sidecar）永远不动。
+
+**六、一个物化器两用。** `scripts/materialize-expert.mjs` 加了 `outRoot`，
+出厂就写桌面包 `config/agent-presets/`，做市场制品就写临时目录再打包——
+避免"出厂一套逻辑、市场另一套逻辑"这种必然走偏的分叉。
+
+#### 真机形状的两个坑（2026-08-18 踩到，探针纪律）
+
+- **advanced 外壳是 `$DSH_HOME/settings.yaml` 里的一项设置**（`dsh-desktop: mode: advanced`，
+  内核自检脚本 `verify-profile-boot.mjs:31` 就是这么写的）。这一段缺了会**静默**起成
+  compatibility：肉眼判据是窗口带标准 Windows 标题栏，而不是我们的无边框头部。
+  被搬过 / 重建过的临时家目录很容易丢这一段，跑任何界面探针前先看 URL 里的 `dsh-desktop-mode`。
+  顺带验清：我们写清单那条路（`settings.mutate`）**不会**清掉别人的命名空间——
+  手加的 `dsh-desktop` 段经过一次启动重写后仍在。
+- **别用手工导航去救僵尸窗口。** 宿主换端口后老渲染器停在旧端口上，看着还有界面但所有请求
+  `ERR_CONNECTION_REFUSED`；这时若照旧 URL 带 `?dsh-desktop-mode=advanced` 导到新端口，
+  而宿主是按 compatibility 组装的，就会报 `failed to apply loader entry (dsh-plugin-desktop):
+  service "layout" has been registered`——查询串必须与宿主组装出的模式一致。正解是重启，不是导航。
+
 ### 阶段 5 · 市场与后端契约（2 周，与阶段 3 并行）
 
 见下一节。
@@ -1432,20 +1633,116 @@ dsh 的工具收窄是运行时 API `ctx.tools.restrict({ allow?, deny? })`，�
 
 两个仓库都已建 `feature/dsh-kernel` 并并入最新 main。要改的不多，但有一条是硬的。
 
-### 硬的那条：制品格式要加版本，不能一刀切
+### 硬的那条：制品重新设计（2026-08-18 重判）
 
-现在市场条目的制品是 openclaw 形状的 zip：`SKILL.md` + persona 目录 + `_yunwu_meta.json`，
-装到 `~/.openclaw/skills/<slug>`。dsh 的专家是 agent preset 目录
-（`agent.cordis.yml` + 可选 `preset.yml`），技能与连接器又各是另一套。
+**先把前提改对：现在那套 zip + `getDownloadInfo` 是 openclaw 形状的旧设计，只当参考，不当目标。**
+新内核是全新分支，制品格式、目录契约、后台界面都按新内核重新设计。下面每条都有内核或生态证据。
 
-**老版本客户端已经发布在外**，它们会继续按 openclaw 形状拉制品。所以：
+**一、单位定了：一个 preset 目录的归档，归档根就是 preset 目录本身。**
+内核发现的单位就是"含 `agent.cordis.yml` 的目录"（可选 `preset.yml` + `skills/`）。
+生态也是这么流通的——社区把 preset 放在 GitHub 仓库里分发，`#dsh` topic + awesome 目录里
+已经有好几个纯 agent preset 仓库（`dsh-preset-scaffold`、`dsh-anchored-*`、
+`dsh-coding-agent-preset` 等）。归档根与仓库根同形，两边可以互相消费。
 
-- `desktop_market_item` 加一个格式/内核标识字段，客户端按自己认识的格式取。
-- `GET /api/desktop-market/snapshot` 按客户端声明的能力过滤，或返回两份制品链接。
-- 制品下载那条是公开 HMAC 直链（`api-router.go` 里 `ServeDesktopMarketArtifact`
-  刻意没挂 `TokenAuth`），这条机制不用动。
+**二、为什么不能走上游那套 npm 插件安装（查过并否掉）。**
+上游市场的安装路径是 `desktopPnpm.runPlugin(['add', spec])` → 装 Cordis 插件 → 提示重启，
+`spec` 转给 pnpm，连 tarball URL 都能装。看着很诱人：整套复用上游的市场壳 + 目录合同 + 受管安装。
+**但内核 `AgentPresets` 没有运行时加根的 API**——`roots` 只有 getter、由 config 驱动，
+全类型里没有 `addRoot` / `registerRoot`。所以一个市场装进来的插件**无法给内核贡献 preset 目录**，
+专家走不了这条路。内容只能写进内核自己的可写用户根。**这是被内核逼的，不是口味**，
+代码注释里要这么写。
 
-admin-cloud 侧对应改：市场编辑器要能产出新格式（`src/pages/desktop-market/`，7 文件 87 KB）。
+**三、物化跑在导入侧，客户端不在运行时解析人设正文。**
+`import_expert_center.go` 现在就在拉 WorkBuddy 专家中心的
+`bundles/<slug>.tar.gz`（Tencent COS，本机扫下来 409 个，`ec.json` 是它的目录清单），
+那正好是物化器的输入。导入时跑同一个 `materialize-expert.mjs`（已加 `outRoot`），
+输出 preset 目录再打包上传。客户端拿到的东西**已经是**内核能直接发现的形状。
+
+**四、必须新增内核兼容标识。** 组装文件里写着具体插件包名，还带 `!!js` 表达式
+（`disabled: !!js process.platform === 'win32'`、`customSkillDirs` 用 `new URL('skills/', baseUrl)`），
+所以一份组装是**按某个内核 API 版本**写的。我们锁 rc.6、上游源码树已经是 rc.7，
+照源码写会撞 TS2305——这条教训已经吃过一次。字段：`kernel_api`（如 `0.1.0-rc.6`）+
+`preset_schema`（我们自己的组装约定版本）。快照按客户端上报的能力过滤，
+装不了的宁可不下发，也不要让用户装完拿到一个 `broken` 卡片。
+**注意这与"新旧客户端"是两件事**：老客户端的问题是格式，这里的问题是"给哪个内核写的"。
+
+**五、制品要多份并存 → 独立表，而不是在条目上再加一组列。**
+老客户端还在外面拉 openclaw 形状的 zip，`desktop_market_items` 上那三列
+（`artifact_key` / `artifact_sha256` / `artifact_size`）原样保留、不动它们，
+新增 `desktop_market_artifacts`：`item_id` + `format` + `kernel_api` + `key` / `sha256` / `size` /
+`version` / `created_at`，`(item_id, format, kernel_api)` 唯一。以后多内核版本并存、
+或再加一种格式，都是加行不是改表。
+
+**六、归档格式取 tar.gz，理由要写进注释。** 内核不提供任何解包能力，Node 内建只有 `zlib`。
+tar 头是定长 512 字节记录，自己写一个**有界读取器**是几十行，且必须自己写才能显式拒绝
+绝对路径、`..`、符号 / 硬链接、设备节点、超大条目与超量条目——这些正是上游安全说明要求的。
+zip 要解中央目录，且 `adm-zip`（旧壳用的那个）历史上有路径穿越 CVE。所以：**零依赖 + 严格白名单**。
+这属于"内核没有、参考实现也不适用，才自己造"的那一类。
+
+**七、信任措辞照上游 market-shell + `dsh-sync` 的口径。**
+preset 里有 `!!js`，**安装一个专家在信任上等于给 shell 权限**；`dsh-sync` 同步用户 preset 目录时
+也把它判为"可执行变更、要显式确认"。所以确认框必须展示：名称、锁定后的精确版本与 sha256、
+落点（当前 profile 的可写根）、"以用户权限在本地运行"的提示。**绝不执行目录返回的任何命令字符串。**
+
+**八、下载直链机制不动。** 公开 HMAC 直链（`api-router.go` 的 `ServeDesktopMarketArtifact`
+刻意没挂 `TokenAuth`）+ 响应里给 sha256，客户端验完再解包。下载计数用 `UpdateColumn`
+避免刷 `updated_at`（那是快照 ETag 指纹的一部分）——这条现有设计是对的，保留。
+
+**admin-cloud 要跟着改（`src/pages/desktop-market/`）：**
+
+- 制品栏从"一个 zip"改成**一份列表**（format × kernel_api），能分别上传、替换、下线。
+- 每条显式回答"新客户端可见吗"：没有匹配 `kernel_api` 的制品就标不可用，别让运营以为上架了。
+- 详情页要能预览 preset 目录树（`agent.cordis.yml` 的插件行摘要 + `skills/` 清单 + `preset.yml`
+  的 name/description/order）。现在运营对着一个 zip 完全无法判断这个专家在新客户端能不能用。
+- 专家团那一栏继续用 `is_team` 物化列（二级 tab 靠它），语义不变。
+
+### 客户端安装器：已实现并真机验通（2026-08-18）
+
+落在 `openlux-plugin-account/src/market/`（`targz.ts` 有界读取器 + `install.ts` 五步），
+宿主通道新增两个端点 `market.target` / `market.install`。**装什么、装到哪、装成没有，
+三个判断全部取内核的答案**：`authorable` 决定能不能装，`roots` 决定落点，`list()` 决定
+id 空不空与装完健不健康。已装专家的管理仍然一件不做（内核设置页第四栏就是）。
+
+真机一轮七条判据（宿主 60711，制品由 `tar -czf` 打的真 tar.gz，58 KB，本地 HTTP 取）：
+
+| 判据 | 结果 |
+| --- | --- |
+| 落点 | `authorable: true`，root 正好是内核派生的 `<DSH_HOME>\.agent-presets` |
+| 摘要不符 | `digest-mismatch`，一个字节都没落盘 |
+| 归档损坏（截半，摘要对得上坏字节） | `bad-archive: 不是有效的 gzip 数据` |
+| id 被出厂专家占用 | `already-installed（来源：system）`——first-root-wins 的影子也拦住了 |
+| id 不合内核目录规则 | `invalid-id` |
+| 正常安装 | `installed`，目录里 `agent.cordis.yml` / `preset.yml` / `skills/` / sidecar 齐全 |
+| 装完复读名录 | `market-probe-team trust=user item=probe-item-42 version=1.4.0 broken=no`，且归属只挂在我们装的那行，手工副本仍是 `-` |
+
+五处形状是被真机逼出来的，别改回去：
+
+**一、暂存目录用点号前缀，并且放在可写根里面。** `.openlux-staging-<id>-<rand>`：
+rename 只在同一文件系统上原子，所以必须同根；而 discovery 过滤子目录用的正是那条
+id 正则（`lib/index.js:247`），点号开头过不了它——**半写状态的目录对内核完全不可见，
+连 broken 都不会列**。同一条规则同时守着 id 和暂存命名空间，这是内核送的。
+
+**二、`ctx.get('agentPresets')` 合法，`ctx.agentPresets` 属性读取会被拒。**
+没在 `inject` 里声明就读属性，reflect 代理直接抛
+`cannot get property "agentPresets" without inject`（真机吃过）。内核自己的网关就写着这条
+区别（`host/apiproxy/src/api-proxy.ts:3172-3176`），机会性消费一律走 `get`，
+再把**服务本身**当参数传下去，别在下游函数里碰属性。名录缺席不是故障：
+`market.target` 答 `authorable: false`，`market.install` 答一条 refused。
+
+**三、仓外插件不能运行时 import 内核的 `dsh-agent-presets`。** 内核包是按 workspace 各自
+装的 tarball，落到我们包里那份解析不到自己的 `@deepseek-ai/dsh-scope`，外壳直接起不来
+（`ERR_MODULE_NOT_FOUND`，启动即炸的好失败）。所以 `writableRoot()` 调不到，
+它那两行由 `writableRootOf()` 镜像（取第一条 `trust: 'user'` → `resolve(expandHomePath(path))`）。
+镜像不是白镜像：**落点算错内核就发现不了我们写的东西，第五步复读 `list()` 会失败并回滚**——
+id 正则那条镜像同理。而 `expandHomePath` 这一半是真从内核拿的：`dsh-home-paths`
+的产物只 import Node 内建，零传递依赖，唯一能安全运行时导入的一个。
+
+**四、归档根那条 `./` 条目要跳过而不是拒绝。** `tar -czf x -C dir .` 会把归档根自己写成一条
+成员；拒绝它等于拒绝最常见的打包方式。归档根 = preset 目录本身，`agent.cordis.yml`
+必须在根上；多包了一层就报出那层的名字（id 只认目录条目给的，不从归档里读）。
+
+**五、归属 sidecar 只由本机写。** 制品里自带 `openlux-market.json` 一律拒装——归属是
+这台机器观察到的事实，不是制品可以自称的。装完写在暂存目录里，和内容一起原子改名进来。
 
 ### 软的那条：模型档案的思考方言
 
