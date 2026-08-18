@@ -17,7 +17,6 @@ const plugin = readJson('dsh-plugin-desktop/package.json')
 const fabric = readJson('dsh-community-fabric/package.json')
 const market = readJson('dsh-community-market/package.json')
 const account = readJson('openlux-plugin-account/package.json')
-const upstreamPackage = readJson('deepseek-harness/package.json')
 const noteDirectory = '.agents/notes/implemented/process'
 const noteName = '2026-08-15-pinned-upstream-and-isolated-yarn-workspace'
 const notePaths = [`${noteDirectory}/${noteName}.md`, `${noteDirectory}/${noteName}.zh.md`]
@@ -71,16 +70,6 @@ for (const legacyFile of [
 ]) {
   if (existsSync(resolve(root, legacyFile))) fail(`${legacyFile} must not exist`)
 }
-if (run('git', ['config', '-f', '.gitmodules', '--get', 'submodule.deepseek-harness.path']) !== 'deepseek-harness') {
-  fail('the upstream submodule path must be deepseek-harness')
-}
-if (run('git', ['config', '-f', '.gitmodules', '--get', 'submodule.deepseek-harness.url']) !== upstream.repository) {
-  fail('the upstream submodule URL differs from upstream.json')
-}
-if (typeof upstreamPackage.packageManager !== 'string' || !upstreamPackage.packageManager.startsWith('pnpm@')) {
-  fail('the upstream checkout must retain its pnpm package manager')
-}
-
 // The boundary being guarded is the DSH one: every @deepseek-ai package must
 // arrive as a published release at the pinned version, never as a live link
 // into the submodule checkout, or the app would run against source that
@@ -110,22 +99,41 @@ for (const [owner, manifest] of [
   }
 }
 
-const [mode, object] = run('git', ['ls-files', '--stage', '--', 'deepseek-harness']).split(/\s+/u)
-if (mode !== '160000') fail('deepseek-harness must be tracked as a Git submodule')
-if (object !== upstream.commit) fail(`submodule index is ${object}, expected ${upstream.commit}`)
-
+// The upstream tree is a source reference, not a build input: the shell runs the
+// published `@deepseek-ai/dsh-*` family recorded as `runtimePackageVersion`,
+// which is a different release than `sourceVersion`. This product therefore
+// dropped the submodule instead of carrying a checkout nothing reads. Verify it
+// exactly wherever it exists, and where it does not, say so in the summary
+// rather than fail — the runtime package pin below is the anchor that always
+// applies, and it needs upstream.json alone.
 const upstreamDir = resolve(root, 'deepseek-harness')
-if (run('git', ['rev-parse', 'HEAD'], upstreamDir) !== upstream.commit) {
-  fail('checked-out upstream commit differs from upstream.json')
-}
-if (run('git', ['status', '--porcelain'], upstreamDir) !== '') {
-  fail('deepseek-harness contains local changes')
-}
-if (run('git', ['remote', 'get-url', 'origin'], upstreamDir) !== upstream.repository) {
-  fail('deepseek-harness origin differs from upstream.json')
-}
-if (upstreamPackage.version !== upstream.sourceVersion) {
-  fail('deepseek-harness package version differs from upstream.json')
+const hasUpstreamCheckout = existsSync(resolve(upstreamDir, 'package.json'))
+if (hasUpstreamCheckout) {
+  const upstreamPackage = readJson('deepseek-harness/package.json')
+  if (run('git', ['config', '-f', '.gitmodules', '--get', 'submodule.deepseek-harness.path']) !== 'deepseek-harness') {
+    fail('the upstream submodule path must be deepseek-harness')
+  }
+  if (run('git', ['config', '-f', '.gitmodules', '--get', 'submodule.deepseek-harness.url']) !== upstream.repository) {
+    fail('the upstream submodule URL differs from upstream.json')
+  }
+  if (typeof upstreamPackage.packageManager !== 'string' || !upstreamPackage.packageManager.startsWith('pnpm@')) {
+    fail('the upstream checkout must retain its pnpm package manager')
+  }
+  const [mode, object] = run('git', ['ls-files', '--stage', '--', 'deepseek-harness']).split(/\s+/u)
+  if (mode !== '160000') fail('deepseek-harness must be tracked as a Git submodule')
+  if (object !== upstream.commit) fail(`submodule index is ${object}, expected ${upstream.commit}`)
+  if (run('git', ['rev-parse', 'HEAD'], upstreamDir) !== upstream.commit) {
+    fail('checked-out upstream commit differs from upstream.json')
+  }
+  if (run('git', ['status', '--porcelain'], upstreamDir) !== '') {
+    fail('deepseek-harness contains local changes')
+  }
+  if (run('git', ['remote', 'get-url', 'origin'], upstreamDir) !== upstream.repository) {
+    fail('deepseek-harness origin differs from upstream.json')
+  }
+  if (upstreamPackage.version !== upstream.sourceVersion) {
+    fail('deepseek-harness package version differs from upstream.json')
+  }
 }
 for (const name of Object.keys(plugin.dependencies).filter(name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))) {
   if (plugin.dependencies[name] !== upstream.runtimePackageVersion) {
@@ -133,11 +141,17 @@ for (const name of Object.keys(plugin.dependencies).filter(name => name === '@de
   }
 }
 
+// `HEAD:<path>` is resolved from the repository root, not the working directory,
+// and this workspace lives in a subtree of a larger product repository. Without
+// the prefix, `HEAD:README.md` silently names the outer repository's README and
+// the record below is reported stale for a file it never read.
+const repositoryPrefix = run('git', ['rev-parse', '--show-prefix'])
+
 const noteRecord = readFileSync(resolve(root, noteRecordPath), 'utf8')
 for (const notePath of notePaths) {
   // Hash the committed blob, not the working tree: checkout line endings
   // differ per host, while HEAD:<path> is identical everywhere.
-  const expected = run('git', ['rev-parse', `HEAD:${notePath}`])
+  const expected = run('git', ['rev-parse', `HEAD:${repositoryPrefix}${notePath}`])
   const recordLine = `${basename(notePath)}: ${expected}`
   if (!noteRecord.split(/\r?\n/u).includes(recordLine)) {
     fail(`${noteRecordPath} is stale for ${notePath}`)
@@ -146,11 +160,13 @@ for (const notePath of notePaths) {
 
 const readmeRecord = readFileSync(resolve(root, 'README.i18n.yaml'), 'utf8')
 for (const readmeName of ['README.md', 'README.en.md']) {
-  const expected = run('git', ['rev-parse', `HEAD:${readmeName}`])
+  const expected = run('git', ['rev-parse', `HEAD:${repositoryPrefix}${readmeName}`])
   const recordLine = `${readmeName}: ${expected}`
   if (!readmeRecord.split(/\r?\n/u).includes(recordLine)) {
     fail(`README.i18n.yaml is stale for ${readmeName}`)
   }
 }
 
-process.stdout.write(`verify-layout: Yarn workspace and upstream ${upstream.commit.slice(0, 10)} are consistent\n`)
+process.stdout.write(hasUpstreamCheckout
+  ? `verify-layout: Yarn workspace and upstream ${upstream.commit.slice(0, 10)} are consistent\n`
+  : `verify-layout: Yarn workspace is consistent; upstream ${upstream.commit.slice(0, 10)} is not checked out, so its source reference went unverified\n`)

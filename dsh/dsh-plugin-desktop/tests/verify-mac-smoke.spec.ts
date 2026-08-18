@@ -81,8 +81,13 @@ function expectSmokeFailure(
   expect(details.join('\n')).toContain(expectedDetail)
 }
 
+// Windows does not model the 0o755 bit the fixture sets on the main executable,
+// so verification rejects the bundle before reaching the behaviour the two cases
+// below describe. Upstream gates POSIX-only permission behaviour the same way.
+const posixPermissions = process.platform !== 'win32'
+
 describe('macOS DMG smoke artifact verification', () => {
-  it('mounts one DMG and accepts a well-formed unsigned application bundle', () => {
+  it.runIf(posixPermissions)('mounts one DMG and accepts a well-formed unsigned application bundle', () => {
     const value = fixture()
     const harness = options({ makeMountPoint: () => value.root })
     const appPath = join(value.root, 'DSH Desktop.app')
@@ -157,7 +162,7 @@ describe('macOS DMG smoke artifact verification', () => {
     expect(harness.removeMountPoint).toHaveBeenCalledWith(value.root)
   })
 
-  it('rejects a missing or empty application archive', () => {
+  it.runIf(posixPermissions)('rejects a missing or empty application archive', () => {
     const value = fixture()
     rmSync(value.appAsar)
     const harness = options({ makeMountPoint: () => value.root })

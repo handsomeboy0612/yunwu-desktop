@@ -49,11 +49,11 @@
     }
   },
   "scripts": {
-    "build": "yarn workspace dsh-plugin-desktop build",
-    "typecheck": "yarn workspace dsh-plugin-desktop typecheck",
+    "build": "yarn workspace openlux-plugin-account build && yarn workspace dsh-plugin-desktop build",
+    "typecheck": "yarn workspace openlux-plugin-account typecheck && yarn workspace dsh-plugin-desktop typecheck",
     "test": "yarn workspace dsh-plugin-desktop test",
     "check:layout": "node scripts/verify-layout.mjs",
-    "check": "yarn check:layout && yarn workspace dsh-community-fabric check && yarn workspace dsh-community-market check && yarn workspace dsh-plugin-desktop check",
+    "check": "yarn check:layout && yarn workspace dsh-community-fabric check && yarn workspace dsh-community-market check && yarn workspace openlux-plugin-account check && yarn workspace dsh-plugin-desktop check",
     "dev": "yarn workspace dsh-plugin-desktop dev",
     "start": "yarn workspace dsh-plugin-desktop start",
     "package:dir": "yarn workspace dsh-plugin-desktop package:dir",

@@ -188,8 +188,11 @@ try {
   if (desktopSettings?.mode !== 'advanced') {
     throw new Error('assembled Host settings are missing the advanced dsh-desktop mode')
   }
-  if (!trayItems.some(item => item.label() === 'Check for Updates…')) {
-    throw new Error('assembled desktop profile is missing the update tray command')
+  // See cordis.patch.yml: this fork composes no update row, so the endpoints
+  // baked into update-checker.ts/update-download.ts stay unreachable and the
+  // tray must not offer the command until our own release service exists.
+  if (trayItems.some(item => item.label() === 'Check for Updates…')) {
+    throw new Error('assembled desktop profile offers the upstream update tray command')
   }
   if (process.platform !== 'linux'
     && !trayItems.some(item => item.label() === 'Open DSH Terminal')) {
@@ -212,6 +215,9 @@ try {
   const ids = new Set(graph.entries.map(entry => entry.id))
   for (const id of [
     'dsh-plugin-desktop',
+    // Our sign-in, balance, and market surfaces ride the ordinary Web module
+    // graph. Dropping out of it costs the whole account face with no error.
+    'openlux-plugin-account',
     '@deepseek-ai/dsh-client-ui-conversation',
     '@deepseek-ai/dsh-client-ui-sidebar',
     '@deepseek-ai/dsh-client-ui-directory-picker-browse',

@@ -515,6 +515,7 @@ fork `deepseek-harness-desktop`，改品牌（上面那七处）、接签名证�
 先 `git update-index --really-refresh`。
 
 顺带删掉了 `dsh/deepseek-harness` 那个 submodule 与 `dsh/.gitmodules`（照上面第 1 条，用不上）。
+**这一删同时废掉了 `check:layout` 的一半断言**，当时没跟着改，见下面「聚合 check 从来没绿过」。
 
 | 改了什么 | 值 / 做法 |
 |---|---|
@@ -532,10 +533,9 @@ fork `deepseek-harness-desktop`，改品牌（上面那七处）、接签名证�
 守的是那条真不变量：electron-builder 按 manifest 出安装包、运行时
 `app.setName(PRODUCT_NAME)` 决定 userData，两边不一致会把一份安装劈成两个状态目录。
 
-**测试基线要记住**：本机 Windows 上**未改动的上游**就是 `4 失败 / 297 通过`，
-四条全在 mac 专属（`mac-universal.spec.ts` 2 条 + `verify-mac-smoke.spec.ts` 2 条，
-要 mac 的权限位与 `lipo`）。我们改完之后逐条一致 —— 判断有没有回归要拿这个数比，
-不是拿「全绿」比。
+**测试基线**（原文：本机 Windows 上未改动的上游就是 `4 失败 / 297 通过`，四条全在 mac 专属，
+我们改完逐条一致，所以判断回归要拿这个数比、不是拿全绿比）**已于 2026-08-18 作废**：
+那四条已经处理掉，现在本机基线就是 `299 通过 / 2 跳过 / 0 失败`。见下面「聚合 check 从来没绿过」。
 
 **复验（真机）**：`dsh/` 里装 9.0s、构建 0.3s；起进程窗口标题为品牌名、
 userData 落在 `%APPDATA%\OpenLux Desktop`、
@@ -581,6 +581,40 @@ OpenLux V4-Flash 发一条，回「链路已通。」，**5.3s / 首 token 5.2s*
 > 批量替换，PS 5.1 会按 ANSI 码页读 UTF-8 文件、再写回 UTF-8 并加 BOM：八个文件全带上 BOM
 > （`JSON.parse` 直接失败），含中文的两个还多了一层乱码。**在这个仓库里批量改文件不要走
 > `Get-Content`/`Set-Content`**，用 Node 读写 Buffer，或者逐处精确替换。
+
+##### 聚合 check 从来没绿过（2026-08-18 收掉）
+
+`dsh/` 根目录的 `yarn check` 是上游自带的聚合闸门（布局守卫 + 三个子包各自的
+构建 / 类型检查 / 单测 / 五个 verify）。**从 subtree 合入起它一次都没绿过**，三处红：
+
+| 红的那段 | 性质 | 处置 |
+|---|---|---|
+| 我们的 `openlux-plugin-account` **不在链上** | 漏 | 根 `check` / `build` / `typecheck` 都串进它，且排在宿主包**之前**（宿主那段最重，我们的 8 秒，失败早暴露） |
+| `check:layout` | 被 subtree 形状废掉 | 上游源码那半边条件化，见下 |
+| `verify:profile` | 漏翻第三处陈旧断言 | 翻成断言更新托盘命令**不存在**，注释指向 `cordis.patch.yml` |
+| 宿主 `test` 里 4 条 mac 专属 | 两条是断言不跨平台、两条真依赖 POSIX 权限位 | 前者修成跨平台断言（现在 Windows 上真跑），后者按上游先例 `it.runIf` 门控 |
+
+**为什么必须补链，有真机证据**：我们这个包的入口是构建产物，而根 `build` 只构建宿主包。
+把 `lib/` 挪走再跑宿主的 profile 冒烟，失败点从第 192 行提前到 `boot()` 本身——
+`failed to import loader entry openlux-account (openlux-plugin-account): Cannot find module
+'…\profiles\node_modules\openlux-plugin-account\lib\index.js'`（`ERR_MODULE_NOT_FOUND`）。
+路径正是 `cordis.patch.yml` 注释描述的那条：app-boot 把宿主的依赖闭包逐个 symlink 进
+`$DSH_HOME/profiles/node_modules`。**干净克隆上 `install && build && 起进程` 会起不来**，
+是响的失败，但要有人跑闸门才看得见。
+
+**`check:layout` 那两处，第二处是不报错的失败形态。** 一是删掉 submodule 后它仍要读
+`deepseek-harness/package.json`、要 gitlink 是 `160000`、要那个目录 `git status` 干净——
+删是对的（外壳吃 npm 上的发布版，`sourceVersion` 只是源码参考），所以这半边改成
+「目录在就照原样逐条验，不在就跳过并**在输出里明说**跳过了什么」，`runtimePackageVersion`
+那条钉版检查留在外面，它只要 `upstream.json`。二是它用 `git rev-parse HEAD:README.md`
+核对双语记录的 blob 哈希，而 `HEAD:<path>` 是**仓库根**相对：在 `dsh/` 这个子树里，
+这条路径静默命中的是**外层仓库**的 `README.md`（真解析出一个哈希，`a6457f64b6`），
+于是报「README.i18n.yaml 过期」——指向一个它根本没读过的文件。改成用
+`git rev-parse --show-prefix` 拼前缀，上游仓库里那是空串，同一份代码两种形状都对。
+
+**复验**：根目录 `yarn check` **47 秒全绿**；宿主测试 `299 通过 / 2 跳过 / 0 失败`
+（原先失败的两条 `mac-universal` 现在是**通过**，不是跳过）；`check:layout` 输出
+「upstream 47f943859b is not checked out, so its source reference went unverified」。
 
 **阶段 0 剩下的**：用 OpenLux 的 key 跑通一条对话；接 Windows 代码签名证书
 （`scripts/package-win.ts` 支持 PFX `win_csc_link`）；出一次安装包验能装能起。
