@@ -460,6 +460,83 @@ WorkBuddy 的作用降为**判据来源**：某个交互该长什么样、某条
 仍以「WorkBuddy 用户看到的行为」为准（例如余额取不到时四档降级、绝不显示 0）。
 但**实现形状以内核为准**。
 
+## 未完成清单 / 没做的功能 / 待做（2026-08-19 04:40 全文扫过一遍）
+
+**为什么要有这一节**：这份文档是按阶段增量写的，待做项散在两千多行里，"用户指定模型出图"
+这种条目还埋在一个标题不含关键词的小节里（叫「工具可见面收窄」的第三点），按关键词搜必然
+扑空。所以这里只做索引与排序，**每条的正文以它自己那节为准**，改完记得回来划掉。
+
+### 一、正在造成真实损失，最先做
+
+| 条目 | 落点 | 判据 |
+|---|---|---|
+| **专家团成员的工具面被钉死成四个** `['skill','read','write','edit']`，六个成员一个出图/出片/shell 工具都看不到 | 生成器 `dsh-plugin-desktop/scripts/materialize-expert.mjs:51` 的 `MEMBER_ALLOW`；**改产物会被下次 materialize 覆盖** | 正确组装上让 `image_creator` 真出一张图 |
+| **同一个生成器还有第二条路径不写 `toolFilter`**（`marketing-growth-team` 四成员看得见全部工具，包括彼此的 `delegate_*`，能互相委派绕圈）| 同上，两条路径要收敛到"按角色给能力工具" | 成员看得见自己该用的，看不见别人的委派工具 |
+| **人设内容还是 WorkBuddy 的**：25 处 `SendMessage`、13 处 `ImageGen`、9 处 `ImageEdit`、13 处 `deliver_attachments`、16 处 `YT-VITA`、死模型名 HY-Image×25 / HY-Video×18 / YT-Video×28、品牌词 WorkBuddy×14 | 同上；具体清单见「14 份 preset 全量静态扫描」 | 成员不再建议用户"去 WorkBuddy 出图"；模型名一律删掉不换新名 |
+| `tencent-cloud-quote-assistant` 还有 2 处 WorkBuddy | 市场内容 | 全文零命中 |
+
+### 二、工具可见面收窄：三条里剩两条半（正文见「工具可见面收窄」）
+
+- **第一条 `web_fetch` 网络面：已落地**，唯一缺口是**所有判据都没经过模型**——要在会话里让
+  模型自己去抓一次内网。很便宜，一发会话。
+- **第二条工具名单按角色收窄：不是没做，是做过头了。** 子代理侧本来就是配置（上面第一组
+  就是它的修正）；还差**主 agent 侧那一薄层**——内核没有声明式行，要在 agent 创建时读配置调
+  `agent.ctx.tools.restrict()`；以及 **deny 方向的会话判据**（配 `deny: [image_generate]`
+  后问模型"你有哪些工具"，`ctx.tools.schemas()` 是全局视角看不出来）。allow 方向 2026-08-19
+  已在真机兑现。
+- **第三条用户指定模型出图/出视频：完全没动。** 把 `model` 加成取 `ROUTE_MODELS` 键的 enum、
+  `size` 取值跟着所选模型走，**外加专家团透传那一跳**（成员是独立子代理，模型意图得由主理人
+  写进委派 prompt；子代理继承的 `provider/model` 只是对话模型）。**带外部依赖**：网关上
+  gemini 那几个出图模型是 503，名单要人工筛，所以工期不由我们定。
+
+### 三、发版阻塞（阶段 6）
+
+- **品牌还剩"两处半"，界面换完了嘴没换**（正文见「品牌换成 OpenLux」）：
+  模型自报上游名字（`dsh-web-app` 的 `webSurfacePrompt` 写着 "the DeepSeek Harness Web GUI
+  at …"，系统提示词 "You are an AI agent powered by DeepSeek Harness"，落点 `system-prompt`
+  行的 `persona`）；`web_fetch` 对外的 `User-Agent` 还是 `deepseek-harness/0.0.1`
+  （**现成旋钮 `Config.userAgent`，改一行**，被抓的站点看到的就是它）；
+  `manifest.webmanifest` 的 `name` / `short_name`（桌面壳里看不见）。
+- **签名、更新通道、灰度与回滚方案**都还没做。托盘里那条上游更新命令目前是刻意不挂的
+  （我们没有自己的发布服务），`verify:profile` 有断言守着。
+- `THIRD_PARTY_NOTICES.md` 只能在目标平台生成，别在开发机上跑 `verify:notices`（会把 mac
+  条目换成 win32，不报错的回归）。
+
+### 四、跨项目：admin-server / admin-cloud（正文见「admin-server / admin-cloud 要改什么」）
+
+- **制品重新设计的服务端那半边**：单位是"一个 preset 目录的归档"，服务端只投
+  `expert-content.zip`（组装在客户端做），制品按 `kernel_api` 分行、不为客户端代际留兼容分支。
+  **客户端安装器已实现并真机验通**，服务端与后台界面按新形状改造还没做。
+- **模型档案的思考方言**：`desktop_model_profile` 现在下发的还是 openclaw 的七种方言，
+  目标形状 2026-08-17 就定了（`thinking_levels` + `default_thinking_level` 合成
+  `reasoning_efforts` 字典、`can_disable_thinking` 删列、档位扩到七档），admin-cloud 的
+  模型档案页跟着改表单，**服务端还要继承客户端那三道校验**——dsh 那边是解析期抛错，
+  下发脏数据的后果从"铺出假档位"升级成"整个路由起不来"。
+
+### 五、产品能力缺口
+
+- **用户没法给 AI 发图。** 代码分支照内核形状写了，卡在模型清单：`dsh-host-apiproxy` 按
+  `inputModalities` 拒收，而 profile 里两个模型都是 `input: [text]`，所以窗口里根本没有
+  附件入口。**清单里进一个能收图的模型这条自动就活**，同时模型话术里现在不许提"让用户发一张"。
+- **连接器（MCP）装完要重启才生效。** openclaw 是 `mcp reload` 立即生效，DSH 没有对应物；
+  "装完提示重启"是最省的做法，想做到即时得自己找 loader 重载入口，属于未验的活。
+- **视频内联播放**是第二步增强（`ui-media` 插件），第一步"白嫖现成产出行"已落地，不是欠账。
+
+### 六、测试覆盖与跟随风险
+
+- Windows 上「非竞争性锁失败」这条内核锁分支无上游覆盖（他们自己 `skipIf win32`），
+  **我们的守卫一侧已覆盖**，内核锁本身那条仍待补。
+- 内核锁在 `0.1.0-rc.6`，rc 接口会变：每次升级前 diff 配置层与 subagent 目录。
+- 外壳是社区单点依赖（anywhere-labs，MIT 已 fork）。
+- 内核认得的对话模型是广场 249 条里的 101 条（41%），缺口按家族 qwen 46 / gpt 16 —— 这条是
+  "要不要自己补能力表"的决策，不是必做项，判据是那 101 条恰好是用户真在用的头部。
+
+### 七、旧壳遗留（openclaw 那边，不在 DSH 主线上）
+
+- 媒体模型名纠正钩子**真机那一发仍未打**（要重启应用让网关重载插件），判据是网关日志出现
+  `纠正媒体模型覆盖: openai/gpt-image-2 -> yunwu-image/gpt-image-2` 且出图成功。
+  离线复验 8/8 已过，正文见 `references/media-video.md`。
+
 ## 分阶段计划
 
 每个阶段都遵守「查 → 验 → 改 → 复验」：**动手前必须拿到一条真机输出证明假设成立**，
@@ -1269,8 +1346,10 @@ Off/Low/Medium/High/Xhigh。发一条真消息（GPT-5.4 经 `api.openlux.ai`）
   全过，且模型的工具名录里只有该角色的那几个。
 - **一条遗留已由阶段 4 闸门顺带关掉**：后台 / continuable 模式下产出会不会重复投递
   ——`reported` 位 + first-wins settlement 从机制上去重，见阶段 4。
-- **仍待定性的一条**：并行工具调用时 `name`/`id` 流式组装丢字段
-  （`unknown tool ""`，重试自愈，尚未定性）。
+- ~~仍待定性的一条：并行工具调用时 `name`/`id` 流式组装丢字段（`unknown tool ""`）~~
+  **已定性，而且和"并行"无关**：是中转续片发 `"name": ""` 把首片取到的工具名冲空，
+  见本文档「中转分片错位」那一节（2026-08-17 查实，2026-08-19 又白查了一遍）。
+  出厂把 `llm-deepseek` 整行 `disabled` 之后形状上免疫。
 
 #### 阶段 3 闸门已通过（2026-08-18）：真专家团一轮，六条判据全过
 
@@ -1533,8 +1612,11 @@ shell 都在，**能干活**，但也踩上前面记过的那条坑：**成员�
 - **每一轮的第一次工具调用都报 `unknown tool ""`（空工具名），模型重试才成功**，6 个会话
   6 次、跨两份 preset 100% 复现。根因是上游 base 挂着 `llm-deepseek` 而用户态给它配了
   中转 `baseURL`：那个适配器的分片赋值是 `!== undefined`，**中转续片发 `"name": ""` 就把
-  首片取到的工具名冲空**（`references/openclaw-kernel.md:131`、`:141-145`，同一节还记着
-  当年的错误结论是"等中转修或打补丁"，正解是换适配器）。
+  首片取到的工具名冲空**。**这件事本文档「中转分片错位」那一节（2026-08-17）早就查完了**，
+  连中转的原始 SSE 分片、`llm-deepseek/src/translate.ts:159-160` 那两行、以及"空 callId
+  让会话永久打不开"的后果都抄在那里——**我今晚是第二次挖同一个坑，纯重复劳动**。
+  遇到工具调用相关的怪症状先搜本文档，别从零开始。册子那份摘要在
+  `references/openclaw-kernel.md:131`、`:141-145`。
 - **那条加载不出来的会话**（`SessionPersistenceCorruptionError: session event at seq 186
   message must have tool source`）是同一个坑的下游：册子原话是它"还会写出空 `callId`
   让整条会话永久打不开"。**所以不是我强杀服务造成的**，我那次归因错了。
@@ -2486,7 +2568,8 @@ intended agent instead"。两处落点：
 减小影响面、不是安全边界（有 Bash 的子代理照样能碰网络）。同一句话对我们成立：收窄
 `web_fetch` 的可见性不能替代第一条的网络面判定。
 
-**三、出图 / 搜索的模型选择面（最后做，属于参数面）。**
+**三、用户在对话里指定模型出图 / 出视频（「用 xxx 模型画」），即模型选择面（最后做，
+属于参数面）。**
 现在出图模型是部署配置（默认 `doubao-seedream-4-0-250828`），工具参数只有
 `prompt` / `n` / `size`，模型选不了、用户说了也不算；搜索固定走我们网关上的
 `claude-haiku-4-5-20251001`。要让「用指定模型出图」生效，就把 `model` 加成 enum（取
