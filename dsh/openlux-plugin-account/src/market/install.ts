@@ -52,7 +52,17 @@ import type { AgentPreset, AgentPresets, PresetRoot } from '@deepseek-ai/dsh-age
 // package, so the kernel's own `~` handling is reachable.
 import { expandHomePath } from '@deepseek-ai/dsh-home-paths'
 import { requestBytes } from '../account/http.ts'
+import { composeExpertPreset, readExpertContent, SKILLS_DIR } from './compose.ts'
+import { ConsoleError, readExpertManifest, signArtifact, type ConsoleAccess } from './console.ts'
 import { ARCHIVE_LIMITS, ArchiveError, readTarGz, type ArchiveEntry } from './targz.ts'
+import { EXPERT_CONTENT_FORMAT, PRESET_DIR_FORMAT, SKILL_DIR_FORMAT } from './wire.ts'
+import type {
+  InstallOutcome, InstallRequest, InstallTarget, InstalledPreset, RefusalReason, SkillTally,
+} from './wire.ts'
+
+export type {
+  InstallOutcome, InstallRequest, InstallTarget, InstalledPreset, RefusalReason,
+} from './wire.ts'
 
 /**
  * The kernel's preset id pattern, mirrored because it is not reachable.
@@ -88,6 +98,19 @@ function writableRootOf(roots: readonly PresetRoot[]): string | undefined {
 /** The composition file whose presence is what makes a directory a preset. */
 const COMPOSITION_FILE = 'agent.cordis.yml'
 
+/** Display text beside a composition; optional to discovery, so best-effort. */
+const METADATA_FILE = 'preset.yml'
+
+/**
+ * The preset an expert's composition is built from.
+ *
+ * `standard` is the kernel's full coding agent, and an expert is that agent
+ * with a different identity — which is exactly what the kernel's own docs call
+ * the copy-then-edit path. Reading the running deployment's copy rather than
+ * carrying a template is the whole point (see `compose.ts`).
+ */
+const BASE_PRESET_ID = 'standard'
+
 /**
  * Where an install records what it came from.
  *
@@ -112,62 +135,30 @@ export interface MarketProvenance {
   readonly itemId: string
   /** Artifact digest, as verified at install time. */
   readonly sha256: string
-  /** Where the artifact was fetched from. */
+  /**
+   * Which catalog artifact this came from, as `<type>/<slug>@<format>`.
+   *
+   * Not the download URL: that link is signed per install and expires within
+   * hours, so recording it would leave a sidecar full of dead signatures and
+   * say nothing a later reinstall could act on. The identity is what stays
+   * true, and it is exactly what the install RPC now takes.
+   */
   readonly source: string
   /** ISO timestamp of the install. */
   readonly installedAt: string
   readonly version?: string
   /** Kernel API the artifact was built for, when the catalog declared one. */
   readonly kernelApi?: string
-}
-
-/** One install, as asked for by the gallery. */
-export interface InstallRequest {
-  /** Preset id, which becomes the directory name; the catalog owns it. */
-  readonly id: string
-  /** Artifact URL, already signed by the catalog. */
-  readonly url: string
-  /** Expected artifact digest, hex. */
-  readonly sha256: string
-  readonly itemId: string
-  readonly version?: string
-  readonly kernelApi?: string
-}
-
-/** Why an install did not happen; every one of these is an ordinary outcome. */
-export type RefusalReason =
-  | 'not-authorable'
-  | 'invalid-id'
-  | 'already-installed'
-  | 'download-failed'
-  | 'digest-mismatch'
-  | 'bad-archive'
-  | 'broken-after-install'
-
-/** Result of an install attempt. */
-export type InstallOutcome =
-  | { readonly kind: 'installed'; readonly id: string; readonly path: string }
-  | { readonly kind: 'refused'; readonly reason: RefusalReason; readonly message: string }
-
-/** An installed preset the gallery needs to know about. */
-export interface InstalledPreset {
-  readonly id: string
-  readonly trust: string
-  /** The kernel's own health verdict, verbatim when it has one. */
-  readonly broken?: string
-  /** Catalog item, when this row was installed by us rather than by hand. */
-  readonly itemId?: string
-  readonly version?: string
-}
-
-/** Where installs land, and what is already there. */
-export interface InstallTarget {
-  /** Whether this deployment can accept installs at all. */
-  readonly authorable: boolean
-  /** The directory installs are written to, absent when not authorable. */
-  readonly root?: string
-  /** Every preset the roster currently supplies, ours or not. */
-  readonly installed: readonly InstalledPreset[]
+  /**
+   * Opening questions from the catalog manifest, best first.
+   *
+   * Kept here rather than fetched at summon time so that summoning an expert
+   * installed weeks ago costs no network call, and works with none at all. The
+   * catalog stays the authority; this is a copy of what it said when the bytes
+   * were written, which is the same moment everything else in this file
+   * describes.
+   */
+  readonly prompts?: readonly string[]
 }
 
 /**
@@ -204,6 +195,11 @@ async function describe(presets: AgentPresets, root: string | undefined): Promis
       ...preset.broken === undefined ? {} : { broken: preset.broken },
       ...provenance?.itemId === undefined ? {} : { itemId: provenance.itemId },
       ...provenance?.version === undefined ? {} : { version: provenance.version },
+      // Carried to the gallery so an installed card can summon without asking
+      // the console what to put in the composer.
+      ...provenance?.prompts === undefined || provenance.prompts.length === 0
+        ? {}
+        : { prompts: provenance.prompts },
     }
   }))
 }
@@ -243,6 +239,7 @@ export async function readProvenance(directory: string): Promise<MarketProvenanc
 export async function installPreset(
   ctx: Context,
   presets: AgentPresets,
+  access: ConsoleAccess,
   request: InstallRequest,
   signal?: AbortSignal,
 ): Promise<InstallOutcome> {
@@ -267,23 +264,76 @@ export async function installPreset(
       : `${request.id} 这个位置上有一份损坏的预设：${existing.broken}`)
   }
 
+  if (request.format !== PRESET_DIR_FORMAT && request.format !== EXPERT_CONTENT_FORMAT) {
+    return refuse('unsupported-format', `这个客户端不认得制品格式 ${JSON.stringify(request.format)}，无法安装。`)
+  }
+
+  // The console signs the link now, and its digest — not the cached catalog's —
+  // is what the bytes are checked against. A cached row can be older than the
+  // artifact it describes; this response is the answer as of this second.
+  let signed
+  try {
+    signed = await signArtifact(ctx, access, request.type, request.id, request.format, signal)
+  } catch (error: unknown) {
+    if (error instanceof ConsoleError) return refuse('no-download-url', error.message)
+    throw error
+  }
+  if (request.sha256.trim() !== '' && signed.sha256 !== request.sha256.trim().toLowerCase()) {
+    // The confirmation dialog is a consent surface: it showed a digest, and
+    // installing something else would make that consent meaningless. Refusing
+    // and asking for a refresh is the only honest answer.
+    return refuse('catalog-stale',
+      `目录里的摘要与控制台现在给出的不一致（目录 ${request.sha256.trim().toLowerCase()}，`
+      + `控制台 ${signed.sha256}），请刷新市场后重试。`)
+  }
+
   let archive: Uint8Array
   try {
-    archive = await requestBytes(ctx, request.url, DOWNLOAD_TIMEOUT_MS, MAX_DOWNLOAD_BYTES, signal)
+    archive = await requestBytes(ctx, signed.url, DOWNLOAD_TIMEOUT_MS, MAX_DOWNLOAD_BYTES, signal)
   } catch (error: unknown) {
     return refuse('download-failed', error instanceof Error ? error.message : String(error))
   }
   const digest = createHash('sha256').update(archive).digest('hex')
-  if (digest.toLowerCase() !== request.sha256.trim().toLowerCase()) {
+  if (digest.toLowerCase() !== signed.sha256) {
     // Nothing has been written yet, and nothing will be: a digest that does
-    // not match means the bytes are not the ones the catalog vouched for.
-    return refuse('digest-mismatch', `制品校验失败：期望 ${request.sha256.trim().toLowerCase()}，实际 ${digest}。`)
+    // not match means the bytes are not the ones the console vouched for.
+    return refuse('digest-mismatch', `制品校验失败：期望 ${signed.sha256}，实际 ${digest}。`)
   }
 
-  let entries: ArchiveEntry[]
+  // What the archive is decides what has to be built. A whole preset is written
+  // as it arrives; expert content has no composition, so one is composed from
+  // the running kernel's own `standard` (see `compose.ts`).
+  let plan: PresetFiles
+  let skills: SkillTally | undefined
+  // Recorded in the sidecar as well as returned, so summoning this expert
+  // tomorrow — offline, from the roster rather than the catalog — still knows
+  // what to put in the composer.
+  let prompts: readonly string[] = []
   try {
-    entries = readTarGz(archive, ARCHIVE_LIMITS)
-    assertPresetShape(entries)
+    const entries = readTarGz(archive, ARCHIVE_LIMITS)
+    if (request.format === PRESET_DIR_FORMAT) {
+      assertPresetShape(entries)
+      plan = { entries }
+    } else {
+      assertNoProvenance(entries)
+      const base = await baseComposition(presets)
+      if (base === undefined) {
+        return refuse('no-base-preset', `内核的预设名录里没有 ${BASE_PRESET_ID}，缺少组装专家所需的基准，已中止。`)
+      }
+      const content = readExpertContent(entries)
+      // One manifest read serves both: the skills to fetch, and the opening
+      // questions that make the summon land on a filled composer.
+      const manifest = await readExpertManifest(ctx, access, request.id, signal)
+      prompts = manifest.prompts
+      const bundled = await fetchBundledSkills(ctx, access, manifest.bundledSkills, signal)
+      const metadata = metadataOf(request)
+      plan = {
+        entries: [...content.assets, ...bundled.entries],
+        composition: composeExpertPreset(base, content, bundled.slugs),
+        ...metadata === undefined ? {} : { metadata },
+      }
+      if (bundled.total > 0) skills = { installed: bundled.slugs.length, total: bundled.total }
+    }
   } catch (error: unknown) {
     if (error instanceof ArchiveError) return refuse('bad-archive', error.message)
     throw error
@@ -293,8 +343,18 @@ export async function installPreset(
   const staging = join(root, `.openlux-staging-${request.id}-${randomUUID().slice(0, 8)}`)
   const destination = join(root, request.id)
   try {
-    await writeEntries(entries, staging)
-    await writeFile(join(staging, PROVENANCE_FILE), `${JSON.stringify(provenanceOf(request), undefined, 2)}\n`, 'utf8')
+    await writeEntries(plan.entries, staging)
+    if (plan.composition !== undefined) {
+      await writeFile(join(staging, COMPOSITION_FILE), plan.composition, 'utf8')
+    }
+    if (plan.metadata !== undefined) {
+      await writeFile(join(staging, METADATA_FILE), plan.metadata, 'utf8')
+    }
+    await writeFile(
+      join(staging, PROVENANCE_FILE),
+      `${JSON.stringify(provenanceOf(request, prompts), undefined, 2)}\n`,
+      'utf8',
+    )
     await rename(staging, destination)
   } catch (error: unknown) {
     await rm(staging, { recursive: true, force: true })
@@ -310,19 +370,144 @@ export async function installPreset(
     return refuse('broken-after-install', installed?.broken
       ?? `内核没有发现装好的预设 ${request.id}，制品的目录结构可能不对。`)
   }
-  return { kind: 'installed', id: request.id, path: destination }
+  return {
+    kind: 'installed',
+    id: request.id,
+    path: destination,
+    ...skills === undefined ? {} : { skills },
+    ...prompts.length === 0 ? {} : { prompts },
+  }
 }
 
-/** Build the sidecar record for one install. */
-function provenanceOf(request: InstallRequest): MarketProvenance {
+/** One expert's bundled skills, unpacked and ready to write under the preset. */
+interface BundledSkills {
+  /** Slugs whose archive actually came down; the composition points at these. */
+  readonly slugs: readonly string[]
+  /** Their members, re-rooted under `skills/<slug>/`. */
+  readonly entries: readonly ArchiveEntry[]
+  /** How many the expert declared, landed or not. */
+  readonly total: number
+}
+
+/**
+ * Fetch the skills an expert declares it bundles.
+ *
+ * Each is its own catalog item, so this is one signed link and one transfer per
+ * skill — which is the point: a skill twelve experts bundle is stored once and
+ * every one of them installs the same bytes, instead of twelve copies inside
+ * twelve expert archives.
+ *
+ * **One skill failing does not fail the expert.** A slug can be unlisted (the
+ * console draft-parks items that have no artifact), its archive can be missing,
+ * or a transfer can break; in every case the expert is still worth installing,
+ * and the tally in the outcome is what says how many arrived. Refusing the
+ * whole install for one absent skill would be strictly worse than an expert
+ * whose persona mentions a skill it cannot load.
+ * @param ctx - host context, for the transfers.
+ * @param access - console origin and token reader.
+ * @param declared - the slugs the expert's manifest listed.
+ * @param signal - caller cancellation.
+ * @returns the slugs that landed, their entries, and how many were declared.
+ */
+async function fetchBundledSkills(
+  ctx: Context,
+  access: ConsoleAccess,
+  declared: readonly string[],
+  signal?: AbortSignal,
+): Promise<BundledSkills> {
+  const slugs: string[] = []
+  const entries: ArchiveEntry[] = []
+  for (const slug of declared) {
+    // The slug becomes a directory name and the skill's own id, so it is held to
+    // the same alphabet the kernel holds a preset id to.
+    if (!PRESET_ID.test(slug)) continue
+    try {
+      const signed = await signArtifact(ctx, access, 'skill', slug, SKILL_DIR_FORMAT, signal)
+      const bytes = await requestBytes(ctx, signed.url, DOWNLOAD_TIMEOUT_MS, MAX_DOWNLOAD_BYTES, signal)
+      const digest = createHash('sha256').update(bytes).digest('hex')
+      if (digest !== signed.sha256) {
+        ctx.logger.warn(`openlux: skill ${slug} digest mismatch, skipped`)
+        continue
+      }
+      const members = readTarGz(bytes, ARCHIVE_LIMITS)
+      // `skill-filesystem` wants `<root>/<name>/SKILL.md`, and the root is the
+      // preset's own `skills/` (the shipped `cordis` preset's idiom), so each
+      // archive is re-rooted under its slug rather than unpacked flat.
+      for (const member of members) {
+        entries.push({ ...member, path: `${SKILLS_DIR}/${slug}/${member.path}` })
+      }
+      slugs.push(slug)
+    } catch (error: unknown) {
+      ctx.logger.warn(`openlux: skill ${slug} not installed: `
+        + `${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return { slugs, entries, total: declared.length }
+}
+
+/** What gets written into the staging directory, whatever the format was. */
+interface PresetFiles {
+  /** Archive members to write as they are. */
+  readonly entries: readonly ArchiveEntry[]
+  /** Composition text, when this client built it rather than received it. */
+  readonly composition?: string
+  /** `preset.yml` text, same. */
+  readonly metadata?: string
+}
+
+/**
+ * Read the base composition from the roster.
+ *
+ * `resolve` re-reads the roots on every call, and `preset.path` is the
+ * composition file itself (the kernel's own copy path takes `dirname` of it),
+ * so this is the text of whatever `standard` this deployment currently ships.
+ * An unknown id throws in the kernel; that is a deployment without the shipped
+ * set, which is a refusal rather than a crash.
+ * @param presets - the roster service.
+ * @returns the composition text, or undefined when there is no base preset.
+ */
+async function baseComposition(presets: AgentPresets): Promise<string | undefined> {
+  const base = (await presets.list()).find(preset => preset.id === BASE_PRESET_ID)
+  if (base === undefined || base.broken !== undefined) return undefined
+  return await readFile(base.path, 'utf8')
+}
+
+/**
+ * Render `preset.yml` for a composed preset.
+ *
+ * Without it the roster shows the directory id, so an expert would appear as
+ * `sa-legal-compliance` instead of its name. Values are JSON-encoded, which is
+ * valid YAML for a scalar and needs no escaping rules of our own. `order` is
+ * left out deliberately: it sorts a preset into the shipped set's ordering, and
+ * an installed expert belongs after them.
+ */
+function metadataOf(request: InstallRequest): string | undefined {
+  const lines: string[] = []
+  if (request.name !== undefined && request.name.trim() !== '') {
+    lines.push(`name: ${JSON.stringify(request.name.trim())}`)
+  }
+  if (request.description !== undefined && request.description.trim() !== '') {
+    lines.push(`description: ${JSON.stringify(request.description.trim())}`)
+  }
+  return lines.length === 0 ? undefined : `${lines.join('\n')}\n`
+}
+
+/**
+ * Build the sidecar record for one install.
+ * @param request - what was installed.
+ * @param prompts - opening questions read from the manifest, best first.
+ * @returns the record written beside the composition.
+ */
+function provenanceOf(request: InstallRequest, prompts: readonly string[]): MarketProvenance {
   return {
     schema: 1,
     itemId: request.itemId,
     sha256: request.sha256.trim().toLowerCase(),
-    source: request.url,
+    source: `${request.type}/${request.id}@${request.format}`,
     installedAt: new Date().toISOString(),
     ...request.version === undefined ? {} : { version: request.version },
     ...request.kernelApi === undefined ? {} : { kernelApi: request.kernelApi },
+    ...prompts.length === 0 ? {} : { prompts },
   }
 }
 
@@ -342,9 +527,19 @@ function assertPresetShape(entries: readonly ArchiveEntry[]): void {
       ? `制品根目录下没有 ${COMPOSITION_FILE}：整个 preset 目录被多包了一层 ${JSON.stringify(wrapper ?? '')}。`
       : `制品根目录下没有 ${COMPOSITION_FILE}，这不是一个 preset 目录。`)
   }
+  assertNoProvenance(entries)
+}
+
+/**
+ * Refuse an archive that carries our own sidecar.
+ *
+ * Provenance is what this client observed, not something an artifact gets to
+ * assert about itself. Checked for both formats: expert content composes its own
+ * composition, so a smuggled sidecar there would be the only claim about where
+ * the preset came from.
+ */
+function assertNoProvenance(entries: readonly ArchiveEntry[]): void {
   if (entries.some(entry => entry.path === PROVENANCE_FILE)) {
-    // Provenance is what this client observed, not something an artifact gets
-    // to assert about itself.
     throw new ArchiveError(`制品里自带了 ${PROVENANCE_FILE}，不予安装。`)
   }
 }

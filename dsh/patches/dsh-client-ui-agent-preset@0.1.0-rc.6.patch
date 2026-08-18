@@ -1,0 +1,32 @@
+diff --git a/lib/client.js b/lib/client.js
+index 9f92ac8cfa272004814e0d0ed369e91ead6ee6e9..cbdd5c1323b74a19f9c5a46b1659496c7000569a 100644
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -1490,6 +1490,19 @@ window.__ModuleLoader__.load({
+ 				if (!this.store.getSnapshot().introduce) return;
+ 				this.set({ introduce: false });
+ 			}
++			/** Re-derive the display from the composition the current session runs. */
++			sync() {
++				if (this.staged !== void 0) return;
++				const preset = this.currentSession()?.agentPreset;
++				if (preset === void 0) return;
++				const snapshot = this.store.getSnapshot();
++				if (snapshot.busy || snapshot.current === preset) return;
++				if (snapshot.options.some((option) => option.id === preset)) {
++					this.set({ current: preset });
++					return;
++				}
++				void this.load();
++			}
+ 			/**
+ 			* Hand the staged choice to the current session, if there is one to take it.
+ 			*
+@@ -1629,6 +1642,7 @@ window.__ModuleLoader__.load({
+ 				scope.effect(() => {
+ 					const stop = scope.sessions.list.subscribe(() => {
+ 						seat.apply();
++						seat.sync();
+ 					});
+ 					const settingsMoved = scope.remote.$on("settings/document-updated", (ns) => {
+ 						if (ns !== "agent-presets") return;

@@ -1607,6 +1607,21 @@ DSH 上这件事内核替我们做了——`list()` 里 `broken` 带原因就是
 出厂就写桌面包 `config/agent-presets/`，做市场制品就写临时目录再打包——
 避免"出厂一套逻辑、市场另一套逻辑"这种必然走偏的分叉。
 
+#### 长跑命令别用终端捕获判断进度（2026-08-18，代价二十分钟）
+
+跑那种十分钟量级、输出极多的一次性命令（导入器就是），**终端捕获文件会在约 1 MB 处停止增长**，
+而进程还在正常跑。表现出来的形状极像挂死：最后一行时间戳定在某一刻不动、文件大小分秒不变、
+`Get-NetTCPConnection` 还能看到几十条 ESTABLISHED。我照这个形状连着推断了三轮（先怀疑我新加的
+图床上传、再怀疑上游下载、最后怀疑 MySQL 死连接 + DSN 没有 `readTimeout`），甚至去查了服务端
+`information_schema.processlist`——**全部作废**：真日志（`Tee-Object` / `*>` 写的那个文件）
+一直在长，5.3 MB / 18915 行，末尾明明白白写着 `IMPORT_EXPERT_CENTER done, exiting`，10 分钟跑完。
+
+两条纪律：
+
+- 长跑命令**必须**自己重定向到文件（`*> path.log`），进度只看那个文件，不看终端捕获。
+- 判"挂住"之前先取一次**权威证据**：进程还在不在、真日志末尾是什么。ESTABLISHED 连接数
+  说明不了挂住（里面本来就有连接池的空闲 keep-alive），这个数字骗过我两次。
+
 #### 真机形状的两个坑（2026-08-18 踩到，探针纪律）
 
 - **advanced 外壳是 `$DSH_HOME/settings.yaml` 里的一项设置**（`dsh-desktop: mode: advanced`，
@@ -1652,19 +1667,49 @@ DSH 上这件事内核替我们做了——`list()` 里 `broken` 带原因就是
 专家走不了这条路。内容只能写进内核自己的可写用户根。**这是被内核逼的，不是口味**，
 代码注释里要这么写。
 
-**三、物化跑在导入侧，客户端不在运行时解析人设正文。**
-`import_expert_center.go` 现在就在拉 WorkBuddy 专家中心的
-`bundles/<slug>.tar.gz`（Tencent COS，本机扫下来 409 个，`ec.json` 是它的目录清单），
-那正好是物化器的输入。导入时跑同一个 `materialize-expert.mjs`（已加 `outRoot`），
-输出 preset 目录再打包上传。客户端拿到的东西**已经是**内核能直接发现的形状。
+**三、物化跑在客户端，服务端只投内容。**（2026-08-18 推翻原判，原文见本条末）
 
-**四、必须新增内核兼容标识。** 组装文件里写着具体插件包名，还带 `!!js` 表达式
-（`disabled: !!js process.platform === 'win32'`、`customSkillDirs` 用 `new URL('skills/', baseUrl)`），
-所以一份组装是**按某个内核 API 版本**写的。我们锁 rc.6、上游源码树已经是 rc.7，
-照源码写会撞 TS2305——这条教训已经吃过一次。字段：`kernel_api`（如 `0.1.0-rc.6`）+
-`preset_schema`（我们自己的组装约定版本）。快照按客户端上报的能力过滤，
-装不了的宁可不下发，也不要让用户装完拿到一个 `broken` 卡片。
-唯一的兼容轴就是这一条"给哪个内核写的"，**没有第二条**——见下。
+服务端投 `expert-content.zip`：根 `SKILL.md` 是（负责人的）人设，`members/<id>.md` 是各成员
+人设，其余是人设正文引用的随包资料。**组装成 preset 那一步在客户端做**，落在安装器里。
+
+推翻的理由是一条量化的成本：组装文件整份内联内核包名（见下面第四条），所以**一份 preset
+归档只对一个内核版本成立**。若由服务端产，每次内核升级都要把全部专家重新编一遍再上传，
+而升级完成之前，新客户端看整个市场都是"未适配当前内核"——这等于把**内核版本和市场内容
+永久绑在一起**，每次升级都欠一次全量重编。反过来把组装放在客户端，它天然知道自己跑的是
+哪一版，换内核零市场工作量。
+
+这也不是新发明，是**现有客户端的既有形状**：派活规范里要点名每个成员的 agent id，而 id
+带团队前缀、还要看用户实际装了谁，所以那段一直由 `agent-manager.ts` 在本机生成
+（`seed.go:204-208` 的注释把这个理由写得很清楚：服务端再写一份就是第二个真相源）。
+组装 preset 和生成派活规范是同一类事情，归属应该一致。
+
+原判是"导入时跑 `materialize-expert.mjs`，输出 preset 目录再打包上传"。它错在把
+`kernel_api` 当成一个可以随手加的维度，没算过"每次内核升级 × 1364 个条目"这笔账。
+
+**随包技能不进内容归档。** 它们已经被导入器上架成**独立的市场技能条目**
+（`import_expert_center.go` 的 `upsertMarketSkill`），slug 记在 `manifest.bundledSkills` 里。
+所以安装一个专家 = 拉 1 份内容归档 + N 份技能归档，技能字节在多个专家之间复用而不是各存一份。
+这一条是既有设计，保留。
+
+**四、`kernel_api` 只对"归档里带组装文件"的格式成立。**
+组装文件里写着具体插件包名，还带 `!!js` 表达式（`disabled: !!js process.platform === 'win32'`、
+`customSkillDirs` 用 `new URL('skills/', baseUrl)`），所以一份组装是**按某个内核 API 版本**写的。
+我们锁 rc.6、上游源码树已经是 rc.7，照源码写会撞 TS2305——这条教训已经吃过一次。
+
+但按第三条，专家投的是内容而不是组装，所以三种格式里只有 `preset-dir.tar.gz`（整份写好的
+预设）必须声明 `kernel_api`，另两种恒为空：
+
+| 格式 | 谁产 | 装到哪 | 绑内核版本 |
+|---|---|---|---|
+| `skill-dir.tar.gz` | 导入器 | `<dshHome>/skills/<slug>/` 或 preset 内 `skills/` | 否 |
+| `expert-content.tar.gz` | 导入器 | 客户端组装成 preset 后落可写根 | 否 |
+| `preset-dir.tar.gz` | 我们自己精选 / 第三方直投 | preset 可写根 | **是** |
+
+技能不绑内核版本这一条是查过内核的：`packages/skill/skill-filesystem/README.md`
+的 *Skill Format* 一节要求的只是 `<root>/<name>/SKILL.md` 加 frontmatter 里 kebab-case 的
+`name` 与 `description`，通篇没有任何内核包名。绑定内核的是**组装**，不是内容。
+代码里这个判据是 `model.DesktopArtifactNeedsKernelApi(format)`，上传与快照两处都过它，
+免得两边各写一次 `format == preset-dir` 然后漂移。
 
 **五、制品要多份并存 → 独立表，而不是在条目上再加一组列。**
 新增 `desktop_market_artifacts`：`item_id` + `format` + `kernel_api` + `key` / `sha256` / `size` /
@@ -1682,14 +1727,56 @@ DSH 上这件事内核替我们做了——`list()` 里 `broken` 带原因就是
 新表；导入侧不再产 openclaw 形状的 zip；格式并存只为内核版本与格式演进，不为客户端代际。
 内核自己对这个局面有成文立场，照它办（`deepseek-harness/AGENTS.md:5-7`，*Pre-release stance:
 foundation over blast radius* —— *with no external consumers, prefer the correct foundation over
-compatibility shims… Backends reject old on-disk formats*）。一个提醒：AutoMigrate 只 CREATE /
-ADD、从不 DROP，所以已经跑过的本地开发库里那三列会留着当死列，不会有人读；要干净就手工 DROP。
+compatibility shims… Backends reject old on-disk formats*）。
 
-**六、归档格式取 tar.gz，理由要写进注释。** 内核不提供任何解包能力，Node 内建只有 `zlib`。
-tar 头是定长 512 字节记录，自己写一个**有界读取器**是几十行，且必须自己写才能显式拒绝
-绝对路径、`..`、符号 / 硬链接、设备节点、超大条目与超量条目——这些正是上游安全说明要求的。
-zip 要解中央目录，且 `adm-zip`（旧壳用的那个）历史上有路径穿越 CVE。所以：**零依赖 + 严格白名单**。
-这属于"内核没有、参考实现也不适用，才自己造"的那一类。
+**已在真库执行完（`jishu_test`，2026-08-18 04:13）。** AutoMigrate 只 CREATE / ADD、从不 DROP，
+所以另写了 `model.DropLegacyDesktopMarketArtifactColumns()`（先 `HasColumn` 再 `DropColumn`，
+空跑零 DDL）。跑真实迁移路径复验：条目表 22 列 → 19 列，三列确实没了；
+`desktop_market_artifacts` 建出，唯一索引是 `uk_dm_artifact_target(item_id, format, kernel_api)`；
+连跑两遍第二遍零动作。
+
+两条踩到的坑，都记在这里：
+
+- **它必须挂在 `MigrateAdminOwnedTables()` 外面**，和 `EnsureAgentsDocsApiHostColumn` 并列。
+  那个函数只要有任一模型迁移失败就整体 `return`，而本库上就有两个与市场无关的模型长期迁不动
+  （`ChannelOpsPermission` 撞 MySQL 64 索引上限、`ProformaInvoice` 有一条重复发票号）。挂在它
+  后面等于永远不执行——我第一版就挂错了，是启动日志把它抖出来的。
+- **删列丢掉了 1364 个仍然有效的 key。** 1367 条里 1364 条带旧 `artifact_key`，我按"openclaw
+  形状的 zip 对 DSH 没用"把它们直接丢了——那个判断在第三条推翻之前是对的，推翻之后就错了：
+  专家条目那份**正是** `expert-content.zip`，技能条目那份**正是** `skill-dir.zip`。
+  改了方案没回头复查迁移的前提。代价是重跑一次导入器把归档整批重传（它本来就设计成可重跑、
+  归档按上游内容确定性重建），以及存储里留一批孤儿对象，按
+  `desktop-market/<type>/<slug>/` 前缀单独清。
+
+**五之二、图标一律转存，不留直链（2026-08-18 推翻自己的旧判断）。**
+库里 380 个已上架条目的 `icon` 直指上游腾讯 COS。原因不是机制没生效——是 `expert_avatar.go`
+的 `resolve()` 开头**故意**对 `/avatars/` 前缀直接 return 上游地址，连幂等表都不查。当时写的
+理由是"公共目录那 391 个稳定可达，为一批本来就好用的图付上传代价不值"。
+
+**那笔账漏了一整个维度**：权衡里只有"图能不能加载出来"，没有"这张图是谁的机器在提供"。
+直链意味着每个用户每次打开市场，浏览器都去打竞品的桶——用户 IP 直接送过去，而对方只要加一条
+Referer 防盗链、或换个对象前缀，我们货架上几百张卡的头像会同时变空白，且图片加载失败不出声。
+上传代价又是**一次性**的（`previousSelfHostedAvatars` 保证后续每轮零上传），所以那个顾虑本身
+也不成立。做法没有新发明：走仓库既有的 `api_storage`，与案例封面 `resolvePlaybookCover` 同形状；
+包里找不到对应文件时才按清单地址去上游取那一张再转存，让"不留直链"是完整的而不是近似的。
+
+**复验（真库 `jishu_test`）**：上游 COS 0 条、我们图床 407 条；`manifest` 里的成员头像 0 残留。
+顺带查出**第二处盗链**：精选场景大卡的配图（`import_featured_scenes.go` 裸拼 `base + s.Image`）
+还有 10 张直连上游，而那是首页最显眼的位置——同一处方治好。
+
+**六、归档格式取 tar.gz，而且是三种格式一律 tar.gz。** 内核不提供任何解包能力，
+Node 内建只有 `zlib`。tar 头是定长 512 字节记录，自己写一个**有界读取器**是几十行，
+且必须自己写才能显式拒绝绝对路径、`..`、符号 / 硬链接、设备节点、超大条目与超量条目——
+这些正是上游安全说明要求的。zip 要解中央目录，且 `adm-zip`（旧壳用的那个）历史上有路径穿越
+CVE。所以：**零依赖 + 严格白名单**。这属于"内核没有、参考实现也不适用，才自己造"的那一类。
+
+**服务端原来产 zip，2026-08-18 一并改成 tar.gz。** 判据是"客户端只养一个解包器"：留着 zip
+就要在客户端再写一份中央目录解析，那是同一批路径穿越风险重来一遍，约 150 行安全敏感代码，
+而已有的 tar 读取器已按 7 个对抗用例验过；收益只是"格式看着眼熟"。
+Go 侧改动很小（`archive/tar` + `compress/gzip` 都是标准库，`zipFiles` → `tarGzFiles`），
+但**确定性要自己重新保一遍**：tar 头带 mtime、uid/gid/uname，gzip 头也带 mtime，
+全部写死，否则同内容每次打出不同字节，`upsertItem` 里"内容没变就不重传"的短路会永久失效
+（这正是当初 zip 那版就踩过一次的坑，注释还在）。
 
 **七、信任措辞照上游 market-shell + `dsh-sync` 的口径。**
 preset 里有 `!!js`，**安装一个专家在信任上等于给 shell 权限**；`dsh-sync` 同步用户 preset 目录时
@@ -1781,6 +1868,191 @@ high / xhigh / max`）。admin-cloud 的模型档案页（`src/pages/desktop-mod
 这道校验比现在更要紧，不是更不要紧。
 
 **这条通道只下发能力、不许携带"该用哪些模型"** —— 清单是用户数据，这条纪律继承。
+
+### 客户端组装步：expert-content 装成预设（2026-08-18 落地，内核 discovery 判绿）
+
+服务端只发内容（人设 + 成员人设 + 随包资料），组装文件由客户端在装的那一刻拿**当前跑着的
+内核自己的 `standard`** 生成，落在 `market/compose.ts`。这一步的每个决定都有出厂成句背书，
+不是我们的新发明——查证顺序与证据如下：
+
+| 要做的事 | 内核给的现成东西 | 证据 |
+|---|---|---|
+| 换专家身份 | 出厂 `standard` **本来就有** `persona` 行（默认只一句"You are a coding agent…"），`dsh-persona` 是 scope-only 插件，存在的理由就是让预设遮蔽部署人设 | `dsh/config/agent-presets/standard/agent.cordis.yml:24-28`、`dsh-persona/lib/index.js:8-15` |
+| 成员各自的人设 | `dsh-tool-subagent` 的 `persona` 配置项（"Per-child persona that shadows `deployment:persona`"），且 `spawn` provider **四项能力全支持**（`persona` / `depthLimit` / `toolFilter` / `outputSchema`）——所以 `maxDepth: 1` 不会在挂载期抛 | `dsh-tool-subagent/lib/types/index.d.ts:41-44,59-65`、`dsh-subagent-spawn-in-process/lib/index.js:23-28` |
+| 随包技能的落点 | 出厂 `cordis` 预设那条 `customSkillDirs: - !!js …new URL('skills/', baseUrl)`，它自己的注释写着"`baseUrl` 是预设自己的目录，所以装到哪都解析得对" | `dsh/config/agent-presets/cordis/agent.cordis.yml:255-259` |
+
+**三处刻意不做，都是"别改内核的行"：**
+
+- **不关 `includeDefaultRoots`。** 出厂 `cordis` 只**加**一个技能根，没关默认根。我们手工物化那
+  两份预设多写了 `includeDefaultRoots: false`，那是自己加的，不跟——而且叠加才对得上
+  WorkBuddy 的实情（一条会话六十多个技能里只有四五个来自被召唤的专家）。
+- **成员行追加在根层，不塞进出厂的 `delegation` 组。** 那个组存在是为了给 `workflows` 一个
+  entry-local realm；`dsh-tool-subagent` 只注入三个注册表、不 provide 任何服务，所以不需要 realm
+  （`lib/index.js:15-19`）。追加就不会碰内核自己那个组里的任何一行。
+- **通用 `subagent` / `subagent_fork` 两行留着。** 手工那份专家团把它们换成了成员行，
+  但删内核的行换来的只是省两个工具 schema，用户看不到差别。
+
+**为什么是文本编辑而不是"解析再序列化"。** 组装文件带 `!!js` 标签，通用 YAML 解析器直接抛，
+序列化器也没法把它原样吐回来——真正读它的是 `cordis-plugin-include`：
+`yaml.load(content, { schema: yaml.JSON_SCHEMA.extend(JsExpr) })`，且顶层**必须是数组**
+（`src/index.ts:9-23,250-263`）。所以按行改：组装文件根层是扁平序列，每行以 `- id:` 顶格开头、
+属于它的行一律缩进，`rowBody()` 就吃这条，不成立时**显式抛**而不是猜。
+
+**唯一躲不开的是"要吐出任意文本"**（人设是整篇 markdown）。取**内联块标量**，因为出厂 `standard`
+和我们手工那两份都是这个形状。**认真考虑过并否掉了 `!!js readFileSync` 从文件读**：那样零转义风险，
+但把内核自带的四份组装文件全扫一遍，`!!js` 的用法**清一色是 `process` / `baseUrl` 上的纯表达式，
+没有一处做 I/O**——那就是我要发明的机制。改为在 `blockScalar()` 里归一化（CRLF→LF、砍掉首行缩进、
+空行保持真空），而且写坏了也不可能静默装上去：安装器最后一步问内核认不认，不认就带着装载器
+自己的话回滚。
+
+**真机复验（`.tmp-probe/compose/check.mjs`，故意难看的输入：CRLF + 首行缩进 + 制表符开头 +
+反引号 + 行首 `---` + 行首 `- id:` + 中文）**：
+
+| 判据 | 结果 |
+|---|---|
+| 用内核那套 schema 解析 | 顶层是数组，19 行（`standard` 原有 16 + 3 个成员） |
+| 人设正文 | 与原文逐字节相等（归一化后） |
+| `standard` 自己的 `!!js` 行 | `tool-bash` / `tool-pwsh` 的表达式节点都在，没被改坏 |
+| 技能根 | `customSkillDirs` 加上了，且是 `!!js` 表达式节点 |
+| 成员行 | 3 行（空文件被丢、`members/<id>/` 子目录不算成员），工具名全过 `^[a-zA-Z0-9_-]{1,64}$` |
+| **内核自己的 `scanRoot`** | 发现 `probe-expert`、读到 `preset.yml` 的名称、`broken === undefined` |
+
+**探针抓到一个我判据没盖到的真 bug，值得单记。** 工具名做了去重，**行 id 没有**：
+`video.editor@v2` 与 `video-editor-v2` 两个成员 slug 化之后撞成同一个 `teammate-video-editor-v2`，
+而 **Loader 按 id 认条目**——后一行会静默盖掉前一行，那个成员从团队里消失且不报错。
+判据只看了工具名，是探针把两个同名 id 打印出来才发现的。修法是行 id 与工具名共用同一个
+`unique()`（行 id 用 `-` 连接以留在 kebab 字母表内），并把"id 唯一 + 三份人设互不相同"加进判据。
+**教训**：生成式的东西要对**每一个下游键**都断言唯一，不是只对最显眼那个。
+
+**还没验的一条，别当已验**：discovery 判的是"读得进、解析得动"，**不是挂载**。
+"某行插件包不存在 / config 形状不对"这类只会在**第一条会话挂载时**才现形。我们是从当前内核
+自己的 `standard` 派生的（每一行都在这个部署里挂得起来），成员行用的 `dsh-tool-subagent`
+也已经在 `standard` 里，所以风险低——但**低不等于验过**，下一步要在跑着的应用里真开一条会话。
+
+### 挂载已验（2026-08-18，真机一条会话）
+
+在跑着的应用里从广场装了 `marketing-growth-team`（4 成员 + 1 个随包技能），开一条会话发
+「请调用 delegate_seo-content-strategist」，拿到的证据链是完整的：
+
+- 预设进了预设选择器、会话头显示「营销增长专家团 · 1 个子代理」——**挂载起来了**；
+- `delegate_seo-content-strategist` 真被调用并返回内容——成员行的 `toolName` 与 `persona`
+  都生效，OpenAI 那条 `^[a-zA-Z0-9_-]{1,64}$` 也没被 slug 里的连字符绊倒；
+- 上下文注入里 `skill-catalog` 列出了 `marketing-growth` 及其描述——**随包技能被内核从
+  `<preset>/skills/<slug>/SKILL.md` 发现了**，`customSkillDirs` 那一步是通的；
+- 落盘核对：`agent.cordis.yml`（78KB，人设 + 4 行 `dsh-tool-subagent` + 内核自己那 4 行
+  通用 subagent 原样保留）、`preset.yml`、`openlux-market.json`、
+  `skills/marketing-growth/` 整棵 references 树（80 余个 md）。
+
+**内核对技能目录的三条硬事实**（读 `dsh-skill-filesystem` / `dsh-skill` 源码得来，别照目录名想当然）：
+
+1. 技能的身份取 **frontmatter 的 `name`**，不是目录名；两个技能 `name` 撞了就是撞了，
+   放在不同目录也救不回来（随包技能的 rank 是 `BUNDLED_SKILL_RANK = 600`）。
+2. 目录型技能只认 `<root>/<dir>/SKILL.md` **一层**；`SKILL.md` 再往深一级就发现不了
+   （`isPotentialSkillPath` 直接砍 `segments.length > 2`）。
+3. frontmatter 不合格（缺 `name`/`description`、`name` 不合 `^[a-z0-9]+(?:-[a-z0-9]+)*$`）
+   是 `logger.warn` **静默忽略**，不报错。所以"装完了"不等于"看得见"，判据必须是
+   会话里的 skill-catalog，而不是盘上有没有那个目录。
+
+### 这一轮修掉的三处真错配（客户端 ↔ 控制台）
+
+都是"没照服务端已经写明的设计对齐"造出来的，不是内核缺功能：
+
+1. **客户端对所有分区只要一种格式**（硬写 `preset-dir.tar.gz`）。真相是一区一格式：专家发
+   `expert-content.tar.gz`、技能发 `skill-dir.tar.gz`、**连接器根本没有归档**（它带的是
+   MCP 启动清单）。不改的话专家技能全被标成"没有适配当前内核的版本"，连接器 3 条也会
+   被冤枉成不可用。格式表统一收在 `wire.ts` 的 `formatFor(type)`，只留一个真相源。
+2. **客户端要求快照里带 `url`**，而服务端**刻意不带**，理由写在
+   `controller/desktop_market_client.go:97-107`：预签名链接几小时就过期，快照走 ETag 能缓存
+   好几天，把会过期的塞进不会过期的缓存里 = "点安装那一刻才发现链接死了"，而 ETag 表达不了
+   这种失效。改成：目录只带不会过期的事实（sha256 / size），链接在点安装那一刻现签。
+3. **安装 RPC 收的是渲染进程递来的 URL**。服务端那段注释顺带点明了本意——宿主该收到
+   「装哪个条目」。这不只是洁癖：主进程去 fetch 渲染进程给的任意 URL 是 Electron 里的
+   SSRF 标准靶子。改成 `InstallRequest` 只带 `type` + `id` + `format`，URL 与 manifest
+   都由宿主自己去控制台取（`market/console.ts`）。旁文件的 `source` 也跟着从"那条签名链接"
+   改成 `<type>/<slug>@<format>`——记一串几小时后就失效的签名，重装时什么也做不了。
+
+### 两个把人骗住的诊断坑（各花了十几分钟）
+
+1. **端口上是两天前的旧二进制**。本地起 admin-server 时 `go run` 打的是
+   `listen tcp :3000: bind: Only one usage of each socket address`——但**日志被
+   PowerShell 重定向缓冲了**，我先看到的是快照接口回
+   `Unknown column 'desktop_market_items.artifact_key'`，于是去查结构体、查库、查 GORM，
+   全都对得上（结构体没有那三列、库里也没有）。真相是 3000 端口上蹲着 8/16 23:54 编的
+   `admin-dev`，它的结构体还在制品拆表之前。**判法**：`Get-NetTCPConnection -LocalPort`
+   把 pid 和 `StartTime` 一起打出来，别只看"端口通不通"。
+2. **窗口指着上一轮的宿主端口**。市场页出「连不上市场目录：Failed to fetch」，而转发器
+   日志上明明有 200/304。渲染侧控制台里是
+   `ws://127.0.0.1:64542/api/events.mux failed` + `connection lost, retry #175`，
+   而活宿主在 **55375**——同一个 electron 进程，窗口里却是旧端口的页面。
+   **判法**：`Get-NetTCPConnection` 按 electron 的 pid 反查它在听哪个端口，和
+   `location.href` 对一下；不一致就把页面导到活端口，不要去查市场代码。
+   顺带一条：`Failed to fetch` 是 **Chromium 渲染进程**的措辞，主进程 undici 失败说的是
+   `fetch failed`——这两个词分得清，就知道该往哪一侧查。
+
+### 召唤：一键到会话（2026-08-18 落地并真机验通）
+
+**要复现的结果**（WorkBuddy 的形状）：专家中心里点一个专家，**不出现"安装"这一步**，直接开一条
+新会话，并把它的开场问题**预填**进输入框（不自动发送，用户还能改）。开场问题取 manifest 的
+`defaultInitPrompt`，缺了就退到 `quickPrompts[0]`——WorkBuddy 自己的注释写着「解析专家召唤时
+预填输入框的默认提示词」。
+
+**内核三步全是现成面，没有自造机制**（`src/client/summon.ts`）：
+
+1. `workspaces.startSession()` —— 复用或新建工作区的空会话并打开它。它不回传 id，所以召唤
+   请求是**暂存**的，由"谁看到当前会话变化"来兑付。这不是我们的发明：内核自己那个
+   Creator 入口就是 `seat.stage(id) + workspaces.startSession()`，注释也写着"会话可能在
+   pick 之前或之后才出现"。
+2. `agentPresets.select({ sessionId, agentPreset })` —— 和 hero 芯片按下去用的是同一条 RPC。
+   它**拒绝已经跑过一轮的会话**，所以只往 `blank` 的会话上落。
+3. `conversation.input.for(actx).setDraft(text)` —— 经 `sessions.scope(id)` 拿到那条会话的
+   输入器，是内核 `ui-commands` 和队列坞从会话外面写输入框的同一条路。
+
+**首次召唤仍要过一次确认，这是内核的信任模型逼的**，不是我们谨慎：`user` 预设在内核自己的话
+里"carries the same trust as shell access"（`agent-presets` README 的 Trust 一节），我们组装出
+的 composition 又带 `!!js`。所以第一次落盘要用户点一下，之后每次召唤都是一下点到会话。
+
+**开场问题的三个来源，按代价排**：装的时候 `readExpertManifest` 一并取回、写进旁文件
+`openlux-market.json` 的 `prompts`（已装的离线可召唤）→ 详情页临时缓存 → 都没有才走
+`market.prompts` 这条宿主 RPC（manifest 是逐条读，快照刻意不带）。
+
+**修掉一个自己造的 bug**：详情页点第三条提问，装完却预填了第一条——`pending` 只存了条目、把
+用户点的那句丢了。改成 `PendingSummon { item, prompt? }`，确认对话框把它原样带过去。
+
+#### 内核缺口：芯片不会跟着别人改的 composition 走（已打补丁）
+
+`AgentPresetSeatController.load()` 的取值顺序本来就是「暂存的 pick → **当前会话已经在跑的
+preset** → 部署默认」，也就是说内核**认**"芯片该显示当前空会话的 composition"。问题是这个
+推导只在 `load()` 时做一次，而 `load()` 只在挂载、`settings/document-updated`(ns=agent-presets)
+和它自己那套 `rosterReaders` 时跑。芯片订阅了会话列表，回调里却只有 `seat.apply()`。
+
+后果是实测过的：召唤完会话真的在跑 `hr-digital-expert`（会话日志里有 `agent-preset/selected`
+事件，答话也是那个人设），芯片却还写着「标准模式」。这不只是难看——用户从芯片里挑一下它显示
+的那个"标准模式"，`select` 会真把会话换成 standard，把召唤悄悄撤了。
+
+内核对这一类缺口是**明说**的，README 的 Known Limitations 里写着「Composition edits are
+invisible to the page」，`section-store` 的注释更直接：目录被改这件事"没有别的办法告诉
+new-session 芯片"（它自己靠包内的 `rosterChanged` 回调解决，跨包没有出口）。查过的出口都不
+通：没有 commands、没有 roster 变更事件、`settings/document-updated` 只在**原始段真的变了**
+时才 bump（`bumpRevision`），拿它当刷新信号是假话且不可靠。rc.7 也一样没改。
+
+所以按仓库既有先例（`dsh-sandbox-windows-acl` 那个补丁）打了
+`patches/dsh-client-ui-agent-preset@0.1.0-rc.6.patch`：给 seat 加一个不发 RPC 的 `sync()`，
+在会话列表变化的回调里跟 `apply()` 一起调——有暂存 pick 就不动它；当前会话的 preset 已在名录
+里就直接改显示；不在名录里（刚装的那种）才 `load()` 一次。**换内核版本时这条补丁要重做**，
+`yarn install` 打不上会直接报错，不会悄悄丢。
+
+真机证据（本地控制台 3100 + 转发器 8792）：
+
+- 已装专家一下点到会话：芯片「营销增长专家团」+ 输入框「为我的 SaaS 产品制定 90 天营销
+  计划」，全程 0 个对话框；
+- 未装专家：确认框（写明落盘目录 + "只有第一次召唤要过这一步"）→ 约 2.4 秒后芯片
+  「论文写作导师」+ 预填开场问题，走的是 `sync()` 里 `load()` 那条（名录还不认识它）；
+- 详情页第三条提问 → 装完预填的就是第三条（`match: true`）；
+- 真发一轮：会话头「营销增长专家团」，答话「我是盛全局——营销增长专家团的首席营销策略师」
+  ——composition 真挂上了；
+- 重启外壳后芯片仍是「腾讯HR数智专家」（当前会话开机就 attach，摘要带得出解析后的 preset）。
+  顺带一条：**输入框草稿过不了重启**——它存在渲染侧，而宿主端口每次启动都变，
+  `http://127.0.0.1:<port>` 换了 origin 就换了存储。这是内核既有行为，与召唤无关。
 
 ### 不用改的
 

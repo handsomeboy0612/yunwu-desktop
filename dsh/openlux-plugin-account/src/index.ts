@@ -35,6 +35,8 @@ import { signIn } from './account/auth.ts'
 import { BalanceReader } from './account/balance.ts'
 import { fetchCaptcha, fetchCaptchaConfig, verifyCaptcha, type CaptchaType } from './account/captcha.ts'
 import { clearSession, readSession } from './account/session.ts'
+import { readCatalog, type Catalog, type CatalogType } from './market/catalog.ts'
+import { readExpertManifest, type ConsoleAccess } from './market/console.ts'
 import { installPreset, readInstallTarget, type InstallOutcome, type InstallRequest, type InstallTarget } from './market/install.ts'
 import { syncModels } from './models/sync.ts'
 
@@ -174,6 +176,11 @@ async function route(
     case 'models.sync':
       return { ok: true, value: await syncModels(ctx, { baseUrl, apiKey: () => apiKey(ctx) }, signal) }
 
+    // What the console offers this kernel. The browser cannot ask for itself:
+    // the route authenticates with our token and answers without CORS headers.
+    case 'market.catalog':
+      return { ok: true, value: await marketCatalog(ctx, baseUrl, payload, signal) }
+
     // Where an install would land, and what the roster already holds. The
     // gallery needs both before it can mark a card installed, and the
     // confirmation dialog needs the resolved directory to name its target.
@@ -181,7 +188,13 @@ async function route(
       return { ok: true, value: await marketTarget(ctx) }
 
     case 'market.install':
-      return await marketInstall(ctx, serialize, payload, signal)
+      return await marketInstall(ctx, { baseUrl, apiKey: () => apiKey(ctx) }, serialize, payload, signal)
+
+    // The opening questions one expert publishes. Separate from the catalog
+    // because the manifest is a longtext column the snapshot withholds, and
+    // asked only for the item whose detail page is open.
+    case 'market.prompts':
+      return { ok: true, value: await marketPrompts(ctx, baseUrl, payload, signal) }
 
     default:
       // The error-code union belongs to the kernel and cannot grow a row from
@@ -215,6 +228,63 @@ type Serializer = <T>(task: () => Promise<T>) => Promise<T>
  * @param ctx - host context.
  * @returns the install target.
  */
+/**
+ * Read one catalog partition.
+ *
+ * A read that failed rides the success arm like every other outcome here: the
+ * gallery renders the reason next to whatever rows it still holds, and a
+ * catalog it cannot reach is not a fault of the call.
+ * @param ctx - host context.
+ * @param baseUrl - console origin.
+ * @param payload - request body; `type` selects the partition.
+ * @param signal - caller cancellation.
+ * @returns the catalog.
+ */
+async function marketCatalog(
+  ctx: Context,
+  baseUrl: string,
+  payload: unknown,
+  signal?: AbortSignal,
+): Promise<Catalog> {
+  return await readCatalog(ctx, { baseUrl, apiKey: () => apiKey(ctx), type: catalogTypeOf(payload) }, signal)
+}
+
+/**
+ * Read which partition the caller asked for.
+ * @param payload - request body.
+ * @returns the partition, defaulting to experts.
+ */
+function catalogTypeOf(payload: unknown): CatalogType {
+  const type = (payload as { type?: unknown } | null)?.type
+  return type === 'skill' || type === 'connector' ? type : 'expert'
+}
+
+/**
+ * Read one expert's opening questions.
+ *
+ * A read failure answers with an empty list rather than an error: suggestions
+ * are an addition to a detail page, and a summon without one lands on a clean
+ * composer instead of not happening.
+ * @param ctx - host context.
+ * @param baseUrl - console origin.
+ * @param payload - request body; `id` names the expert.
+ * @param signal - caller cancellation.
+ * @returns the questions, best first.
+ */
+async function marketPrompts(
+  ctx: Context,
+  baseUrl: string,
+  payload: unknown,
+  signal?: AbortSignal,
+): Promise<{ prompts: readonly string[] }> {
+  const id = (payload as { id?: unknown } | null)?.id
+  if (typeof id !== 'string' || id.trim() === '') return { prompts: [] }
+  const manifest = await readExpertManifest(
+    ctx, { baseUrl, apiKey: () => apiKey(ctx) }, id.trim(), signal,
+  )
+  return { prompts: manifest.prompts }
+}
+
 async function marketTarget(ctx: Context): Promise<InstallTarget> {
   // `ctx.get` rather than `ctx.agentPresets`: the roster is consumed
   // opportunistically, and an undeclared property read fails the reflect proxy
@@ -235,6 +305,7 @@ async function marketTarget(ctx: Context): Promise<InstallTarget> {
  */
 async function marketInstall(
   ctx: Context,
+  access: ConsoleAccess,
   serialize: Serializer,
   payload: unknown,
   signal?: AbortSignal,
@@ -256,12 +327,12 @@ async function marketInstall(
       ok: false,
       error: {
         code: 'bad-request',
-        message: '安装请求缺少必要字段（id / url / sha256 / itemId）',
+        message: '安装请求缺少必要字段（id / format / itemId）',
         details: { issues: [] },
       },
     }
   }
-  return { ok: true, value: await serialize(() => installPreset(ctx, presets, request, signal)) }
+  return { ok: true, value: await serialize(() => installPreset(ctx, presets, access, request, signal)) }
 }
 
 /**
@@ -279,14 +350,27 @@ function installRequestOf(payload: unknown): InstallRequest | undefined {
     const value = raw?.[key]
     return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
   }
-  const [id, url, sha256, itemId] = [text('id'), text('url'), text('sha256'), text('itemId')]
-  if (id === undefined || url === undefined || sha256 === undefined || itemId === undefined) return undefined
-  const [version, kernelApi] = [text('version'), text('kernelApi')]
+  const [id, itemId] = [text('id'), text('itemId')]
+  if (id === undefined || itemId === undefined) return undefined
+  // The format decides which unpacker runs, so a request without one is not
+  // installable by guessing: the installer refuses an unknown format by value,
+  // and an empty string is exactly that.
+  const format = text('format') ?? ''
+  // No URL is read off the wire at all. The host signs its own link from the
+  // item named here, so a renderer cannot choose where this process connects.
+  const type = catalogTypeOf(raw)
+  const sha256 = text('sha256') ?? ''
+  const [version, kernelApi, name, description] = [
+    text('version'), text('kernelApi'), text('name'), text('description'),
+  ]
   return {
+    type,
     id,
-    url,
+    format,
     sha256,
     itemId,
+    ...name === undefined ? {} : { name },
+    ...description === undefined ? {} : { description },
     ...version === undefined ? {} : { version },
     ...kernelApi === undefined ? {} : { kernelApi },
   }
