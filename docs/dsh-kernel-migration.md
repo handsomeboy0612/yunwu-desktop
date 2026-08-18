@@ -1513,8 +1513,88 @@ JSON Schema、系统提示词区段、`card: 'web'` 结果卡片、结果去重�
 模型自己发了两次 `web_search`（工具耗时 12.6 秒），答出 4 月 24 日发布、8 月 13 日 GA，
 并带来源链接。
 
-**`web_fetch` 仍然关着**，那是上游的取舍写在注释里的：没有 fetch 提供方挂载，而那个提供方
-把 SSRF 防护推给部署、目标 URL 又由模型选。要开就得连 `dsh-web-fetch-http` 一起组合，另议。
+#### 网页抓取落地（2026-08-18 真机验通）：旋钮在预设层，我们故意没照那一层放
+
+`web_fetch` 上游默认关着，注释里给的理由两条都成立：没有 fetch 提供方挂载，而那个提供方
+把 SSRF 防护推给部署、目标 URL 又由模型选。**但第二条的结论到不了桌面端。**
+沙箱只管文件效果——`dsh-sandbox-policy` README 原话是网络与进程策略"不在 `SandboxMode` 的
+词汇里，因此这里没有限制它们的旋钮"——而每个权限档位都组合着 shell（`tool-bash`，
+Windows 上是我们实际发货的 `tool-pwsh`）。也就是说模型早就能碰这台机器碰得到的任何主机，
+无上限、无内容规则。提供方反而是更窄的一条：只收 http(s)、URL 带凭据直接拒
+（真机验到 `WEB_BLOCKED_URL`）、只跟同源跳转、5MB 与 10 万字符双上限、只解码文本类型、
+带诚实的 `User-Agent`。所以这一行买到的是一条**有上限的读取路径，不是新的可达范围**。
+换成宿主跑在用户无权浏览的网络里的部署（托管 / 共享宿主），这个判断立刻反过来，那时这一行
+要跟着那种形态一起撤掉。
+
+**旋钮的真身在预设层，这是这次最值钱的一条内核事实。** 顺序是这样查出来的：
+
+1. 我先照直觉把 `- id: tool-web / config: {fetch: true}` 打在了 profile 根上。
+2. 无头宿主里 `ctx.tools.schemas()` 全局视图只有 `image_generate` 一个，`web_search` 也不在——
+   而搜索明明在界面上能用。
+3. 于是去查 `dsh-web-app/cordis.patch.yml`：它把 `tool-web` 整行 `disabled: true`
+   （同一批还有 `tool-fs`、`tool-jobs`、`tool-skill`、`tool-todo`、`plan-mode`……），
+   注释写着模型能看见的工具属于 agent 预设：**"What a preset chooses is which tools its
+   agent sees"**。
+4. 于是 `fetch` 的落点是每份预设自己的 `tool-web` 行——随 dsh CLI 发的
+   `config/agent-presets/standard/agent.cordis.yml:247-251`（`fetch: false` +
+   `searchTimeoutMs: 60000`），以及我们自己那两份专家预设里的同名行。
+   我原来那行打在一个本应用里根本不启用的行上，**是死配置**。
+
+照预设层改会撞上三件事：预设层**没有 patch 语义**（`dsh-agent-presets` README「已知限制」
+原话：改随附预设一行只能整目录复制，而"副本是会漂移的快照"，升级不会更新它，上游自己的
+`cordis` / `code` 就是 `standard` 的整份副本并接受这个代价）；我们产品的默认预设**就是**
+随附的只读 `standard`（`profile.ts:368-380` 只往 `roots` 追加了我们的目录，`default: standard`
+照抄 base）；而**靠前的根赢重复 id**，我们的目录默认盖不住它。三条合起来：想让默认档也能抓页面，
+要么再养第三份 `standard` 副本（升级后悄悄停止继承上游改动，正是"从来没绿过的守卫"那类失效），
+要么换掉产品默认预设（那是产品决定，不是这一步该顺手做的）。
+
+**所以选了另一条内核既有的缝：把 `dsh-web-app` 关掉的那一行重新打开。**
+
+```yaml
+- id: tool-web
+  disabled: false
+  config:
+    search: false
+    fetch: true
+```
+
+这样 `web_fetch` 注册进**全局工具层**——`image_generate` 本来就在那里——不管会话从哪份预设
+组装都看得见，也没有副本要同步；真有哪个 agent 不该有，`tools.restrict()` 是内核给的缝。
+代价写清楚两条：这条工具不再由预设决定（连上游宣称"双工具"的 `极简模式` 也会多出它，
+我们的出图工具其实早就有同样的外溢，上一轮自检只审了字节通路没审这个平面）；以及
+`search: false` 让搜索留在预设层（一份全局的搜索注册只会多出一段和预设自相矛盾的提示词，
+不会多出一个工具），于是搜索那段提示词里"搜完接着 fetch"的引导不会出现——
+**实测模型照样会串**：一轮里 3 步，先 `Search` 再 `Fetch https://cursor.com/changelog`，
+答案带原文引用与来源。fetch 自己那段提示词本来就拿"`web_search` 的结果"当例子输入。
+
+提供方那行只调了一个值：`timeoutMs: 45000`。它是直接 `ctx.web.fetch()` 调用方的资源兜底，
+README 要求部署把它设在**工具调用预算之上**，好让模型侧超时报 `TOOL_TIMEOUT`（由
+`dsh-tool-call-timeout-policy` 拥有）而不是提供方的 `WEB_FETCH_TIMEOUT`——而两边默认值都是
+30 秒，那不叫"之上"。
+
+**三个探针陷阱，代价都是真金白银：**
+
+- **把补丁追加在最后验的是机制，不是层序。** 我在探针里 `[...prepared.patches, 那一行]`，
+  它当然赢；而仓库里的 `cordis.patch.yml` 是一个 bundle 层，位置在
+  `profile.ts:315-320`（web-app 层之后）。层序对了才有效，探针那一下证不到这件事。
+- **旧实例会静默接管新启动。** 第一次界面复验，模型直接答"I don't have a web_fetch tool
+  in my available toolset"。原因是应用 21:13 就在跑，我 21:45 那次启动被单实例锁交接掉、
+  shell 反而干净退出，界面测的是**旧组装**。判据以后是先比进程 `StartTime` 与补丁文件
+  `LastWriteTime`，别只看"窗口起来了"。
+- **提供方包要进 profile 的模块闭包。** `$DSH_HOME/profiles/node_modules/@deepseek-ai/`
+  下面的软链是启动时按桌面清单的依赖闭包铺的，所以加完依赖必须重启一次才有
+  `dsh-web-fetch-http`。
+
+**真机结果**（标准模式、新会话）：模型说 "I'll fetch the page and extract the title and
+paragraph."，一条 `Fetch https://example.com` 卡片，答出 `Page title: Example Domain`
+与那一段正文，用时 24 秒。离线四条卫生规则也逐条验过：200 正常、404 作为**结果**返回不抛错、
+URL 带凭据被 `WEB_BLOCKED_URL` 拒、loopback 能通（SSRF 缺口确实存在，与文档一致，
+这也是上面那段判断的前提而不是意外）。
+
+**守卫**：`verify-profile-boot.mjs` 现在断言全局工具层里有 `image_generate` 与 `web_fetch`、
+且**没有** `web_search`（搜索该留在预设层）。反向验过：把 `disabled: false` 去掉就红，
+报 `assembled desktop profile offers no web_fetch tool (global tools: image_generate)`——
+也就是说这条守卫恰好挡住我这次犯的那个"死配置"错。
 
 #### 视频产物显示：选路结论（2026-08-17 查证 + 探针验完）
 

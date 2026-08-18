@@ -3645,6 +3645,20 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@deepseek-ai/dsh-web-fetch-http@npm:0.1.0-rc.6":
+  version: 0.1.0-rc.6
+  resolution: "@deepseek-ai/dsh-web-fetch-http@npm:0.1.0-rc.6"
+  dependencies:
+    "@deepseek-ai/schemastery": "npm:^3.18.1"
+  peerDependencies:
+    "@deepseek-ai/cordis": ^4.0.1
+    "@deepseek-ai/dsh-invariants": ^0.1.0-rc.6
+    "@deepseek-ai/dsh-timeout": ^0.1.0-rc.6
+    "@deepseek-ai/dsh-web": ^0.1.0-rc.6
+  checksum: 10c0/2199d2f6d7354f1f26cf63ca62d03ac9f1c771dd23321e7006d0a5cc8b3e35957b6d55ef5ebc9d7b6db521af3774fb20c280c48fdcf4a5da8660ea48743e1df2
+  languageName: node
+  linkType: hard
+
 "@deepseek-ai/dsh-web-frontend@npm:^0.1.0-rc.6":
   version: 0.1.0-rc.6
   resolution: "@deepseek-ai/dsh-web-frontend@npm:0.1.0-rc.6"
@@ -6779,6 +6793,7 @@ __metadata:
     "@deepseek-ai/dsh-user-questions": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-web": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-web-app": "npm:0.1.0-rc.6"
+    "@deepseek-ai/dsh-web-fetch-http": "npm:0.1.0-rc.6"
     "@deepseek-ai/dsh-workflow": "npm:0.1.0-rc.6"
     "@deepseek-ai/schemastery": "npm:^3.18.1"
     "@electron/asar": "npm:3.4.1"

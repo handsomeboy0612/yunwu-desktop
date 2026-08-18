@@ -165,6 +165,25 @@ try {
     )
   }
 
+  // The two model-facing tools this product adds live in the global tool layer,
+  // so they reach an agent whatever preset it composed from. Both are one config
+  // row away from silently vanishing: `web_fetch` needs its host `tool-web` row
+  // re-enabled against dsh-web-app's disable, and a patch aimed at a row this
+  // composition never mounts is dead config that nothing else reports.
+  const toolNames = new Set(ctx.tools.schemas().map(schema => schema.name))
+  for (const name of ['image_generate', 'web_fetch']) {
+    if (!toolNames.has(name)) {
+      throw new Error(
+        `assembled desktop profile offers no ${name} tool (global tools: ${[...toolNames].join(', ')})`,
+      )
+    }
+  }
+  // Search stays preset-owned: a second, global registration would add a prompt
+  // section that contradicts the preset's own guidance.
+  if (toolNames.has('web_search')) {
+    throw new Error('assembled desktop profile registers web_search globally instead of per preset')
+  }
+
   const picker = ctx.directoryPicker.capability()
   if (picker.kind !== 'browse') {
     throw new Error(`assembled Windows profile selected ${picker.kind} directory picker`)

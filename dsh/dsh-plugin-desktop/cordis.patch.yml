@@ -27,6 +27,20 @@
     # finds on the parent walk from any profile (app-boot/src/profile.ts:223).
     - id: openlux-account
       name: openlux-plugin-account
+    # The fetch backend for `web_fetch`, which the base bundle leaves unmounted.
+    # Enabling it is a security statement, so the reasoning is with the row that
+    # turns the tool on, further down this file. Order is free: the plugin
+    # injects `web` and stays pending until that service mounts.
+    - id: web-fetch-http
+      name: '@deepseek-ai/dsh-web-fetch-http'
+      config:
+        # Above the tool-call budget on purpose. This timer is the provider's own
+        # resource guard for direct `ctx.web.fetch()` callers; its README asks
+        # deployments to keep it higher than the model-facing budget so an
+        # overrun is reported as TOOL_TIMEOUT by the timeout policy rather than
+        # as the provider's WEB_FETCH_TIMEOUT. Both defaults are 30s, which is
+        # not higher.
+        timeoutMs: 45000
 
 # A desktop launch has no terminal operator waiting for the Web readiness line.
 - id: web-runtime
@@ -147,3 +161,54 @@
     apiKeyEnv: OPENLUX_API_KEY
     baseURL: https://api.openlux.ai/v1
     model: claude-haiku-4-5-20251001
+
+# Let the model read a page it found, instead of guessing from a snippet. The
+# base bundle ships `fetch: false` and states why in its own comment: no fetch
+# provider is mounted, and that provider defers SSRF protection while the model
+# picks the target. Both halves are true, and the conclusion still does not carry
+# to this product.
+#
+# What decides it here is that the boundary in question is already open. The
+# sandbox governs file effects only — its README says network and process policy
+# are outside that vocabulary and offers no knob for them — and every permission
+# preset composes a shell (`tool-bash`, or `tool-pwsh`, which is the one this
+# product ships on Windows). So the agent can already reach anything this machine
+# can reach, uncapped and with no content rules. The provider is strictly
+# narrower: http(s) only, credentials in the URL rejected, same-origin redirects
+# only, 5MB response and 100k-character caps, text content types only, and an
+# honest product User-Agent. This row buys a capped read path, not new reach.
+#
+# It would NOT be defensible in a hosted or shared-host deployment, where the
+# harness runs inside a network its operator is not entitled to browse. If this
+# product ever grows that shape, this row comes off with it.
+#
+# Fetch is turned on by re-enabling the host row that `dsh-web-app` disabled,
+# and that placement is a deliberate divergence worth stating.
+#
+# Where upstream put the knob: the model-facing web tools are mounted per agent
+# preset, so `fetch` lives in each preset's own `tool-web` row
+# (`config/agent-presets/*/agent.cordis.yml`, and the shipped `standard` inside
+# the dsh CLI). The preset layer has no patch semantics — `dsh-agent-presets`
+# says changing one row of a shipped preset means copying the whole directory,
+# and that copies drift because an upgrade does not update them. Our product
+# default IS the shipped read-only `standard`, so honouring the preset plane
+# would mean either leaving the default without fetch or carrying a third full
+# copy of upstream's default preset that silently stops inheriting its changes.
+#
+# So this row instead registers `web_fetch` into the global tool layer, which is
+# where our `image_generate` already lives: every agent sees it whatever preset
+# it composed from, and there is nothing to keep in sync. `tools.restrict()`
+# remains the seam for an agent that must not have it.
+#
+# `search: false` keeps search where upstream put it. Each preset registers
+# `web_search` with its own 60s budget, and a second global registration would
+# add a contradicting prompt section rather than a second tool. The cost of the
+# split is one sentence of guidance: a preset's search text only mentions
+# following up with `web_fetch` when that same composition enabled fetch, so
+# ours does not. The fetch tool's own section still names a `web_search` result
+# as its example input, which is the chaining hint that matters.
+- id: tool-web
+  disabled: false
+  config:
+    search: false
+    fetch: true

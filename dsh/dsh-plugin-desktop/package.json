@@ -209,6 +209,7 @@
     "@deepseek-ai/dsh-user-questions": "0.1.0-rc.6",
     "@deepseek-ai/dsh-web": "0.1.0-rc.6",
     "@deepseek-ai/dsh-web-app": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-web-fetch-http": "0.1.0-rc.6",
     "@deepseek-ai/dsh-workflow": "0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1",
     "koffi": "3.1.5",
