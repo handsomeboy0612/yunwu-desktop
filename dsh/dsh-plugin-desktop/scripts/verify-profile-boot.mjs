@@ -226,6 +226,19 @@ try {
   if (response.status !== 200) {
     throw new Error(`assembled Web root returned HTTP ${String(response.status)}`)
   }
+  // The index tap is the only thing standing between a user and the upstream
+  // product name: the compatibility titlebar, the taskbar tooltip, and every
+  // per-session title all read whatever the served document says.
+  if (!html.includes('<title>OpenLux</title>') || html.includes('DeepSeek Harness')) {
+    throw new Error('assembled Web root serves the upstream product identity')
+  }
+  const mark = await fetch(new URL('/openlux/brand-mark.png', expectedUrl))
+  if (mark.status !== 200 || mark.headers.get('content-type') !== 'image/png') {
+    throw new Error(`assembled Web root does not serve the brand mark (HTTP ${String(mark.status)})`)
+  }
+  if ((await mark.bytes()).byteLength === 0) {
+    throw new Error('assembled Web root serves an empty brand mark')
+  }
   const bootMatch = html.match(/window\.__DSH_BOOT__ = (\{.*?\})<\/script>/u)
   if (bootMatch?.[1] === undefined) {
     throw new Error('assembled Web root is missing window.__DSH_BOOT__')

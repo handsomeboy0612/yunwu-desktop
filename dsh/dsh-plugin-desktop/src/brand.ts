@@ -23,6 +23,19 @@ export const PRODUCT_NAME = 'OpenLux Desktop'
 export const WINDOW_TITLE = 'OpenLux'
 
 /**
+ * Sidebar brand row label. The row reads the same as the window title on
+ * purpose: it is the same fact seen from inside the page.
+ */
+export const WORDMARK_TEXT = WINDOW_TITLE
+
+/**
+ * Loopback route serving the brand mark to the Web surface. The Host reads the
+ * file from `build/`; the client stylesheet names this path, so both planes
+ * must agree on it.
+ */
+export const BRAND_MARK_ROUTE = '/openlux/brand-mark.png'
+
+/**
  * Desktop and Start Menu shortcut label. Shorter than PRODUCT_NAME on purpose:
  * PRODUCT_NAME is the install identity, this is what a person reads on an icon.
  */

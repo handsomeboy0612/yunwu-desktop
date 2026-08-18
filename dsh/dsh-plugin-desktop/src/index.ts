@@ -17,6 +17,7 @@ import {
 } from './renderer-boot.ts'
 import type { DesktopShellMode } from './runtime.ts'
 import type {} from './runtime.ts'
+import { installWebBrand } from './web-brand.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'desktop-shell'
@@ -138,6 +139,7 @@ export function apply(ctx: Context, config: Config): void {
     }),
     'dsh-plugin-desktop: renderer boot report route',
   )
+  installWebBrand(ctx)
   ctx.effect(() => {
     let pending: ReturnType<typeof setImmediate> | undefined
     const stopWatching = settings.watch((next) => {

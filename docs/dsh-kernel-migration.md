@@ -1897,6 +1897,119 @@ DSH 上这件事内核替我们做了——`list()` 里 `broken` 带原因就是
   而宿主是按 compatibility 组装的，就会报 `failed to apply loader entry (dsh-plugin-desktop):
   service "layout" has been registered`——查询串必须与宿主组装出的模式一致。正解是重启，不是导航。
 
+#### 品牌换成 OpenLux（2026-08-18 真机验通）：标题有内核的缝，字标只能靠样式
+
+界面里自报 DeepSeek Harness 的地方有三处：侧栏字标、页面标题（= Windows 原生标题栏与任务栏
+悬浮提示）、窗口 / 托盘图标。这一轮换掉前两处，第三处的代价单独记在下面。
+
+**标题：内核给了缝，一处改完三处生效。** `dsh-host-webserver` 的服务上有
+`tapIndex(transform: (html) => string)`——纯 html→html 变换，由 fallback 座位（dist 服务器）
+在每次 index 响应上按注册顺序应用。它够用是因为另外两条事实：compatibility 窗口的原生标题
+跟着 `document.title` 走（构造时给的 `title: 'OpenLux'` 在页面加载后就被盖掉，这正是用户看到
+"DeepSeek Harness" 的原因）；而前端的会话标题是 `useRef(document.title)` 取的基准值
+（dist 里 `document.title = n === void 0 ? r.current : \`${n} — ${r.current}\``）。
+所以改服务出去的那一行 `<title>`，标题栏、任务栏、每条会话标题一起对。
+
+**字标：没有缝，这是查出来的，不是猜的。** `ui-sidebar` 的 slot 合约把话说在文档里——
+"The shell owns column geometry (fold state machine, brand row, New Session)"，声明的洞只有
+`sidebar.workspaces` / `sidebar.settings` / `sidebar.footer.action` 三个，**没有品牌行那一格**。
+画的东西是 `dsh-client-ui-primitives` 的 `BrandWordmark`，运行时住在平台模块层
+（`dsh-web-frontend/dist/assets/index-*.js` 里 `BrandWordmark: vf`），插件的 `lib/client.js`
+只是按外部引用它（`_deepseek_ai_dsh_client_ui_primitives.BrandWordmark`）。于是只有三条路：
+用 yarn patch 改上游包（我们已有这个机制，`dsh-client-ui-agent-preset` 就打着补丁，但这次要改的是
+minified 的 vendor chunk 里十七条 path）、整份 fork 侧栏外壳（连折叠状态机、会话列表接线、
+各种弹窗一起接走）、或者样式覆盖。选了样式覆盖，因为它是三条里唯一不接管别人代码的。
+顺带排掉一个同名误会：`@deepseek-ai/dsh-brand` 是 `Branded<B>` 名义类型原语，跟品牌无关。
+
+**选择器要挑不会随构建变的那个。** 类名带每次构建的哈希（`hHd-Xa_brand`），选它等于把
+下次 `yarn build` 当成敌人；`viewBox="0 0 182 24"` 是组件文档里声明的比例
+（"width keeps the 182:24 ratio"），这才是稳的钩子。于是
+`button:has(> svg[viewBox="0 0 182 24"])` 里把 svg `display: none`，`::before` 拉 24px 的
+mark，`::after` 写 `OpenLux`，颜色用 `--dsw-alias-label-primary`（暗色下自动翻白，实测
+`rgb(249,250,251)`）。收起态不用管：真机验到侧栏收窄后品牌行**整个不存在**，只有展开一态。
+
+图走宿主自己的路由：`build/openlux-mark.png`（1024 原图压到 96px，9 KB）+
+`webServer.register({kind:'exact', path:'/openlux/brand-mark.png'})`，和出图那条
+`/openlux/media.image` 同一个缝。没有把它塞成 data URI——源码里不放 base64 大块。
+资产要同时进 `files` 与 `build.files`，后者漏了只在装机版上少一个字标，别处一声不响。
+
+**守卫按"用户看到什么"写，不按形状写：**
+
+- `verify-profile-boot.mjs` 已经在 fetch 根页面，就地断言正文含 `<title>OpenLux</title>`、
+  不含 `DeepSeek Harness`，再 fetch 一次 `/openlux/brand-mark.png` 要 200 + `image/png` +
+  非空。反向验过：把 `installWebBrand(ctx)` 摘掉即红（`assembled Web root serves the upstream
+  product identity`）。
+- `tests/web-brand.spec.ts` 读**真实的** dist `index.html` 与它指向的入口 chunk，断言那条
+  viewBox 字面量还在。上游哪天重画字标，这里红，而不是侧栏悄悄变回 DeepSeek。
+- `tests/plugin.spec.ts` 断言 tap 与图片路由都注册上了；顺带发现 `verify-loader-boot.mjs`
+  的 `webServer` 假体缺 `tapIndex` 就整棵树起不来——那些假体也是接口契约的一部分。
+
+**真机**：`document.title = "OpenLux"`，`Get-Process electron` 的 `MainWindowTitle` 是
+`[OpenLux]`，品牌行 216×24 里 svg 已 `display: none`、mark 从
+`http://127.0.0.1:56592/openlux/brand-mark.png` 取到 9,309 字节、`::after` 内容 `"OpenLux"`；
+亮暗两套底色各截一张都对。
+
+#### 图标换成 OpenLux（2026-08-18 真机验通）：一份提交进仓库的画，派生出三家产物
+
+上一轮只换了字和标题，鲸鱼还在四个地方：原生标题栏左上角、Windows 任务栏、托盘（隐藏图标区），
+以及**新会话页那个空态图**——最后这个不是同一块画，字标是 `BrandWordmark`，空态与收起态的栏顶
+用的是同一个 `FishLogo`（`viewBox="0 0 23.16 17.04"`，组件文档同样把比例写成合约）。
+所以界面侧是第二条 CSS，不是把第一条推广一下。
+
+**界面侧：换画不换盒子。** 字标那处是「藏掉 svg，用 `::before/::after` 重画一行」，因为要把
+182×24 的横向字标换成「图 + 字」；`FishLogo` 这处相反——每个使用点自己决定尺寸（栏顶 24×18、
+空态 34×25），所以规则是给 svg 自己贴背景、藏掉它的 `path`：一条规则同时管住栏顶、空态，以及
+将来还没遇到的使用点。真机两态都验过：展开态字标 216×24、空态 34×25 都取到 mark；收起成 rail
+后栏顶那格变成「展开按钮里画着 logo」，也一起对了（顺带修正上一轮记的"收起态品牌行整个不存在"，
+那次是没看 rail 的 `logoRow`）。
+
+**图标侧：源头只留一份画。** `build/openlux-mark-source.png`（用户给的 1024 原图）进仓库，
+`scripts/generate-brand-icons.mjs` 从它派生两件：`app-icon.png`（任务栏 / 标题栏 / 安装器 /
+mac 图的源）与 `openlux-mark.png`（界面那张 96px）。中间踩到的坎是 mac 那条流水线的几何断言：
+`generate-mac-app-icon.mjs` 要求源是 1024² RGBA16 + ICC，且产物 trim 出来必须正好 824² 落在
+(-100,-100)——换句话说**源图的墨必须顶到四边**。用户给的图四周有留白（墨框 720×726），
+直接用会红。所以派生时先 trim 到墨框，再按 `fit: 'fill'` 撑满 1024²（0.8% 的形变，肉眼无感），
+补上 `rgb16` + sRGB ICC。界面那张则用 `fit: 'contain'` 保比例，它要的是「填满 24px 的格子」。
+
+**托盘：上游用 SVG，我们改成从同一张位图派生，这是被资产形状逼的。** 运行时两边一样——
+Electron 的 `nativeImage` 读不了 SVG，上游那份 `tray-icon.svg` 只是构建期原稿，sharp 把它栅格化成
+六张 PNG（template 16/32 给 macOS，blue 16/20/24/32 给 Windows，`@2x` 由文件名约定被自动选中）。
+差别只在原稿层：矢量能任意尺寸精确重栅格、能靠字符串替换改色、改动在 diff 里看得见；位图这边
+最大产物 32px 而源图 1024²，只做缩小、余量 32 倍，**唯一真实代价是 16px 上的毛边**（这张画的笔刷
+边缘缩小后留下半透明锯齿，放大 6 倍能看出来）。改色改成拿图自己的 alpha 当蒙版整片填色——
+成立是因为托盘图标本来就该单色（macOS template 必须纯黑 + alpha）；将来若要双色托盘图，
+alpha 表达不了，那时候必须回矢量。留 20% 内边距：方形墨满格会比系统自带托盘图标显得大一号
+（上游那只鲸 23.16:17.04 是靠自身比例在方盒里自带留白的）。
+
+> **待办（拿到就换）**：向设计要 logo 的**矢量原文件**（AI / SVG）。有了它值得把托盘换回上游那条
+> 形状——16px 边缘干净、改色回到字符串替换、改动在评审里可见，`generate-tray-icons.mjs` 里那段
+> flatten 可以删掉；顺带界面那张 96px PNG 也能换成能缩放、能跟深浅色走的矢量。
+> 现在没换是因为把位图变矢量得描边，那等于由我手工近似品牌几何形状。
+
+**守卫跟着源头搬家，而不是删掉：**
+
+- `app-icon.png` 的 sha256 仍然钉死（改名为"pins the brand source icon, which no build step
+  regenerates"）。它是提交进仓库的画、`yarn build` 不重生，钉住它才能让"某次误跑生成脚本"变成红灯
+  而不是一个悄悄换了的任务栏图标。改画就要在同一个提交里改这行。
+- 托盘那条从「SVG 里正好一处 `#4D6BFE`、没有 `<style>`」改成验产物：六张各自尺寸对、**每个可见
+  像素都是同一个颜色**（template 纯黑、blue 是这张画自己的蓝 `#0493CC`，取自墨色最大的那一桶，
+  不是猜的）、且墨没顶到边。期望值写在测试里而不是从生成器 import——读生成器常量的测试是
+  「按构造同意」，钉不住任何东西。
+- `tests/web-brand.spec.ts` 现在两条 viewBox 都验：上游重画字标或 `FishLogo` 哪个都会红。
+
+**真机**：原生标题栏、Windows 任务栏、托盘隐藏图标区（悬浮提示 `OpenLux Desktop`）、侧栏展开态、
+rail 态、新会话空态，六处都换成了 OpenLux；聚合 check 310 passed / 2 skipped。
+
+**还剩两处半没换，别当成完事了：**
+
+- **模型自己会说出上游名字**：`dsh-web-app` 的 `webSurfacePrompt` 写着 "the DeepSeek Harness
+  Web GUI at …"，加上前面已经记过的系统提示词 "You are an AI agent powered by DeepSeek Harness"
+  （落点 `system-prompt` 那行的 `persona`）。界面换完了，嘴还没换。
+- **对外的 `User-Agent` 还是上游的**：`dsh-web-fetch-http` 默认
+  `deepseek-harness/0.0.1 (+https://github.com/deepseek-ai)`，`web_fetch` 每次抓页面都这么自报，
+  被抓的站点看到的是它。这条是现成旋钮（`Config.userAgent`），改一行补丁就行。
+- `manifest.webmanifest` 的 `name` / `short_name`（桌面壳里看不见，只有浏览器安装才用到）。
+
 ### 阶段 5 · 市场与后端契约（2 周，与阶段 3 并行）
 
 见下一节。

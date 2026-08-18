@@ -7,9 +7,11 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
 import { applyAdvancedShell } from './advanced-shell.ts'
 import { startRendererBootReporter } from './boot-health.ts'
+import { installBrandStyles } from './brand-styles.ts'
 import { parseDesktopClientEnvironment } from './environment.ts'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
+export { BRAND_STYLES, FISH_VIEW_BOX, installBrandStyles, WORDMARK_VIEW_BOX } from './brand-styles.ts'
 export {
   RENDERER_BOOT_REPORT_PATH,
   rendererBootReport,
@@ -34,5 +36,7 @@ export function apply(ctx: ClientContext): void {
     () => startRendererBootReporter(ctx.loader),
     'dsh-plugin-desktop: renderer boot health report',
   )
+  // Both modes render the upstream sidebar, so both need the brand row.
+  ctx.effect(installBrandStyles, 'dsh-plugin-desktop: brand row art')
   if (environment.mode === 'advanced') applyAdvancedShell(ctx, environment)
 }

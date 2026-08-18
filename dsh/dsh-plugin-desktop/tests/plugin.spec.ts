@@ -5,7 +5,7 @@ import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { ThemePreference } from '@deepseek-ai/dsh-client-ui-theme'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { PRODUCT_NAME, WINDOW_TITLE } from '../src/brand.ts'
+import { BRAND_MARK_ROUTE, PRODUCT_NAME, WINDOW_TITLE } from '../src/brand.ts'
 import {
   apply,
   Config,
@@ -38,6 +38,8 @@ interface PluginHarness {
   setThemeSource: ReturnType<typeof vi.fn<(source: ThemePreference) => void>>
   rendererBoot: ReturnType<typeof vi.fn<(report: RendererBootReport) => void>>
   rendererRoute(): WebRoute | undefined
+  route(path: string): WebRoute | undefined
+  indexTaps(): ((html: string) => string)[]
   notify(next: DesktopSettings, prev: DesktopSettings): Promise<void>
   notifyTheme(preference: ThemePreference): void
 }
@@ -49,7 +51,8 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
   const restart = vi.fn(async () => {})
   const setThemeSource = vi.fn<(source: ThemePreference) => void>()
   const rendererBoot = vi.fn<(report: RendererBootReport) => void>()
-  let rendererRoute: WebRoute | undefined
+  const routes = new Map<string, WebRoute>()
+  const indexTaps: ((html: string) => string)[] = []
   let settingsUpdated: ((namespace: unknown, next: unknown) => void) | undefined
   let themePreference: ThemePreference = 'system'
   const runtime: DesktopRuntime = {
@@ -98,8 +101,15 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
       host: '127.0.0.1',
       port: 43120,
       register: vi.fn((route: WebRoute) => {
-        rendererRoute = route
-        return () => { if (rendererRoute === route) rendererRoute = undefined }
+        routes.set(route.path, route)
+        return () => { if (routes.get(route.path) === route) routes.delete(route.path) }
+      }),
+      tapIndex: vi.fn((transform: (html: string) => string) => {
+        indexTaps.push(transform)
+        return () => {
+          const at = indexTaps.indexOf(transform)
+          if (at >= 0) indexTaps.splice(at, 1)
+        }
       }),
     },
     settings,
@@ -119,7 +129,9 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     restart,
     setThemeSource,
     rendererBoot,
-    rendererRoute: () => rendererRoute,
+    rendererRoute: () => routes.get(RENDERER_BOOT_REPORT_PATH),
+    route: path => routes.get(path),
+    indexTaps: () => indexTaps,
     notify: async (next, prev) => { await watcher?.(next, prev) },
     notifyTheme: (preference) => {
       themePreference = preference
@@ -226,6 +238,30 @@ describe('desktop Host plugin', () => {
 
     expect(harness.rendererBoot).toHaveBeenCalledWith(report)
     expect(res.statusCode).toBe(204)
+  })
+
+  it('brands the served document and serves the brand mark beside it', async () => {
+    const harness = createHarness()
+    apply(harness.ctx, config)
+
+    const upstream = '<!doctype html><html><head><title>DeepSeek Harness</title></head></html>'
+    expect(harness.indexTaps()).toHaveLength(1)
+    expect(harness.indexTaps()[0]?.(upstream)).toContain(`<title>${WINDOW_TITLE}</title>`)
+
+    const route = harness.route(BRAND_MARK_ROUTE)
+    expect(route?.kind).toBe('exact')
+    const written: unknown[] = []
+    const res = {
+      writeHead: vi.fn(),
+      end: vi.fn((body: unknown) => { written.push(body) }),
+    } as unknown as ServerResponse
+    await route?.handler({ method: 'GET' } as IncomingMessage, res)
+
+    expect(vi.mocked(res.writeHead)).toHaveBeenCalledWith(200, expect.objectContaining({
+      'content-type': 'image/png',
+    }))
+    expect(Buffer.isBuffer(written[0])).toBe(true)
+    expect((written[0] as Buffer).byteLength).toBeGreaterThan(0)
   })
 
   it.each(['win32', 'linux'] as const)(

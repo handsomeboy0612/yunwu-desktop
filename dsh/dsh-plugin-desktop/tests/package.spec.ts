@@ -6,6 +6,16 @@ import sharp from 'sharp'
 import { describe, expect, it } from 'vitest'
 import { APP_ID, INSTALLER_STEM, PRODUCT_NAME, SHORTCUT_NAME } from '../src/brand.ts'
 
+/**
+ * What the tray bitmaps are supposed to be, spelled out here rather than
+ * imported from the generator: a test that reads the generator's own constants
+ * agrees with it by construction. These are pinned like the app icon digest is,
+ * so changing the tray art means changing this line in the same commit.
+ */
+const TRAY_BLUE = [0x04, 0x93, 0xcc]
+const TRAY_BLACK = [0, 0, 0]
+const TRAY_INK_SHARE = 0.8
+
 const packageRoot = new URL('../', import.meta.url)
 const workspaceRoot = new URL('../', packageRoot)
 const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), 'utf8')) as {
@@ -169,14 +179,17 @@ describe('published package surface', () => {
     expect(manifest.files).toEqual(expect.arrayContaining([
       'build/app-icon.png',
       'build/app-icon-mac.png',
-      'build/tray-icon.svg',
+      'build/openlux-mark.png',
       'build/tray-icon*.png',
       'docs/**',
     ]))
     expect(manifest.build?.files).toEqual([
       'build/app-icon.png',
       'build/app-icon-mac.png',
-      'build/tray-icon.svg',
+      // The Host reads this one at runtime to serve the brand row art; leaving
+      // it out of the packaged files costs the wordmark in the installed app
+      // and nothing anywhere else.
+      'build/openlux-mark.png',
       'build/tray-icon*.png',
       'cordis.patch.yml',
       'lib/**',
@@ -241,29 +254,58 @@ describe('published package surface', () => {
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')
   })
 
-  it('keeps one fixed brand-blue tray source for generated native assets', () => {
-    const source = readFileSync(new URL('build/tray-icon.svg', packageRoot), 'utf8')
+  it.each([
+    ['tray-iconTemplate.png', TRAY_BLACK, 16],
+    ['tray-iconTemplate@2x.png', TRAY_BLACK, 32],
+    ['tray-icon-blue.png', TRAY_BLUE, 16],
+    ['tray-icon-blue@1.25x.png', TRAY_BLUE, 20],
+    ['tray-icon-blue@1.5x.png', TRAY_BLUE, 24],
+    ['tray-icon-blue@2x.png', TRAY_BLUE, 32],
+  ])('flattens %s into one colour at its own size', async (filename, color, size) => {
+    // Upstream guarded its single-colour tray SVG. The source here is the
+    // gradient brand mark, so the same fact has to be checked on the way out:
+    // a tray icon that keeps its gradient loses its dark half to a dark shelf,
+    // and a template icon that keeps any colour is not a template at all.
+    const icon = sharp(readFileSync(new URL(`build/${filename}`, packageRoot)))
+    const metadata = await icon.metadata()
+    const { data } = await icon.ensureAlpha().raw().toBuffer({ resolveWithObject: true })
 
-    expect(source.match(/#4D6BFE/gu)).toHaveLength(1)
-    expect(source).not.toMatch(/<style\b|prefers-color-scheme/iu)
-    for (const filename of [
-      'tray-iconTemplate.png',
-      'tray-iconTemplate@2x.png',
-      'tray-icon-blue.png',
-      'tray-icon-blue@1.25x.png',
-      'tray-icon-blue@1.5x.png',
-      'tray-icon-blue@2x.png',
-    ]) {
-      expect(readFileSync(new URL(`build/${filename}`, packageRoot)).byteLength).toBeGreaterThan(0)
+    expect(metadata).toEqual(expect.objectContaining({ format: 'png', width: size, height: size }))
+    const visible = []
+    for (let at = 0; at < data.length; at += 4) {
+      if (data[at + 3] === 0) continue
+      visible.push([data[at], data[at + 1], data[at + 2]])
+    }
+    expect(visible.length).toBeGreaterThan(0)
+    for (const pixel of visible) {
+      expect(pixel).toEqual(color)
     }
   })
 
-  it('keeps the iOS Default source icon unmodified', () => {
+  it('insets the tray artwork so it does not touch the icon box', async () => {
+    // A square mark filling all 16 pixels reads oversized beside the platform's
+    // own tray icons, which is why the generator keeps a margin.
+    const icon = sharp(readFileSync(new URL('build/tray-icon-blue@2x.png', packageRoot)))
+    const { info } = await icon
+      .trim({ background: { r: 0, g: 0, b: 0, alpha: 0 }, threshold: 0 })
+      .toBuffer({ resolveWithObject: true })
+
+    expect(Math.max(info.width, info.height)).toBeLessThanOrEqual(Math.round(32 * TRAY_INK_SHARE))
+    expect(Math.max(info.width, info.height)).toBeGreaterThan(Math.round(32 * TRAY_INK_SHARE) - 3)
+  })
+
+  it('pins the brand source icon, which no build step regenerates', () => {
+    // Upstream pinned its own hand-authored art here. This fork's icon is
+    // derived from build/openlux-mark-source.png by scripts/generate-brand-icons.mjs,
+    // which is deliberately outside `yarn build`: the icon is committed art, and
+    // this digest is what turns an accidental regeneration into a red test
+    // rather than a silently different taskbar icon. Changing the art means
+    // running that script and updating this line in the same commit.
     const digest = createHash('sha256')
       .update(readFileSync(new URL('build/app-icon.png', packageRoot)))
       .digest('hex')
 
-    expect(digest).toBe('315fbc6e57ff1f34894f21f66fb7f9f26deccf78333c71fad21a6cec64e7de80')
+    expect(digest).toBe('87f24a177f2cd66ec90ca4e1c884ba90c5e4250b9073a2b0f5cb36e9865bca49')
   })
 
   it('generates a centered macOS icon with a 100-pixel visual inset', async () => {

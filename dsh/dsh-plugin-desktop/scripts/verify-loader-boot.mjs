@@ -114,6 +114,7 @@ try {
         host: '127.0.0.1',
         port: 43120,
         register() { return () => {} },
+        tapIndex() { return () => {} },
       })
       host.provide('webRuntime', {})
       host.provide('appExit', () => {})
