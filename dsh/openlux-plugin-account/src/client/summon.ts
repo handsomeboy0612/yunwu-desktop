@@ -89,8 +89,8 @@ export class SummonController {
 
   /**
    * @param scope - a context with `sessions`, `workspaces` and `connection`
-   * (the conversation service is read per use, since the composer is only
-   * mounted in the advanced desktop composition).
+   * (the conversation service is read per use, since a session's composer
+   * exists only while that session's conversation view is mounted).
    */
   constructor(private readonly scope: ClientContext) {}
 

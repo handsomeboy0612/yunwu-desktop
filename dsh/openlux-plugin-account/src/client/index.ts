@@ -92,10 +92,10 @@ export function apply(ctx: ClientContext): void {
     inject: (): AccountActionInjected => ({ callHost, t, store, useAccount }),
   }, AccountAction))
 
-  // Summoning needs the conversation flow, which only exists in the advanced
-  // desktop composition; the binding is filled while that scope lives and the
-  // section simply offers install-only copy while it is absent. Same shape as
-  // the kernel's own creator-draft entry (`ui-agent-preset`).
+  // Summoning needs the session and workspace services: the binding is filled
+  // while that scope lives, and the section simply offers install-only copy in
+  // a composition that lacks them. Same shape as the kernel's own creator-draft
+  // entry (`ui-agent-preset`).
   let summon: ((request: SummonRequest) => void) | undefined
 
   ctx.inject(['sessions', 'workspaces'], (scope: ClientContext) => {

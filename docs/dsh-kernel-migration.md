@@ -1624,12 +1624,30 @@ DSH 上这件事内核替我们做了——`list()` 里 `broken` 带原因就是
 
 #### 真机形状的两个坑（2026-08-18 踩到，探针纪律）
 
-- **advanced 外壳是 `$DSH_HOME/settings.yaml` 里的一项设置**（`dsh-desktop: mode: advanced`，
-  内核自检脚本 `verify-profile-boot.mjs:31` 就是这么写的）。这一段缺了会**静默**起成
-  compatibility：肉眼判据是窗口带标准 Windows 标题栏，而不是我们的无边框头部。
-  被搬过 / 重建过的临时家目录很容易丢这一段，跑任何界面探针前先看 URL 里的 `dsh-desktop-mode`。
+- **外壳档位是 `$DSH_HOME/settings.yaml` 里的一项设置，两档都是上游自带的**
+  （`dsh-desktop: mode: compatibility | advanced`，默认 compatibility——见 `profile.ts:55`
+  的 `DEFAULT_DESKTOP_SHELL_MODE` 与 `index.ts:41` 的 `.default('compatibility')`；advanced
+  带着上游自己的设计说明书 `dsh/.agents/notes/implemented/architecture/2026-08-15-desktop-advanced-shell.md`）。
+  **2026-08-18 决定：跑 compatibility，即默认档**，用户要原生标题栏。这里没有"改回内核原生"
+  这回事——两档都是内核原生，我们只是从非默认档退回默认档。
+  仓库里**没有任何代码写过这个值**（`yunwu-desktop/src` 搜 `advanced` 零命中，会写它的只有上游
+  自己的 `tests/profile.spec.ts:210` 和自检脚本 `verify-profile-boot.mjs:31`），
+  之前之所以是 advanced，只是探针阶段手写进临时家目录的那三行。
+  肉眼判据：compatibility 带标准 Windows 标题栏，advanced 是无边框头部；跑任何界面探针前
+  先看 URL 里的 `dsh-desktop-mode`，那才是宿主真正组装出的那一档。
   顺带验清：我们写清单那条路（`settings.mutate`）**不会**清掉别人的命名空间——
   手加的 `dsh-desktop` 段经过一次启动重写后仍在。
+- **换档不动我们自己的东西（2026-08-18 真机逐项复验）。** compatibility 下实测：侧栏余额条
+  `$84.50` 在、设置第五栏「市场」在、目录卡片与筛选（全部 / 专家 / 专家团 + 七个分类）正常、
+  详情三条提问条照常渲染、点提问条后弹窗关闭 + 输入框落字 + 预设标签切成「腾讯HR数智专家」——
+  召唤端到端通。所以 `openlux-plugin-account` 里原先那句"会话流只存在于 advanced 组合"的注释
+  是错的（已改）：那条绑定要的是 `sessions` / `workspaces` 服务，两档都给。
+- **「设置蒙层跟官方版不一样」是底色差异，不是蒙层。** 两边蒙层都是 `rgba(0,0,0,.24)` +
+  `blur(2px)`（`VOzbGW_mask`），像素实测都是均匀压暗 24%。差别在底：advanced 把 `body` /
+  frame / 侧栏全设成透明去吃 mica（`client/styles.ts:13-15`，上游自带，且 `tests/client-environment.spec.ts:57`
+  就在断言那条 `--dsw-specific-sidebar-fill: transparent`），于是侧栏底是白 mica，
+  `#FFFFFF × 0.76 = #C2C2C2`；compatibility 下 `bodyBg` 是实心白、侧栏是不透明浅灰，
+  官方版实测 `#BDBEC0`，回推底色 `≈#F9FAFD`。查这类"看着不一样"先量像素再回推，别靠肉眼比。
 - **别用手工导航去救僵尸窗口。** 宿主换端口后老渲染器停在旧端口上，看着还有界面但所有请求
   `ERR_CONNECTION_REFUSED`；这时若照旧 URL 带 `?dsh-desktop-mode=advanced` 导到新端口，
   而宿主是按 compatibility 组装的，就会报 `failed to apply loader entry (dsh-plugin-desktop):
