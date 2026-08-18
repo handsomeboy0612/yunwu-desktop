@@ -1457,6 +1457,65 @@ dsh 有一等公民的后台任务运行时 `ctx.jobs`（`packages/jobs/jobs/src
 > `render` 出来的内容里没有」，**8/8 全绿**，但它停在数据结构上，没走「浏览器把字节取回来」
 > 那一跳——而那一跳恰好否掉了它祝福的形状。探针要落在用户看得见的结果上。
 
+**自检回看（2026-08-18，用户问「是不是没找到内核正确那条路」）。** 联网查了三个同题的社区
+插件：`condaThinker/dsh-image-inline` 把上面那条授权规则逐字写了一遍并得出同一个结论
+（结果故意不含 image 块 → 附件永不被日志引用 → 必须由插件自己提供读取通道），
+`JuneLearn/dsh-image2-draw` 与其上游 `MC5lan/dsh-multimodal` 也是在卡片里解析附件、
+不注入模型上下文。官方文档的三件套（`output.render` / `presentCall`+`presentResult` /
+`output.presentationMeta`）与我们用的完全一致。**分歧只剩通道一处**：它们用
+`ctx.webServer.register` 开 `GET /plugin/show-image/<id>`，让 `<img src>` 直接取字节；
+我们用自己的 RPC + base64 + blob URL。两条都是正规旋钮，取舍是这样的——我们这条**与内核
+自己的 `resolveImage` 同形**（也是 RPC → base64 → blob），并且继承通道的 loopback 授权；
+`dsh-host-webserver` 的 README 明写"不提供 TLS、认证或来源策略"，而 `<img>` 的 GET **不带
+`Origin`**，连我们自己 `renderer-boot.ts:62` 那道守卫都抄不过来。代价记明：base64 多 33%、
+URL 生命周期得自己管（约 90 行）。图多的会话真出现内存压力时，换那条是有据可依的。
+
+同一轮自检的其余结论：`sniffImageType` 与内核的 `detectImage` 重复，但后者只在
+`dsh-attachment-local` 这个运行时半边里，import 它正是烧过我们的传递依赖陷阱，而猜错了
+`saveImage` 会重新探测并报错（属于"镜像错了会响"）；`ROUTE_MODELS` 那张尺寸表**没有运行时
+来源**——线上 `models` 表只有 `endpoints`（确认三个模型都是 `/v1/images/generations`），
+尺寸只存在于网关前端的静态 `modelParams.js`，为它新开一条服务端下发通道正是我们已经烧过的错。
+**改掉一处**：`n` 原本是自由整数 + 运行时 clamp，现在是 schema `enum`（数值 spec 只有
+`enum`/`const`，没有 min/max），越界由内核校验器拒绝并告诉模型可选值。
+
+#### 联网搜索落地（2026-08-18 真机验通）：整件事是一行配置，不是一个工具
+
+老壳的形状会让人直接去写「联网搜索工具」。DSH 上不用写：`dsh-tool-web` 拥有工具名、
+JSON Schema、系统提示词区段、`card: 'web'` 结果卡片、结果去重与截断；`ctx.web`（`dsh-web`）
+拥有提供方注册与选择策略；这两行**在 base bundle 里本来就组合着**
+（`bundle/base/cordis.patch.yml:404-418`，`fetch: false` + `searchTimeoutMs: 60000`）。
+缺的只有一个能答出**结构化来源**的提供方。
+
+**而且这不是"新增能力"，是"修掉一个必然失败的能力"。** base 把提供方指向
+`deepseek-official` 并取 `DEEPSEEK_API_KEY`，而工具注册按内核设计**跟随产品启用状态、
+不跟随后端可用性**（`dsh-tool-web` README「稳定注册」那节）。所以拿 OpenLux 账号登录的用户
+每次请求都带着一个 `web_search` schema，一调就是 `WEB_PROVIDER_CREDENTIAL_MISSING`——
+工具摆着，用不了。
+
+路由这一侧探了三条，都是真机 POST：
+
+| 试法 | 结果 |
+|---|---|
+| `/v1/messages` + `deepseek-v4-flash`（提供方默认模型）| HTTP 500 `channel deepseek does not support Claude format` |
+| `/v1/chat/completions` + `deepseek-v3-search`（平台的 `-search` 能力后缀）| 真检索了（注入后 prompt 2542 tok、9.6 秒），但**只有散文**：中转把任何引用字段都没带出来，`sources[]` 无从填 |
+| `/v1/messages` + `claude-haiku-4-5-20251001` + 原生 `web_search_20250305` | 10 条 `web_search_result`，带 `url` / `title` / `page_age`，文本块另有 10 条 citations，7.7 秒 |
+
+第三条正好是内核提供方要映射的形状（它明确**拒绝从模型文本里刮 URL**），所以落地是
+`dsh-plugin-desktop/cordis.patch.yml` 里一行：覆写 `web-search-deepseek` 的
+`baseURL: https://api.openlux.ai/v1`（提供方自己接 `/messages`）、
+`model: claude-haiku-4-5-20251001`、`apiKeyEnv: OPENLUX_API_KEY`。凭据**按次解析**，
+所以未登录只会让这一次调用失败、schema 不抖；模型在广场上，计费落回同一个账号。
+提供方注册 id 仍是 `deepseek-official`（那是 `web` 行选的名字），只有端点和模型搬了家——
+为了名字好看去自己注册一个提供方，买不到任何行为。
+
+两层复验：无头宿主里直接 `ctx.web.search({ query, maxResults: 5 })`，回 5 条带标题 / 时间 /
+摘要的来源，`content` 按提供方纪律省略；界面里发「联网搜一下 DeepSeek V4 是什么时候发布的」，
+模型自己发了两次 `web_search`（工具耗时 12.6 秒），答出 4 月 24 日发布、8 月 13 日 GA，
+并带来源链接。
+
+**`web_fetch` 仍然关着**，那是上游的取舍写在注释里的：没有 fetch 提供方挂载，而那个提供方
+把 SSRF 防护推给部署、目标 URL 又由模型选。要开就得连 `dsh-web-fetch-http` 一起组合，另议。
+
 #### 视频产物显示：选路结论（2026-08-17 查证 + 探针验完）
 
 **结论：不给 `ContentBlockMap` 加 `video` 模态。照 `dsh-client-ui-deliverables` 的形状

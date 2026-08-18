@@ -148,6 +148,11 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
       },
       n: {
         type: 'integer',
+        // The cap is a schema constraint rather than a runtime clamp, so the
+        // registry's own validation refuses an over-count and tells the model
+        // what it may ask for. Numeric specs carry `enum`/`const` and no
+        // range keywords, so the allowed counts are listed.
+        enum: Array.from({ length: route.maxImages }, (_, index) => index + 1),
         description: `How many images to generate, 1 to ${String(route.maxImages)}. Defaults to 1; each one is billed separately.`,
       },
       size: {
@@ -192,7 +197,7 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
       },
     },
     async execute(args, exec) {
-      const count = clamp(args.n, route.maxImages)
+      const count = args.n ?? 1
       const outcome = await generateImages(ctx, options.access, {
         model,
         prompt: args.prompt,
@@ -307,17 +312,6 @@ function renderText(value: ToolValue): string {
     ? []
     : ['未能取回的部分：', ...value.failures]
   return [head, ...lines, ...tail].join('\n')
-}
-
-/**
- * Keep the count inside what one call may spend.
- * @param n - what the model asked for, if it asked.
- * @param max - this model's own per-call cap.
- * @returns a count between 1 and the cap.
- */
-function clamp(n: number | undefined, max: number): number {
-  if (n === undefined || !Number.isFinite(n)) return 1
-  return Math.min(Math.max(Math.floor(n), 1), max)
 }
 
 /**

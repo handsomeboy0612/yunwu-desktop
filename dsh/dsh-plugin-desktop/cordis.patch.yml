@@ -106,3 +106,44 @@
   config:
     provider: openlux
     model: deepseek-v4-flash
+
+# Upstream's own search provider, re-pointed at our route. Nothing here is code:
+# `ctx.web` owns provider selection, `dsh-tool-web` owns the `web_search` name,
+# schema, prompt guidance and result card, and this row is the base layer of the
+# `web-search-deepseek` settings section — so a user layer still moves the
+# endpoint or model for the next search.
+#
+# Why it needs re-pointing at all: the base bundle mounts the provider with a
+# DEEPSEEK_API_KEY reference, and tool registration follows product enablement
+# rather than backend availability. So `web_search` sits in every request's
+# schema while nobody signing in with an OpenLux account holds that credential,
+# and each call fails WEB_PROVIDER_CREDENTIAL_MISSING. The tool was on offer and
+# could not work.
+#
+# Why Anthropic Messages and a claude model, when every other row here speaks
+# completions: this provider needs *structured* results and refuses by design to
+# scrape URLs out of model prose. Measured on our route (2026-08-18):
+#
+#   - `/v1/messages` on a deepseek channel answers HTTP 500 `channel deepseek
+#     does not support Claude format`, so the provider's default model is out.
+#   - `deepseek-v3-search` on completions does retrieve (2542 prompt tokens of
+#     injected context, 9.6s) but answers with prose only. No citation field
+#     survives the relay, so there is nothing to map into `sources[]`.
+#   - `claude-haiku-4-5-20251001` with the native `web_search_20250305` server
+#     tool returned ten `web_search_result` items carrying `url` / `title` /
+#     `page_age`, plus ten text-block citations, in 7.7s. Those are exactly the
+#     fields this provider maps.
+#
+# `baseURL` ends in `/v1` because the provider appends `/messages`. The model is
+# a square model, so its usage bills to the same account as everything else, and
+# the credential resolves per search rather than at registration: a signed-out
+# machine fails that one call and keeps a stable schema.
+#
+# The registered id stays `deepseek-official` (that is the name `web` selects);
+# only its endpoint and model move. Registering an id of our own would mean
+# writing a provider for behaviour this configuration already buys.
+- id: web-search-deepseek
+  config:
+    apiKeyEnv: OPENLUX_API_KEY
+    baseURL: https://api.openlux.ai/v1
+    model: claude-haiku-4-5-20251001
