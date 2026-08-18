@@ -1398,6 +1398,64 @@ dsh 有一等公民的后台任务运行时 `ctx.jobs`（`packages/jobs/jobs/src
 - `ToolResultView` 的卡片种类是封闭联合（`generic` / `terminal` / `diff` / `search` /
   `read` / `web`），**没有媒体卡片**；但 UI 不认识的卡片会回落到原始 content，
   所以内联显示图片靠的是 `ImageBlock`，不是卡片。
+  → **这一句在落地时被纠正了**：`ImageBlock` 放进**模型可见**内容是有代价的，
+  而卡片这条路其实走得通（键槽 + 平台的图片件）。见下面「出图落地」。
+
+#### 出图落地（2026-08-18 真机验通）：图只进卡片，字节走自己的通道
+
+第一个真跑起来的媒体工具，`image_generate`，落在 `openlux-plugin-account` 里
+（`src/media/{name,images,tool,read}.ts` + `src/client/{ImageToolCard.tsx,image-loader.ts,media-locales.ts}`）。
+跟同一个插件同住是因为它吃同一个 `baseUrl` 与同一把 `sk-` 键：出图是按账号计费的，
+再开一个包只多一份组合与依赖闭环。
+
+**上面那句「内联显示图片靠 `ImageBlock`」要收窄成「靠 UI 可见的 `ImageBlock`」。**
+`ImageBlock` 进**模型可见**内容的代价是查出来的，不是猜的：`contentHasImage`（`dsh-llm`）
+**会下钻 `tool-result` 的 content**，而 `host/apiproxy` 拿它当闸——`selectModel` 与发 prompt
+两处都是「会话含图 + 目标模型 `inputModalities` 声明了却不含 image → `model-unavailable`」，
+`llm-deepseek` 的 serialize 更是对 `ImageBlock` 直接抛 `UNSUPPORTED_CONTENT`。
+所以一张图会把会话变成**只有视觉模型能续**的会话，而且是延迟起爆：出图那轮好好的，
+用户过几天切个文本模型才炸，那时他已经改不了历史。
+
+内核自己就把两个受众分开了，所以形状是现成的：`output.render` 给模型（纯文本，明确写着
+「图已展示给用户、你自己看不到，不要描述」），`presentResult` 给界面（`GenericResultView`
+的 `content` 里放 `ImageBlock`）。视图每次投递重算、不进模型内容，所以引用走
+`output.presentationMeta`——那是会话日志唯一保留的投影，重放靠它。
+
+**代价是内核那条读附件的路跟着一起用不了，这是被逼的分歧。**
+`session.readAttachment` 的宿主端用 `referencedImage(state.events, id)` 授权，
+而它的 `imageBlockIn` 只走模型可见载体（会下钻 `tool-result`，**不看** `presentResult` 的视图）。
+内核的规则实际是**可读性 == 模型可见性**，于是我们的图必然回 `ATTACHMENT_NOT_REFERENCED`，
+卡片永远停在「加载失败，点击重试」。补法是在插件自己的 `/openlux` 通道上加一条
+`media.image`（`src/media/read.ts`），授权靠 ref 本身：`ImageAttachmentRef` 是内容寻址凭据，
+`attachment-local` 的 `readImageFile` 按 id 里的 sha256 定位、再校验摘要/媒体类型/字节数/宽高，
+完整 ref 只存在于卡片正在渲染的那条会话日志里，通道又是 `loopback`。
+
+卡片挂在 `tool.call.toolview` 键槽上（按工具名派发，**键错了不报错、静默退化成通用行**，
+所以工具名做成两半共享的常量）。缩略图、加载态、重试、灯箱全用平台件 `ImageGallery`
+（`dsh-client-ui-attachment`），我们只供 `ImageLoader = (ref) => Promise<url>` 并负责 revoke。
+
+两个真栽的细节，都只在真机现形：
+
+- **`ctx.attachments` 不能裸读。** 通道处理器跑在 inject 作用域之外，读它得到
+  `cannot get property "attachments" without inject`。用 `ctx.get('attachments')`，
+  与工具注册同一个写法（顺带让没有附件服务的组合仍然有账号面）。
+- **`attachmentId` 是 `sha256:<hex>`，不是对象文件名。** 拿文件名手搓 ref 去打端点，
+  回的是 `Attachment reference is invalid.`。
+
+路由侧三条（云雾 `/v1/images/generations`，逐条真机打过）：默认
+`doubao-seedream-4-0-250828`，约 15 秒一张 ~900KB JPEG；**`size` 必须是 enum**——
+非法尺寸不报错、直接挂满整个超时预算（`123x456` 挂了 180 秒），所以模型手上只有清单里那几个值；
+`gemini-*-image-*` 全族在这个端点回 503 无可用渠道。端点还会被上游饱和拖住
+（同期别人的令牌 `use_time` 到 1287 秒），所以是 **90 秒一次、重试一次**，不是一个长超时干等。
+
+真机复验（compatibility 外壳 + CDP）：发「帮我画一张图：一只戴着围巾的小黄狗，卡通风格」，
+模型自己调了工具，29 秒出图，卡片渲染标题 + 提示词 + 缩略图，点开是 2048×2048 原图；
+应用重启两次后从日志恢复这条会话，图照样加载；在这条带图的会话里切到另一个文本模型
+`OpenLux V4-Pro`，切换被允许、追问 4 秒答完——这正是「图不进模型内容」买到的东西。
+
+> 一条探针纪律的代价记在这儿：离线探针断言过「`presentResult` 视图里有 image block、
+> `render` 出来的内容里没有」，**8/8 全绿**，但它停在数据结构上，没走「浏览器把字节取回来」
+> 那一跳——而那一跳恰好否掉了它祝福的形状。探针要落在用户看得见的结果上。
 
 #### 视频产物显示：选路结论（2026-08-17 查证 + 探针验完）
 

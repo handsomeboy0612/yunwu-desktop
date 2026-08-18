@@ -38,6 +38,9 @@ import { clearSession, readSession } from './account/session.ts'
 import { readCatalog, type Catalog, type CatalogType } from './market/catalog.ts'
 import { readExpertManifest, type ConsoleAccess } from './market/console.ts'
 import { installPreset, readInstallTarget, type InstallOutcome, type InstallRequest, type InstallTarget } from './market/install.ts'
+import { IMAGE_READ_ENDPOINT } from './media/name.ts'
+import { imageRefOf, readImageBytes } from './media/read.ts'
+import { registerImageTool } from './media/tool.ts'
 import { syncModels } from './models/sync.ts'
 
 /**
@@ -58,6 +61,12 @@ const API_KEY_REF = credentialRef('OPENLUX_API_KEY')
 export interface Config {
   /** Console origin the account endpoints live on. */
   readonly baseUrl?: string
+  /**
+   * Model the image tool draws with. Omit for the route-verified default; a
+   * deployment that prefers another one names it here rather than letting the
+   * model guess (see `media/tool.ts`).
+   */
+  readonly imageModel?: string
 }
 
 /** Default console origin, matching the model route in `cordis.patch.yml`. */
@@ -127,6 +136,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     void syncCatalog(ctx, baseUrl, 'startup', stop.signal)
     return () => stop.abort()
   })
+
+  // The same origin and the same key serve the model-facing side of the
+  // account: drawing is billed to whoever is signed in here.
+  registerImageTool(ctx, {
+    access: { baseUrl, apiKey: () => apiKey(ctx) },
+    ...config.imageModel === undefined ? {} : { model: config.imageModel },
+  })
 }
 
 /**
@@ -195,6 +211,30 @@ async function route(
     // asked only for the item whose detail page is open.
     case 'market.prompts':
       return { ok: true, value: await marketPrompts(ctx, baseUrl, payload, signal) }
+
+    // Bytes for one image this plugin generated. See `media/read.ts` for why the
+    // kernel's own attachment read cannot serve these, and what authorizes this
+    // one instead.
+    case IMAGE_READ_ENDPOINT: {
+      const ref = imageRefOf(payload)
+      if (ref === undefined) {
+        return {
+          ok: false,
+          error: { code: 'bad-request', message: 'image read needs a complete attachment reference', details: { issues: [] } },
+        }
+      }
+      // Same opportunistic read as the tool registration, and for the same
+      // reason: a composition with no attachment store still gets an account
+      // face. Nothing could have generated an image there either.
+      const attachments = ctx.get('attachments')
+      if (attachments === undefined) {
+        return {
+          ok: false,
+          error: { code: 'internal', message: 'this composition has no durable attachment store', details: {} },
+        }
+      }
+      return { ok: true, value: await readImageBytes(attachments, ref, signal) }
+    }
 
     default:
       // The error-code union belongs to the kernel and cannot grow a row from

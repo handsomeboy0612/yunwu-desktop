@@ -17,11 +17,17 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 // Type-only: merges the locale plugin's `ctx.locale`.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+// Type-only: same, for the tool tree's keyed 'tool.call.toolview'.
+import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
 import { ACCOUNT_ACTION_ID, AccountAction } from './AccountAction.tsx'
 import type { AccountActionInjected } from './AccountAction.tsx'
 import { callAccountHost } from './host.ts'
+import { createImageLoaders } from './image-loader.ts'
+import { ImageToolCard, type ImageCardInjected } from './ImageToolCard.tsx'
 import { en, zh, type AccountKey } from './locales.ts'
 import { en as marketEn, zh as marketZh, type MarketKey } from './market-locales.ts'
+import { en as mediaEn, zh as mediaZh, type MediaKey } from './media-locales.ts'
+import { IMAGE_TOOL_NAME } from '../media/name.ts'
 import { MARKET_SECTION_ID, MARKET_SECTION_ORDER, MarketSection } from './MarketSection.tsx'
 import type { MarketSectionInjected } from './MarketSection.tsx'
 import { SIGN_IN_ORDER, SIGN_IN_STEP_ID, SignInStep } from './SignInStep.tsx'
@@ -45,6 +51,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'openlux.account': AccountKey
     /** Market gallery copy. */
     'openlux.market': MarketKey
+    /** Image tool card copy, including the attachment atoms' labels. */
+    'openlux.media': MediaKey
   }
 }
 
@@ -53,6 +61,9 @@ const NS = 'openlux.account'
 
 /** The market section's own namespace; a nav label is read outside the section. */
 const MARKET_NS = 'openlux.market'
+
+/** The image card's own namespace. */
+const MEDIA_NS = 'openlux.media'
 
 /**
  * Required services. Both target slots are declared by other plugins whose
@@ -68,6 +79,7 @@ export const inject = ['slots', 'connection', 'locale']
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'openlux-account: copy dictionaries')
   ctx.effect(() => ctx.locale.register(MARKET_NS, { zh: marketZh, en: marketEn }), 'openlux-market: copy dictionaries')
+  ctx.effect(() => ctx.locale.register(MEDIA_NS, { zh: mediaZh, en: mediaEn }), 'openlux-media: copy dictionaries')
   const marketText = ctx.locale.bind(MARKET_NS)
 
   const connection = ctx.get('connection') as ConnectionHandle
@@ -112,6 +124,18 @@ export function apply(ctx: ClientContext): void {
       }
     }, 'openlux-market: summon flow')
   })
+
+  // The card's pictures are read over this plugin's own channel rather than the
+  // session's, so the row needs nothing beyond the connection every other face
+  // here already uses.
+  const images = createImageLoaders(connection)
+  ctx.effect(() => () => { images.dispose() }, 'openlux-media: image URLs')
+  ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
+    name: 'tool.call.toolview',
+    key: IMAGE_TOOL_NAME,
+    locale: MEDIA_NS,
+    inject: (): ImageCardInjected => ({ load: images.load }),
+  }, ImageToolCard))
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',

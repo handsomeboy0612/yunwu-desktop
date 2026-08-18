@@ -42,6 +42,28 @@ export interface HttpReply {
   readonly body: unknown
 }
 
+/**
+ * What actually went wrong under a transport failure.
+ *
+ * `fetch` reports every transport problem as the same bare `TypeError: fetch
+ * failed` and puts the real reason on `cause` — DNS, TLS, a refused connection
+ * and a reset socket are one message until you unwrap it. Since this text is
+ * what a user reads and what a model is told, it carries the cause chain.
+ * @param error - the thrown value.
+ * @returns one line naming the failure and its cause, when there is one.
+ */
+function reason(error: unknown): string {
+  const parts: string[] = []
+  let current: unknown = error
+  for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
+    const code = (current as { code?: unknown }).code
+    parts.push(code === undefined ? current.message : `${current.message} (${String(code)})`)
+    current = current.cause
+  }
+  if (parts.length === 0) parts.push(String(error))
+  return parts.join(' ← ')
+}
+
 /** Why a request never produced a reply. */
 export class AccountRequestError extends Error {
   /**
@@ -122,10 +144,7 @@ export async function requestJson(
       throw new AccountRequestError(`账号服务超时（${Math.round(timeoutMs / 1000)} 秒未响应）`, 'timeout')
     }
     if (upstream?.aborted === true) throw new AccountRequestError('请求已取消', 'cancelled')
-    throw new AccountRequestError(
-      `无法连接账号服务：${error instanceof Error ? error.message : String(error)}`,
-      'unreachable',
-    )
+    throw new AccountRequestError(`无法连接账号服务：${reason(error)}`, 'unreachable')
   }
   // A body that is not JSON is a server-side surprise, not a caller error; the
   // status alone still lets the caller produce a useful message.
@@ -150,6 +169,7 @@ export async function requestJson(
  * @param timeoutMs - budget for this request.
  * @param maxBytes - hard cap; the transfer is cancelled once it is exceeded.
  * @param upstream - caller cancellation, fused in.
+ * @param what - what is being downloaded, for the refusal text a user reads.
  * @returns the body bytes.
  * @throws {AccountRequestError} when no usable body arrived.
  */
@@ -159,6 +179,7 @@ export async function requestBytes(
   timeoutMs: number,
   maxBytes: number,
   upstream?: AbortSignal,
+  what = '制品',
 ): Promise<Uint8Array> {
   using budget = deadline(upstream, timeoutMs, 'openlux-market')
   let response: Response
@@ -170,19 +191,16 @@ export async function requestBytes(
       throw new AccountRequestError(`下载超时（${Math.round(timeoutMs / 1000)} 秒未完成）`, 'timeout')
     }
     if (upstream?.aborted === true) throw new AccountRequestError('下载已取消', 'cancelled')
-    throw new AccountRequestError(
-      `无法下载制品：${error instanceof Error ? error.message : String(error)}`,
-      'unreachable',
-    )
+    throw new AccountRequestError(`无法下载${what}：${reason(error)}`, 'unreachable')
   }
   if (!response.ok) {
     throw new AccountRequestError(`下载失败（HTTP ${response.status}）`, 'unreachable')
   }
   const declared = Number(response.headers.get('content-length'))
   if (Number.isFinite(declared) && declared > maxBytes) {
-    throw new AccountRequestError(`制品声明的大小超过上限（${declared} > ${maxBytes} 字节）`, 'unreachable')
+    throw new AccountRequestError(`${what}声明的大小超过上限（${declared} > ${maxBytes} 字节）`, 'unreachable')
   }
-  if (response.body === null) throw new AccountRequestError('制品响应没有内容', 'unreachable')
+  if (response.body === null) throw new AccountRequestError(`${what}响应没有内容`, 'unreachable')
 
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
@@ -195,7 +213,7 @@ export async function requestBytes(
       total += value.byteLength
       if (total > maxBytes) {
         await reader.cancel()
-        throw new AccountRequestError(`制品超过大小上限（>${maxBytes} 字节）`, 'unreachable')
+        throw new AccountRequestError(`${what}超过大小上限（>${maxBytes} 字节）`, 'unreachable')
       }
       chunks.push(value)
     }
