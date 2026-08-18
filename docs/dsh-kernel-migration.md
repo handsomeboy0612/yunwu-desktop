@@ -2010,6 +2010,76 @@ rail 态、新会话空态，六处都换成了 OpenLux；聚合 check 310 passe
   被抓的站点看到的是它。这条是现成旋钮（`Config.userAgent`），改一行补丁就行。
 - `manifest.webmanifest` 的 `name` / `short_name`（桌面壳里看不见，只有浏览器安装才用到）。
 
+#### 待排期 · 工具可见面收窄（视频做完之后做；2026-08-18 查过内核与同类产品）
+
+出图、搜索、抓取三个工具现在都是「全局层 + 参数面靠 enum 兜」的形状。要收窄的有三件事，
+**内核三个缝都是现成的，都不需要改上游代码**。按价值排：
+
+**一、`web_fetch` 的网络面（优先做，这条是补默认，不是加谨慎）。**
+上游自己把话说在模块文档里：*"Private-network and SSRF protection is not implemented;
+do not enable this provider where it can reach sensitive internal targets"*
+（`dsh-web-fetch-http/lib/types/provider.d.ts`，`policy.d.ts` 里也写着 SSRF 判定被推迟到
+"the package Agent Note"）。而我们**正是**那种环境：回环上有我们自己的 `/openlux/*` 路由与
+webserver，局域网里有路由器、打印机、开发服务器。同类产品的默认是挡住：Claude Code 的
+WebFetch 有 pre-flight SSRF guard（社区 issue 讨论的是它连 RFC1918 都不该去试）；
+**我们上一个内核 openclaw 自己就有 `fetchWithSsrFGuard`**——本地解析 DNS 再按段判断，
+配置面是 `tools.web.fetch.ssrfPolicy.*` 加 `allowPrivateNetwork` / `dangerouslyAllowPrivateNetwork`
+这类逃生口。所以形状是抄得到的，判据也清楚：`10/8`、`172.16/12`、`192.168/16`、`127/8`、
+`::1`、`fc00::/7`、`169.254/16`（含 `metadata.google.internal` 这类名字）、`localhost` /
+`.local` / `.internal` 后缀、IPv4-mapped IPv6 都要拒。
+
+内核给的两个缝，各挡一半：
+
+- `ctx.tools.guard(fn)`（`dsh-tools`）：同步检查，返回字符串即拒；**便宜、能挡字面量**
+  （直接写 IP、写 localhost）。注意它只看得到参数里的 URL 字符串。
+- `ctx.web.registerFetchProvider(provider)` + 配置 `fetchProvider: '<id>'` 钉住选谁
+  （`dsh-web/lib/types/index.d.ts`，`searchProvider` / `fetchProvider` "pin which provider"，
+  明说不是隐式优先级链）。`HttpFetchProvider` 与 `HttpFetchLimits` 都是导出的，所以我们
+  **包一层自己的 provider、把上游那个当传输层**即可：在连接前 `dns.lookup` 再判断，
+  这才挡得住 DNS rebinding（域名解析到 `127.0.0.1` / `169.254.169.254`）。
+- 顺带一条已经免费拿到的：上游只跟**同源**重定向（`isSameOrigin`，跨源直接拒），
+  「先给公网 302 到内网」那条路本来就不通。
+- 还有第三条可选：pre-execute 策略支持 `ask`（走审批服务 → `allowed-once`），
+  想做成「问一次」而不是硬拒的话，机制也在。
+
+**二、工具名单按角色收窄（这条我上一轮判错了，代价小得多）。**
+上一轮我说「预设层没有 patch 语义，所以收窄工具名单要整份复制预设」——那句话只对
+「改预设自己的插件行」成立。**内核另有 `ctx.tools.restrict({allow, deny})`**：
+"Per-scope filter over global tools. Restrictions intersect and do not affect scoped
+registrations"，并且实现里**强制要求 agent 作用域**（`agent.ctx`），传全局上下文直接报错，
+错误信息是 "a context-global restriction would mask every agent — deny the tool for the
+intended agent instead"。两处落点：
+
+- **子代理侧是纯配置**：`dsh-tool-subagent` 的 `Config.toolFilter: { allow?, deny? }`
+  直接透传，`dsh-subagent` 在子 agent 创建窗口里 `childCtx.tools.restrict(toolFilter)`，
+  被限的工具**从提示词里消失且拒绝执行**（一种可见性），断点恢复时还会重放。
+  也就是说给专家团成员收窄工具，是往 `cordis.patch.yml` 加一行的事。
+- **主 agent 侧需要一薄层**：内核没有声明式的行，得我们在 agent 创建时读配置调
+  `agent.ctx.tools.restrict()`。仍然是用内核 API，不是造机制。
+
+外部实践支持这个方向：Claude Code 的子代理 frontmatter 就是 `tools`（allowlist）/
+`disallowedTools`（denylist），社区共识是**优先 allowlist、从最小集加起**，并且明确说这是
+减小影响面、不是安全边界（有 Bash 的子代理照样能碰网络）。同一句话对我们成立：收窄
+`web_fetch` 的可见性不能替代第一条的网络面判定。
+
+**三、出图 / 搜索的模型选择面（最后做，属于参数面）。**
+现在出图模型是部署配置（默认 `doubao-seedream-4-0-250828`），工具参数只有
+`prompt` / `n` / `size`，模型选不了、用户说了也不算；搜索固定走我们网关上的
+`claude-haiku-4-5-20251001`。要让「用指定模型出图」生效，就把 `model` 加成 enum（取
+`ROUTE_MODELS` 的键）并让 `size` 的取值跟着所选模型走。代价是工具描述变长、用户可能
+选到更慢更贵的模型，而且网关上 gemini 那几个出图模型是 503，名单得人工筛。
+
+**判据（做的时候按这个验，不按「代码写完了」验）：**
+
+- 第一条：真机让模型抓 `http://127.0.0.1:<我们自己的端口>/openlux/brand-mark.png` 要被拒，
+  错误信息说得出原因；抓公网页面不受影响；再验一个域名解析到回环的用例（本地 hosts 造）。
+  聚合 check 里加一条守卫，断言 `fetchProvider` 钉的是我们那个 id。
+- 第二条：给一个专家配 `deny: [image_generate]`，**在会话里问模型"你有哪些工具"**——
+  它说不出那个名字才算成立（`ctx.tools.schemas()` 是全局视角，看不出预设/子代理的收窄，
+  这个坑已经踩过一次）。
+- 第三条：说「用 xxx 模型画」时卡片里的 `model` 字段是那个模型；写一个不存在的名字，
+  被 schema 当场拒掉而不是发一次付费请求。
+
 ### 阶段 5 · 市场与后端契约（2 周，与阶段 3 并行）
 
 见下一节。
