@@ -41,6 +41,7 @@ import { installPreset, readInstallTarget, type InstallOutcome, type InstallRequ
 import { IMAGE_READ_ENDPOINT } from './media/name.ts'
 import { imageRefOf, readImageBytes } from './media/read.ts'
 import { registerImageTool } from './media/tool.ts'
+import { registerVideoTool } from './media/video-tool.ts'
 import { syncModels } from './models/sync.ts'
 
 /**
@@ -67,6 +68,12 @@ export interface Config {
    * model guess (see `media/tool.ts`).
    */
   readonly imageModel?: string
+  /**
+   * Model the video tool films with. Same rule as the image one: a deployment
+   * names it here rather than letting the model guess at which vendors this
+   * route has channels for (see `media/video-tool.ts`).
+   */
+  readonly videoModel?: string
 }
 
 /** Default console origin, matching the model route in `cordis.patch.yml`. */
@@ -138,10 +145,15 @@ export function apply(ctx: Context, config: Config = {}): void {
   })
 
   // The same origin and the same key serve the model-facing side of the
-  // account: drawing is billed to whoever is signed in here.
+  // account: drawing and filming are billed to whoever is signed in here.
+  const access = { baseUrl, apiKey: () => apiKey(ctx) }
   registerImageTool(ctx, {
-    access: { baseUrl, apiKey: () => apiKey(ctx) },
+    access,
     ...config.imageModel === undefined ? {} : { model: config.imageModel },
+  })
+  registerVideoTool(ctx, {
+    access,
+    ...config.videoModel === undefined ? {} : { model: config.videoModel },
   })
 }
 

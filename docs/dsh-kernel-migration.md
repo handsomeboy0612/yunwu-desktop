@@ -1709,6 +1709,41 @@ dsh 的工具收窄是运行时 API `ctx.tools.restrict({ allow?, deny? })`，�
   「思考预算 + 正文」给。实测 1200 时 `reasoning_tokens` 一次就烧 1149，正文只剩 45 个 token，
   答案截断成半句，而 `finish_reason` 仍是 `stop`、回执结构完好——**不报错的失败**，上层不会换后端。
 
+#### 视频工具已落地：`video_generate` 交给 jobs，产物进产出行（2026-08-19 真机验完）
+
+按上一节定的第一步做完了，形状与那份选路一致，**没有改任何内核文件**。
+落点：`openlux-plugin-account/src/media/video.ts`（请求层：提交/轮询/取回）
++ `video-tool.ts`（工具 + 后台任务 + 路径推导）。守卫加在
+`verify-profile-boot.mjs` 的全局工具清单里，反向测试证明它真看得见
+（装配出的全局工具是 `web_fetch, image_generate, video_generate`）。
+
+真机一条链走完（compatibility 外壳 + CDP 驱动，默认模型 `veo_3_1-fast`）：
+
+| 环 | 看到的 |
+|---|---|
+| 模型自己选工具 | 「用 video_generate 生成一段 4 秒的视频：一只柴犬在海边奔跑…」→ 直接调用，没追问 |
+| 交活即回话 | 卡片 `Tool call · video_generate`，模型答「视频正在后台生成中，一般需要 1~6 分钟。我会在出片后通知你。」——它没空等，也没编自己看得见画面 |
+| 后台任务可见 | 会话头「1 个后台任务运行中」；面板行末尾是我们给的 `detail`：`5.9 MB · 1280x720 · 4s · 1分42秒` |
+| 产物行 | 「产物」那一行立刻挂上文件片，`title` 是绝对路径 `…\media\video\黄昏逆光下…-5fcc397a1607.mp4` |
+| 出片通告 | `上下文注入 · tool-jobs · video video_generate: …` → 模型自己调 `job_output` → 复述路径/时长/分辨率/大小，并说明自己看不到画面内容 |
+| 点开播放 | 点文件片：点前系统 0 个播放器，点后 Windows `Video.UI` 起来了（`host.openPath` 这一环成立）|
+| 取消 | 「取消刚才那个视频任务」→ `job_kill video-2` → 面板「已取消 28秒」，磁盘上没多出文件 |
+
+出片内容也对：抽帧是逆光沙滩上奔跑的柴犬，`ffmpeg` 全解无报错，5.89 MB / 1280x720 / 4s。
+
+顺带解掉两件与上游文档有关的事，细节记在 `references/media-video.md` 那一册：
+
+- **文档站可以当契约源读**：`doc.openlux.ai` 的 SPA bundle 内联了整份 Apifox 导出，
+  按数字 api id 能切出每条接口的 `requestBody`（字段、必填、枚举、示例）。
+  这次用它补了统一视频那条的字段面，也发现**查询那条的 schema 是错的**（写成了 multipart chat 形状），
+  所以判据仍以真机报文为准。
+- **`enhance_prompt` 决定不发**：文档说 veo 只吃英文提示词、需要中文就开这个开关，
+  但真机上中文裸发直接就对（青石板/白墙黑瓦/薄雾全中），而这个开关在回执里既不回显也没有
+  `enhanced_prompt` 可查。**既非必需又无从验证，就不声明。**
+
+下一步（图生视频）有一条已知阻点：带图那条创建的 `images` 收的是**公网 URL 数组**，
+而我们手里是本地附件字节，data URI 收不收未验。别当成"接一下就好"。
+
 #### 阶段 3 / 5 定案（2026-08-18）：内容用 WorkBuddy 的，分发走内核的目录，不造市场内核
 
 联网查了官方仓库、文档站（skills / agent-presets / core）、以及社区那几家
