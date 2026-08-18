@@ -52,8 +52,11 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { JobHooks, JobOutcome } from '@deepseek-ai/dsh-jobs'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ConsoleAccess } from '../market/console.ts'
+import type { Session } from '@deepseek-ai/dsh-session'
 import { size } from './images.ts'
 import { VIDEO_TOOL_NAME } from './name.ts'
+import type { SessionImage } from './session-images.ts'
+import { findLatestImage } from './session-images.ts'
 import { generateVideo, VideoGenerationError } from './video.ts'
 
 declare module '@deepseek-ai/dsh-jobs' {
@@ -83,6 +86,15 @@ interface VideoModelSpec {
   readonly durations: readonly number[]
   /** Frame shapes the route accepts. */
   readonly aspects: readonly string[]
+  /**
+   * Whether this model takes a reference image as the clip's first frame.
+   *
+   * Per-model, not per-route: the published support matrix splits this family
+   * into first-frame models (`veo_3_1`, `veo_3_1-fast`) and reference-image ones
+   * (the `-components` variants, 1–3 images). A model without it hides the
+   * argument rather than accepting one the route will ignore.
+   */
+  readonly firstFrame: boolean
 }
 
 /**
@@ -99,18 +111,24 @@ interface VideoModelSpec {
  * its accepted values are one fact.
  */
 const ROUTE_MODELS: Record<string, VideoModelSpec> = {
-  'veo_3_1-fast': { durations: [4, 6, 8], aspects: ['16:9', '9:16'] },
-  'veo_3_1': { durations: [4, 6, 8], aspects: ['16:9', '9:16'] },
+  'veo_3_1-fast': { durations: [4, 6, 8], aspects: ['16:9', '9:16'], firstFrame: true },
+  'veo_3_1': { durations: [4, 6, 8], aspects: ['16:9', '9:16'], firstFrame: true },
 }
 
-const description = 'Generate a short video from a text prompt. '
-  + 'The work runs in the background: this returns a job id immediately, and you are told when the clip is ready — '
-  + 'so answer the user that it is running (one to six minutes is normal) instead of waiting in silence. '
-  + 'Use job_output with wait only if the user explicitly asked you to wait for it. '
-  + 'Write the prompt as one self-contained shot description: subject, action, camera, setting, light, mood. '
-  + 'The video model sees only this text, not the conversation, and Chinese prompts work as they are. '
-  + 'The finished file is saved locally and shown to the user as a produced file they can open; '
-  + 'you never see the video itself, so do not describe or judge what is in it.'
+function describe(firstFrame: boolean): string {
+  return 'Generate a short video from a text prompt. '
+    + 'The work runs in the background: this returns a job id immediately, and you are told when the clip is ready — '
+    + 'so answer the user that it is running (one to six minutes is normal) instead of waiting in silence. '
+    + 'Use job_output with wait only if the user explicitly asked you to wait for it. '
+    + 'Write the prompt as one self-contained shot description: subject, action, camera, setting, light, mood. '
+    + 'The video model sees only this text, not the conversation, and Chinese prompts work as they are. '
+    + (firstFrame
+      ? 'To animate a picture this conversation already contains, set animate_last_image and describe the motion '
+        + 'in the prompt; the newest image becomes the first frame. '
+      : '')
+    + 'The finished file is saved locally and shown to the user as a produced file they can open; '
+    + 'you never see the video itself, so do not describe or judge what is in it.'
+}
 
 /** What the tool reads out of its own composition. */
 export interface VideoToolOptions {
@@ -125,6 +143,7 @@ export interface VideoArgs {
   readonly prompt: string
   readonly aspect_ratio?: string
   readonly duration?: number
+  readonly animate_last_image?: boolean
 }
 
 /**
@@ -134,12 +153,25 @@ export interface VideoArgs {
  * and the call view is recomputed on replay. The digest covers everything that
  * changes the output, so asking for the same clip twice reuses one slot (the
  * second run overwrites the first) while any changed argument gets its own file.
+ *
+ * One consequence to know rather than to debug: the reference image is *not* an
+ * argument (nothing shows the model an attachment id, see
+ * `media/session-images.ts`), so two `animate_last_image` calls that share a
+ * prompt but animate different pictures share one slot. The tool cannot express
+ * that difference without a handle the model can quote, which is the extension
+ * this leaves room for.
  * @param model - the model the composition films with; part of the identity.
  * @param args - the call's arguments.
  * @returns an absolute path under the harness home.
  */
 export function videoArtifactPath(model: string, args: VideoArgs): string {
-  const identity = JSON.stringify([model, args.prompt, args.aspect_ratio ?? '', args.duration ?? ''])
+  const identity = JSON.stringify([
+    model,
+    args.prompt,
+    args.aspect_ratio ?? '',
+    args.duration ?? '',
+    args.animate_last_image === true ? 'i2v' : '',
+  ])
   const digest = createHash('sha256').update(identity).digest('hex').slice(0, 12)
   return join(dshHomePath('media', 'video'), `${stem(args.prompt)}-${digest}.mp4`)
 }
@@ -170,7 +202,7 @@ export function registerVideoTool(ctx: Context, options: VideoToolOptions): void
 
   ctx.effect(() => tools.register(defineTool({
     name: VIDEO_TOOL_NAME,
-    description,
+    description: describe(route.firstFrame),
     // Each call starts its own vendor task and writes its own path, so two
     // different clips may be asked for at once.
     isConcurrencySafe: () => true,
@@ -190,6 +222,16 @@ export function registerVideoTool(ctx: Context, options: VideoToolOptions): void
         enum: route.durations,
         description: `Clip length in seconds (${route.durations.join(' / ')}). Defaults to ${String(route.durations[0])}; longer clips cost more and take longer.`,
       },
+      ...route.firstFrame
+        ? {
+            animate_last_image: {
+              type: 'boolean',
+              description: 'Use the newest image in this conversation as the clip\'s first frame. '
+                + 'The prompt should then describe the motion, not the scene. '
+                + 'Fails if the conversation has no image yet.',
+            },
+          }
+        : {},
     },
     output: {
       schema: {
@@ -199,24 +241,40 @@ export function registerVideoTool(ctx: Context, options: VideoToolOptions): void
           jobId: { type: 'string', required: true },
           path: { type: 'string', required: true },
           model: { type: 'string', required: true },
+          firstFrame: { type: 'string' },
         },
       },
       render: (_args, value) => {
-        const { jobId, path, model: used } = value as { jobId: string; path: string; model: string }
+        const { jobId, path, model: used, firstFrame } = value as {
+          jobId: string
+          path: string
+          model: string
+          firstFrame?: string
+        }
         return [{
           type: 'text',
           text: `视频任务已在后台开始（${jobId}，模型 ${used}），一般 1~6 分钟出片，完成后会通知你。\n`
+            + (firstFrame === undefined ? '' : `${firstFrame}\n`)
             + `产物会写到：${path}\n`
             + '现在先告诉用户正在生成，不要空等；用户明确要求等结果时才用 job_output 等待。\n'
             + '出片后你自己看不到画面内容，不要描述或评价它。',
         }]
       },
     },
-    execute: (args, exec) => {
+    async execute(args, exec) {
       const jobs = ctx.get('jobs')
       if (jobs === undefined) {
         throw new VideoGenerationError('这个会话没有后台任务能力（需要 @deepseek-ai/dsh-jobs 与 dsh-tool-jobs），无法生成视频。')
       }
+      // Resolved before the job starts: "there is no picture yet" is the answer
+      // the model needs in this turn, not a background failure six minutes later.
+      const firstFrame = args.animate_last_image === true ? await readLastImage(ctx, exec.agent?.session) : undefined
+      // The model never sees the picture's shape (generated images stay out of
+      // model-visible content), so left to itself it guesses — one live run
+      // guessed portrait for a square source and then told the user it had used
+      // landscape. The reference itself knows, so it decides when the call did
+      // not, and the shape it produced is reported back rather than assumed.
+      const aspect = args.aspect_ratio ?? (firstFrame === undefined ? undefined : orientationOf(firstFrame.ref, route.aspects))
       const path = videoArtifactPath(model, args)
       const jobId = jobs.start({
         kind: 'video',
@@ -225,11 +283,17 @@ export function registerVideoTool(ctx: Context, options: VideoToolOptions): void
         run: () => filmInBackground(ctx, options.access, {
           model,
           prompt: args.prompt,
-          ...args.aspect_ratio === undefined ? {} : { aspectRatio: args.aspect_ratio },
+          ...aspect === undefined ? {} : { aspectRatio: aspect },
           ...args.duration === undefined ? {} : { durationSeconds: args.duration },
+          ...firstFrame === undefined ? {} : { images: [firstFrame.dataUri] },
         }, path),
       })
-      return Promise.resolve({ jobId: String(jobId), path, model })
+      return {
+        jobId: String(jobId),
+        path,
+        model,
+        ...firstFrame === undefined ? {} : { firstFrame: describeFirstFrame(firstFrame, aspect) },
+      }
     },
     presentCall: (args) => {
       const call = args as VideoArgs
@@ -246,6 +310,85 @@ export function registerVideoTool(ctx: Context, options: VideoToolOptions): void
       }
     },
   })), 'openlux: video tool')
+}
+
+/**
+ * The newest conversation image, as a data URI the route accepts.
+ *
+ * The bytes are fetched here rather than in the job because the two failures
+ * this can hit — no picture in the conversation, no attachment service — are
+ * both answers to the call the model just made. Sending them back as tool errors
+ * lets it recover in the same turn (draw something first, or say why it cannot),
+ * while a job failure would surface minutes later with the turn long gone.
+ *
+ * Size needs no separate rule: the attachment store refuses anything past its
+ * own image cap (5 MB by default), so what it hands back is already bounded.
+ * @param ctx - host context; the attachment service is read opportunistically.
+ * @param session - the calling agent's session, whose log holds the images.
+ * @returns the image, as both its reference and the URI the route takes.
+ */
+async function readLastImage(ctx: Context, session: Session | undefined): Promise<FirstFrame> {
+  if (session === undefined) {
+    throw new VideoGenerationError('这次调用不属于任何会话，取不到会话里的图片，无法做图生视频。')
+  }
+  const attachments = ctx.get('attachments')
+  if (attachments === undefined) {
+    throw new VideoGenerationError('这个会话没有附件能力，取不到图片字节，无法做图生视频。')
+  }
+  const found = findLatestImage(session)
+  if (found === undefined) {
+    // Deliberately does not suggest "ask the user to send one": a drop is
+    // refused unless the session's model declares image input, and this
+    // product's profile ships text-only models today. Suggesting an affordance
+    // the window does not have is worse than naming the one that works.
+    throw new VideoGenerationError('这个对话里还没有图片。先用 image_generate 画一张，再来做图生视频。')
+  }
+  const stored = await attachments.readImage(found.ref)
+  return {
+    ...found,
+    dataUri: `data:${found.ref.mediaType};base64,${Buffer.from(stored.data).toString('base64')}`,
+  }
+}
+
+/** The resolved reference image, with the bytes in the form the route takes. */
+interface FirstFrame extends SessionImage {
+  readonly dataUri: string
+}
+
+/**
+ * The frame shape closest to a reference image's own.
+ *
+ * Only orientation is decided here, because that is all this route offers: a
+ * square source has no matching shape and gets bars either way, so it takes the
+ * landscape default rather than a coin flip.
+ * @param ref - the reference image.
+ * @param offered - the shapes this model accepts.
+ * @returns the shape to film in, or undefined when neither is offered.
+ */
+function orientationOf(ref: { width: number; height: number }, offered: readonly string[]): string | undefined {
+  const wanted = ref.height > ref.width ? '9:16' : '16:9'
+  return offered.includes(wanted) ? wanted : offered[0]
+}
+
+/**
+ * What to tell the model about the picture it is animating.
+ *
+ * It cannot see the reference — neither the picture nor its size — so without
+ * this line it explains the result by guessing. The bars are called out because
+ * a user who asked to animate their square photo will see them and ask why.
+ * @param frame - the resolved reference image.
+ * @param aspect - the shape the clip is being filmed in.
+ * @returns one line of model-facing text.
+ */
+function describeFirstFrame(frame: FirstFrame, aspect: string | undefined): string {
+  const origin = frame.source === 'attached' ? '用户发的图' : '你刚生成的图'
+  const shape = `${String(frame.ref.width)}x${String(frame.ref.height)}`
+  const square = frame.ref.width === frame.ref.height
+  const filmed = aspect ?? '16:9'
+  const bars = square || (frame.ref.height > frame.ref.width) !== (filmed === '9:16')
+    ? `；源图与 ${filmed} 不同形，出片会留黑边`
+    : ''
+  return `首帧用的是${origin}（${shape}），出片 ${filmed}${bars}。`
 }
 
 /**

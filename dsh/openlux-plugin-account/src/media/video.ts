@@ -14,6 +14,15 @@
  *   runs on `veo_3_1-fast`: 100s / 2.30 MB and 118s / 3.46 MB, both
  *   `video/mp4`. The console's own published contract agrees on the entry and
  *   names `prompt` and `model` as the only required fields.
+ * - **A local image can be the first frame, with no image host in between.**
+ *   The published contract shows `images` as `https://…` URLs and the relay
+ *   forwards the body verbatim (`unified_video/adaptor.go` `BuildRequestBody`
+ *   marshals the dto; nothing on that path touches base64 or uploads), so only a
+ *   live run could answer whether a `data:` URI survives. It does, and upstream
+ *   uses it: a 137 KB JPEG of a cat in an alley came back as a clip whose first
+ *   frame *is* that photograph. The reply's `detail.input.images` echoes `[""]`
+ *   — the echo blanks the long string, it does not strip it, which is worth
+ *   knowing before reading that field as evidence of a drop.
  * - **Chinese prompts need no help.** The published contract offers
  *   `enhance_prompt` because "veo 只支持英文提示词", which would make it
  *   mandatory for this product — except a Chinese prompt sent bare came back as
@@ -79,6 +88,12 @@ export interface VideoRequest {
   /** `16:9` or `9:16`; the route defaults to landscape when absent. */
   readonly aspectRatio?: string
   readonly durationSeconds?: number
+  /**
+   * Reference images, newest role first — for this model family, the first
+   * frame. Each entry is either an `https://…` URL or a `data:` URI; see
+   * {@link generateVideo} for why the local form works.
+   */
+  readonly images?: readonly string[]
 }
 
 /** One finished video, ready to be written to disk. */
@@ -199,6 +214,7 @@ async function submit(
     prompt: request.prompt,
     ...request.aspectRatio === undefined ? {} : { aspect_ratio: request.aspectRatio },
     ...request.durationSeconds === undefined ? {} : { duration: request.durationSeconds },
+    ...request.images === undefined || request.images.length === 0 ? {} : { images: [...request.images] },
   }
   let reply
   try {
