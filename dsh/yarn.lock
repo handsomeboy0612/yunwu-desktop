@@ -6802,6 +6802,7 @@ __metadata:
     "@types/react": "npm:^18"
     electron: "npm:43.4.0"
     electron-builder: "npm:26.15.3"
+    ipaddr.js: "npm:2.4.0"
     koffi: "npm:3.1.5"
     node-addon-require-builtin: "npm:^0.1.4"
     openlux-plugin-account: "workspace:^"
@@ -7735,6 +7736,13 @@ __metadata:
   version: 1.9.1
   resolution: "ipaddr.js@npm:1.9.1"
   checksum: 10c0/0486e775047971d3fdb5fb4f063829bac45af299ae0b82dcf3afa2145338e08290563a2a70f34b732d795ecc8311902e541a8530eeb30d75860a78ff4e94ce2a
+  languageName: node
+  linkType: hard
+
+"ipaddr.js@npm:2.4.0":
+  version: 2.4.0
+  resolution: "ipaddr.js@npm:2.4.0"
+  checksum: 10c0/47c2f17677b40054ca50a09e1228cf818c0d02d4474c2e0e29232c6668b3c4d51a3cfc19d1e17897d7baf4d933b3111d6bdf5cfbe55ab184165469a75f2bf177
   languageName: node
   linkType: hard
 

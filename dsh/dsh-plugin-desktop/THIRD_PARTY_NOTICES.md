@@ -220,6 +220,7 @@ the package names, versions, and licenses for transparency.
 | @deepseek-ai/dsh-user-questions | 0.1.0-rc.6 | MIT |
 | @deepseek-ai/dsh-web | 0.1.0-rc.6 | MIT |
 | @deepseek-ai/dsh-web-app | 0.1.0-rc.6 | MIT |
+| @deepseek-ai/dsh-web-fetch-http | 0.1.0-rc.6 | MIT |
 | @deepseek-ai/dsh-web-frontend | 0.1.0-rc.6 | MIT |
 | @deepseek-ai/dsh-web-search-deepseek | 0.1.0-rc.6 | MIT |
 | @deepseek-ai/dsh-workflow | 0.1.0-rc.6 | MIT |
@@ -376,7 +377,7 @@ the package names, versions, and licenses for transparency.
 | immer | 10.2.0 | MIT |
 | inherits | 2.0.4 | ISC |
 | ip-address | 10.5.0 | MIT |
-| ipaddr.js | 1.9.1 | MIT |
+| ipaddr.js | 2.4.0 | MIT |
 | is-promise | 4.0.0 | MIT |
 | isexe | 2.0.0 | ISC |
 | jose | 6.2.8 | MIT |

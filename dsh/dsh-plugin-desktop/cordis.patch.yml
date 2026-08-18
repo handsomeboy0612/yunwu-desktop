@@ -30,9 +30,18 @@
     # The fetch backend for `web_fetch`, which the base bundle leaves unmounted.
     # Enabling it is a security statement, so the reasoning is with the row that
     # turns the tool on, further down this file. Order is free: the plugin
-    # injects `web` and stays pending until that service mounts.
-    - id: web-fetch-http
-      name: '@deepseek-ai/dsh-web-fetch-http'
+    # injects `web` and `tools` and stays pending until both mount.
+    #
+    # `@deepseek-ai/dsh-web-fetch-http` is NOT mounted directly. That package's
+    # provider defers private-network protection to its deployment (its own
+    # `provider.d.ts` says so) and this row wraps it: classify the target, then
+    # use it as the transport. Mounting it here as well would leave an unguarded
+    # `http` provider in the registry for one line of config to select, so the
+    # only usable fetch provider in this product is the guarded one — the `web`
+    # row below still names it, but selection would land here regardless.
+    # Config is upstream's schema, so the caps live in one place.
+    - id: web-fetch-guard
+      name: dsh-plugin-desktop/web-fetch-guard
       config:
         # Above the tool-call budget on purpose. This timer is the provider's own
         # resource guard for direct `ctx.web.fetch()` callers; its README asks
@@ -162,11 +171,31 @@
     baseURL: https://api.openlux.ai/v1
     model: claude-haiku-4-5-20251001
 
+# Name the guarded provider explicitly. Selection would reach it anyway (it is
+# the only usable fetch provider mounted), so this row is a statement, not a
+# load-bearing switch: a future second provider cannot quietly take over, and a
+# guard row that failed to mount surfaces as WEB_PROVIDER_CONFIGURED_MISSING on
+# the next fetch instead of as a successful unguarded one.
+#
+# Patch of `config` is wholesale replacement (`applyEntryPatches` assigns the
+# key), so `searchProvider` has to be copied from the base row or search
+# selection goes back to "exactly one usable provider".
+- id: web
+  config:
+    searchProvider: deepseek-official
+    fetchProvider: openlux-http
+
 # Let the model read a page it found, instead of guessing from a snippet. The
 # base bundle ships `fetch: false` and states why in its own comment: no fetch
 # provider is mounted, and that provider defers SSRF protection while the model
-# picks the target. Both halves are true, and the conclusion still does not carry
-# to this product.
+# picks the target. Both halves are true of upstream. The first is the reason
+# for the `web-fetch-guard` row above; the second is what that row answers —
+# literals are refused by a `tools.guard`, and the resolved addresses are
+# classified before upstream's provider is used as transport. Ranges and
+# embedded-IPv4 rules come from openclaw's net-policy, so this product's reach
+# is not wider than the kernel generation it is migrating from. The residual
+# window is stated in `src/web-fetch-guard.ts`: the transport re-resolves at
+# connect time, which no seam in that package lets us pin.
 #
 # What decides it here is that the boundary in question is already open. The
 # sandbox governs file effects only — its README says network and process policy

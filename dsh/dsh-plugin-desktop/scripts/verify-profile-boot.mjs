@@ -184,6 +184,43 @@ try {
     throw new Error('assembled desktop profile registers web_search globally instead of per preset')
   }
 
+  // Both halves of the fetch guard, judged by behaviour rather than by reading
+  // which provider id got selected: that field is TypeScript-private, and every
+  // way the row can go wrong shows up here anyway. This page is HTML and the
+  // server is live, so the unguarded provider answers it 200 — a wrong or
+  // missing pin fails with the seam's own code, not with WEB_BLOCKED_URL.
+  const loopbackPage = `http://127.0.0.1:${String(ctx.webServer.port)}/`
+  try {
+    await ctx.web.fetch({ url: loopbackPage })
+    throw new Error(`guarded fetch retrieved the loopback Web root at ${loopbackPage}`)
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('guarded fetch retrieved')) throw error
+    const code = error?.code
+    if (code !== 'WEB_BLOCKED_URL') {
+      throw new Error(
+        `loopback fetch failed with ${String(code)} (${error instanceof Error ? error.message : String(error)}) instead of WEB_BLOCKED_URL`,
+      )
+    }
+  }
+
+  // The other half through the real tool pipeline, which is where a guard that
+  // never registered would show up: the registry runs it after pre-execute
+  // policy, and the reason has to reach the model as the call's error text.
+  // `2130706433` is the same target spelled the way a model probes around a
+  // string check; WHATWG parsing folds it before the classifier sees it.
+  for (const url of [loopbackPage, 'http://2130706433/']) {
+    const outcome = await ctx.tools.execute({
+      callId: `profile-smoke-web-fetch-${encodeURIComponent(url)}`,
+      name: 'web_fetch',
+      arguments: { url },
+      signal: AbortSignal.timeout(30_000),
+    })
+    const text = JSON.stringify(outcome.error ?? outcome.value ?? null)
+    if (!outcome.isError || !text.includes('not a public HTTP(S) target')) {
+      throw new Error(`web_fetch of ${url} was not refused by the tool guard: ${text}`)
+    }
+  }
+
   const picker = ctx.directoryPicker.capability()
   if (picker.kind !== 'browse') {
     throw new Error(`assembled Windows profile selected ${picker.kind} directory picker`)

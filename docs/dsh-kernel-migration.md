@@ -1331,6 +1331,277 @@ deepseek-v4-flash，1 轮 2 步 38 秒）：
 已经跑着的会话留在原来那一代）；`copy()` 是唯一的写入口且只能整目录复制，
 市场安装只能自己往可写根目录落文件——跟我们这次探针的做法一样。
 
+#### `ai-content-creator-team` 静态核对（2026-08-19）：机制没问题，内容还是 WorkBuddy 的
+
+上面那一轮闸门验的是探针 preset `yw-team`（组长 + 两名组员），**验的是内核机制**。
+我们真正要发的那份 `config/agent-presets/ai-content-creator-team/agent.cordis.yml`（2100+ 行、
+六名成员）**没有被那一轮覆盖**。拿内核的权威工具名表逐条比了一遍，机制用得对，内容是从
+WorkBuddy 搬过来没改完的。**以下全是静态比对，没跑应用。**
+
+先说对的：六名成员用的是 `allow` 白名单（`:877` / `:1097` / `:1405` / `:1634` / `:1786` /
+`:2060`），正好关掉上面记的「成员默认看得见其他成员的 `delegate_*`」那条坑；四个名字
+`skill` / `read` / `write` / `edit` 都是真注册名（`dsh-tool-skill`、`dsh-tool-fs`），所以
+`toolFilter` 那条 "unknown names fail startup" 不会触发，这份 preset 挂得起来；
+`provider: spawn` 也确实实现了 `toolFilter`（`dsh-subagent/lib/index.js:582` 的
+`childCtx.tools.restrict`），不是只有外部 provider 才有的能力。
+
+**一、白名单列得太窄，四名成员干不了自己人设里那件事。** 白名单是全局工具名的 allow，
+所以没列进去的一律看不见：
+
+| 成员 | 人设要它做的 | 需要的全局工具 | 白名单里 |
+|---|---|---|---|
+| `image-creator` | 出图，提示词还点名 HY-Image-V3.0 | `image_generate`（`openlux-plugin-account/src/media/name.ts:15`） | 无 |
+| `video-generator` | 出片、图生视频、Fallback 链路 | `video_generate`（同上 `:25`） | 无 |
+| `video-editor` | 剪辑、滤镜叠加、`uploadAndGetVid` | 至少 `bash`/`pwsh`；那套上传 API 在 DSH 里没有对应工具 | 无 |
+| `content-adapter` | 明写「本地文件预处理使用 Bash 工具链（ffmpeg/ffprobe/whisper）」 | `bash`（非 win32）/ `pwsh`（win32，注册名就是 `pwsh`） | 无 |
+| `creative-strategist` / `copywriter` | 纯文本产出 | 现有四件够用 | ✓ |
+
+**二、`SendMessage` 那条指令三重错。** 六名成员每人都被要求「完成任务后**必须通过
+SendMessage 将完整结果回传给主理人**」，全文 19 处。DSH 里那个工具真名是 `send_message`
+（`dsh-tool-subagent-control`）；它不在任何成员的白名单里；而且**机制上根本不需要**——
+成员是 `backgroundMode: one-shot` 的前台委派，上面那张表自己写着「成员产出**就是**工具结果」。
+这是 WorkBuddy 常驻 agent 的形状，跟着提示词一起搬过来了。
+
+**三、主理人的调度指令是 Claude Code 的 Task 形状。** `:432-439` 要求「必须在 Agent 工具的
+`name` 参数中传入 Agent ID，同时 `subagent_type` 参数也传相同 ID」，还附了六个 Agent ID 的
+「完整列表」。DSH 的 subagent 工具入参只有 `description` / `prompt` /（可选）`run_in_background`
+（`dsh-tool-subagent/lib/index.js:142-157`），选哪个成员靠**调哪个工具名**，而
+`:504-509` 其实已经把六个真名 `delegate_*` 列对了——两段自相矛盾。
+多传的参数**不会报错**：`parameterSchemaSpecToJsonSchema`（`dsh-tools/lib/index.js:800-809`）
+不写 `additionalProperties`，而未声明属性只在它显式为 `false` 时才被拒（`:465-466`），
+所以是静默丢弃。真正的伤害在那句「否则系统会自动生成无意义名称」——界面显示名来自
+`description`（schema 原文 "for display"），指示模型去管一个不存在的 `name`，
+恰好放弃了唯一能管的那个字段，于是它想避免的现象照旧发生。
+
+**四、还有一批指着不存在东西的字**：`uploadAndGetVid` ×2（WorkBuddy API，DSH 无此工具）、
+`WorkBuddy` ×13（品牌残留，跟前面记的 User-Agent / persona 自报是同一类）、
+`Agent 工具` ×2。
+
+**建议的改法分三档**（都还没动手）：白名单按角色补齐能力工具（shell 那条要按平台，
+`!!js process.platform === 'win32' ? 'pwsh' : 'bash'`，这份文件里已经在用 `!!js`）；
+删掉 SendMessage / `name` / `subagent_type` / `uploadAndGetVid` 那些段，回归
+「产出即工具结果、显示名靠 `description`」；品牌词随发布前那一遍统一扫。
+
+**判据只能是真机**：`ctx.tools.schemas()` 是全局视角看不出成员的收窄（这坑踩过一次），
+所以要在会话里让 `image-creator` 真出一张图、让 `content-adapter` 真跑一次 ffmpeg，
+再看模型自报的工具名录。反过来说，**单专家那份 `content-creator` 是干净的**——
+无 `toolFilter`、工具行照上游形状、零 WorkBuddy 残留。
+
+#### 真机复验（2026-08-19 凌晨）：上一节的判据兑现了，但先纠正我自己的一个错判
+
+> **先读这个更正（2026-08-19 04:15）：本节的测试环境是错的，凡是牵涉「我们的插件」的
+> 结论一律作废，只有纯上游行为那几条还算数。** 我用 `node
+> node_modules/@deepseek-ai/dsh/lib/bin.js --profile desktop` 起服务，以为 profile 一样就
+> 等于出厂形状。不是：`src/profile.ts:157-160` 的 `desktopBundleList` **故意把我们自己的包
+> 排除在 profile 的 bundles 之外**（`name !== DESKTOP_PACKAGE_NAME`），出厂那份
+> `cordis.patch.yml` 是桌面 launcher 启动时作为 **`--patch` overlay** 挂上去的
+> （`PreparedDesktopProfile.patches`；profile 自己的 `cordis.yml` 注释写着 *each bundle in
+> package.json's dsh.profile.bundles, then cordis.patch.yml, then any --patch overlays*）。
+> 走上游 bin 就把这一整层绕过去了。**判据不在 bundles 上**——出厂 launcher 的 bundles
+> 也就是 `['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']` 这两个（我们的包按设计
+> 不进 bundles），差别是它额外叠的 **47 条 patch**。离线核对读数（`prepareDesktopProfile`）：
+>
+> | patch | 内容 |
+> |---|---|
+> | `patch[0]`（base 裸层）| `agent-default-model: {provider: deepseek-official}`、`llm-deepseek` 挂着、`tool-web: {fetch: false}` |
+> | `patch[28]`（dsh-web-app）| `tool-web disabled: true` |
+> | `patch[30]`（我们）| `web-fetch-guard`，`timeoutMs: 45000` |
+> | `patch[32]`（我们）| `llm-pi-ai` 的 `openlux` 提供方（`apiKeyEnv: OPENLUX_API_KEY`、`streamIdleTimeoutMs: 90000`）|
+> | `patch[33]`（我们）| **`llm-deepseek disabled: true`** |
+> | `patch[34]`（我们）| **`agent-default-model: {provider: openlux}`** |
+> | `patch[37]`（我们）| `tool-web disabled: false` + `{search: false, fetch: true}` |
+>
+> 上游 bin 一条都不叠，跑的就是 `patch[0]` 那层裸配置——`deepseek-official` 加一个挂着的
+> `llm-deepseek`，`unknown tool ""` 必现；账号插件也不在，所以**连 `image_generate` /
+> `video_generate` 都不存在**。
+>
+> **正确组装上复验过了**：`scripts/verify-profile-boot.mjs` 3.2 秒绿，它 `:173-185` 正好
+> 断言 `image_generate` / `video_generate` / `web_fetch` 必须在全局工具表、`web_search`
+> 必须不全局注册。所以出厂形状下「工具存在、成员被白名单挡住」这个因果是对的，
+> 下面那条改生成器的结论不受这次环境错误影响。
+>
+> **判据要写成「bundles + patches 都对」，不是「profile 名字对」。** 想不开 Electron 又要
+> 出厂组装，走 `prepareDesktopProfile()` 拿 `patches` 再用 `--patch` 传给 CLI
+> （`scripts/verify-profile-boot.mjs:134` 已经是这个形状），或者干脆关掉正在跑的桌面 app
+> 用真 launcher。这条并入本文档 967 行那个教训：**空 home 能暴露出厂层的窟窿，
+> 错 bundles 会伪造一整套不存在的产品行为。**
+
+**怎么跑的**：`DSH_HOME` 指到 live home（`%TEMP%\yw-dsh-live`，含 `.credentials.yaml`
+与用户装的 12 份 preset），`dsh --profile desktop --port 43121` 起 web 服务，浏览器驱动。
+**没走 Electron 是因为 `main.ts:108` 那把 `app.requestSingleInstanceLock()`**——机器上已有
+DSH Desktop 在跑，第二实例立刻 `app.quit()`。桌面 renderer 想在普通浏览器里打开要补
+`?dsh-desktop-mode=compatibility`，少了它会被 loader 拒成
+`invalid or missing dsh-desktop-mode null`。**但如上所述，这条路只有上游那一层。**
+
+**先纠正错判：中途我判「专家团整个起不来」，是错的。** 起因是头一个会话里
+`delegate_image_creator` 连挂三次 `Error: subagent run failed`（每次 60ms，
+`list_agents` 也显示无子代理）。重启服务后同一份 preset **五发全成功**：copywriter 空手、
+技能 + copywriter、image_creator 空手、image_creator 真任务，另加 `yw-team` 的
+`delegate_writer` 作对照。那三次只出现在第一个服务进程里，之后再没复现过——
+**结论是「不可复现的瞬时故障」，不是形状问题**，别拿它当 preset 的罪证。
+（加上环境更正之后这条更要放轻：那个进程也跑在漏挂 patch 的组装上，
+真要定性得在正确 bundles 上重新观察。）
+
+**上一节留的判据，成员自己逐字兑现了。** 让 `image_creator` 先如实盘点再真出图，它回的是：
+真实可调用只有 `read` / `write` / `edit` / `skill` 四个，然后把 ImageGen、ImageEdit、
+HY-Image-V3.0、HY-Image-Lite、全部视频模型、`Bash 工具链`、`SendMessage`、`web_search`
+逐条标成"无对应 API"，并且自己点出了病根：*"我的系统预设文案和 ai-content-production
+技能包中确实描述了 ImageGen、ImageEdit、HY-Image-V3.0 等工具的用法，但这只是角色设定/
+技能文档文字，并非我当前环境真实暴露的可调用函数"*。**这是 `toolFilter.allow` 逐成员生效的
+正面真机证据**（allow 方向，deny 方向那条仍只有 `yw-team` 那轮）。**这一条不受上面那个
+环境错误影响，反而更干净**：纯上游 base 里 `bash` / `web_fetch` / `web_search` 全都注册着，
+成员一个都看不到，只剩白名单里那四个——收窄确实是逐成员生效的，跟我们的插件无关。
+
+**真正的伤害不是"干不了"，是它把用户往 WorkBuddy 引。** 主理人给用户的收尾原话是
+*"当前 DSH 环境未接入 WorkBuddy 图像生成服务，如需真正出图，需要在一个具备 ImageGen /
+HY-Image 等 API 的运行时（WorkBuddy 平台）中执行"*。**这里的因果我给错了，按上面那个更正重述**：当时我断言"`image_generate`
+我们自己注册着（`openlux-plugin-account/src/media/name.ts:15`），是白名单把它挡在门外"——
+但那个组装里账号插件根本没挂，工具**确实不存在**，所以模型说的是实话。**出厂形状下这句话
+才是错的**（那时工具在，挡它的是白名单），而这一条必须在正确 bundles 上复验才能定性。
+**与工具存不存在无关、因此仍然成立的是话术问题**：人设里的 WorkBuddy 工具名让它把用户
+往前身平台引，这是品牌残留的直接后果，不是工具面的后果。代价那条也照样成立：用户干等
+4 分 03 秒（其中工具调用 3m28s，成员在反复盘点不存在的工具）才收到一句"我做不了"。
+
+**那三次失败为什么查不出原因，是内核这一层的事实，记下来免得下次再挖一遍。**
+`dsh-subagent/lib/index.js:2155-2166` 把子代理运行期的**任何**异常 catch 成
+`stopReason: 'error'`，原始 error 只递给可选回调 `parts.onError`，而**全仓库没有任何一处
+设置这个回调**（`rg "onError:" dsh-subagent dsh-tool-subagent` 零命中，唯一出现就是那句
+`parts.onError?.()`）；`SubagentResult` 类型里也只有 `output` / `structured` / `stopReason`，
+没有 error 字段（`dsh-subagent/lib/types/types.d.ts:207-222`）。工具层再把它映射成一句
+`subagent run failed`（`dsh-tool-subagent/lib/index.js:59`）。所以界面、会话日志、
+服务端 stderr **三处同时查不到原因**，用户遇到只有一句无信息的报错。想让它可诊断，
+得我们自己接上那个回调或另找途径——这是内核的可改进点，不是我们找错了地方。
+
+顺带两条查证方法：子会话日志确实落在 `sessions/<project>/<childId>/session.jsonl.zstd`，
+header 里带 `origin: subagent` / `delegationDepth: 1` / `agentPreset`，**失败那三次里只有
+header 一条事件**（子代理连一个事件都没产生）；这个文件是「每批一个独立 zstd 帧串联」，
+Node 的 `zstdDecompressSync` 只吃第一帧、流式解到第二帧报 `Unknown frame descriptor`，
+内核自带多帧解码器（`dsh-session-persistence-jsonl/lib/types/zstd-*-decoder.d.ts`），
+要读全得用它。
+
+**`maxDepth: 1` 不是嫌疑人**（我怀疑过）：`resolveChildDepth` 是 `childDepth > maxDepth`
+才抛，第一层 `1 > 1` 为假；而且它抛的是带数字的 `SubagentDepthError`
+（`dsh-subagent/lib/index.js:466-491`），不会伪装成 `stopReason: 'error'`。
+
+#### 14 份 preset 全量静态扫描（2026-08-19）：三个改变结论的发现
+
+出厂 2 份（`config/agent-presets/`）+ 真机 live home 装的 12 份，逐份解析 YAML、
+按成员取 `toolFilter`、全文数死工具名 / 死模型名 / 品牌词：
+
+| preset | 形状 | 成员的工具面 | 死名字 |
+|---|---|---|---|
+| `ai-content-creator-team`（出厂） | 团 · 6 成员 | 六个都是 `allow=[skill,read,write,edit]` | ImageGen×13 ImageEdit×9 SendMessage×25 `deliver_attachments`×13 YT-VITA×16 `subagent_type`×7 `uploadAndGetVid`×2 `Agent 工具`×2；模型名 HY-Image×25 HY-Video×18 YT-Video×28（含小写变体）；WorkBuddy×14 |
+| `market-probe-team`（live home） | 团 · 6 成员 | 同上 | **与上面逐项相同** |
+| `marketing-growth-team`（live home） | 团 · 4 成员 | 四个都是**无 `toolFilter`** | 干净 |
+| `content-creator`（出厂）+ 9 份单专家 | 单专家 | 无收窄 | 干净 |
+| `tencent-cloud-quote-assistant`（live home） | 单专家 | 无收窄 | WorkBuddy×2 |
+| `yw-team` / `yw-finance`（探针） | 团 2 成员 / 单专家 | `allow=[skill]` 与 `deny=[pwsh,write,edit]` | 干净 |
+
+**一、`ai-content-creator-team` 与 `market-probe-team` 是同一份东西**（都 72500 字符、
+死名字命中逐项相同）。所以今晚测的就是要发的那份，上一节那些静态结论直接适用，
+不用再单独跑一遍出厂那份。
+
+**二、`marketing-growth-team` 的四名成员根本没有 `toolFilter`**，即同一个生成器产出了
+两种形状。没有收窄意味着成员看得见全部全局工具——`image_generate` / `video_generate` /
+shell 都在，**能干活**，但也踩上前面记过的那条坑：**成员默认看得见其他成员的 `delegate_*`**，
+可以互相委派甚至绕圈。所以这两个团要往中间收敛：一个太窄干不了事，一个太宽没有边界。
+
+**三、10 份单专家全干净**（只有 `tencent-cloud-quote-assistant` 两处品牌词）。
+「专家也要一样扫」这件事的答案是：**问题只在团里**，单专家这条线不用返工。
+
+自动扫描有个必须说明的盲区：它只能标出"人设点名了真实工具名但白名单里没有"（只命中
+`content-adapter` 的 `bash` 一条），因为其余成员人设里用的**全是 WorkBuddy 的名字**
+（写 ImageGen 而不是 `image_generate`），压根没提过真名——这本身就是结论：
+它们不是"要的工具被挡了"，是"从来没指向过我们真有的那个工具"。
+
+顺带撞到两个与专家团无关、但每轮都在发生的问题，单独排：
+
+这两条我一开始都当成新问题记，**查完是同一个早就查清的坑，而且恰好证明出厂那道封堵是
+必要的**——它们只在我这个漏挂 patch 的组装里出现：
+
+- **每一轮的第一次工具调用都报 `unknown tool ""`（空工具名），模型重试才成功**，6 个会话
+  6 次、跨两份 preset 100% 复现。根因是上游 base 挂着 `llm-deepseek` 而用户态给它配了
+  中转 `baseURL`：那个适配器的分片赋值是 `!== undefined`，**中转续片发 `"name": ""` 就把
+  首片取到的工具名冲空**（`references/openclaw-kernel.md:131`、`:141-145`，同一节还记着
+  当年的错误结论是"等中转修或打补丁"，正解是换适配器）。
+- **那条加载不出来的会话**（`SessionPersistenceCorruptionError: session event at seq 186
+  message must have tool source`）是同一个坑的下游：册子原话是它"还会写出空 `callId`
+  让整条会话永久打不开"。**所以不是我强杀服务造成的**，我那次归因错了。
+- **出厂形状对这两条免疫**：`cordis.patch.yml:116-117` 把 `llm-deepseek` 整行
+  `disabled: true`，注释 109-111 写明理由正是"它是我们中转会打坏流解析的那个适配器，
+  它留下的空 callId 让会话再也打不开"；默认模型也覆盖成 `provider: openlux`
+  （`:128-131`），走结构上免疫的 `llm-pi-ai`。真机桌面 home（`C:\Users\000\.dsh`）里
+  那段 `llm-deepseek: baseURL` 是**无效残留**——`disabled` 是组合层 entry 字段，
+  loader 见到就 `return` 不 init（`cordis-plugin-loader/lib/index.js:381`），
+  用户 settings 只能给 entry 提供 config，翻不回这个标志。
+
+#### 与「指定模型出图/出视频」的先后关系（2026-08-19 判定：不等，但要拆成两件）
+
+问题原话是「用户在专家团里指定 xxx 模型去生产怎么办，要不要等那个功能做完再动专家团」。
+拆开看是两件事，一件不依赖它、一件是它的下游：
+
+**A. 让成员能出图出片（补白名单）——与它无关，现在就能做。**
+两个工具给模型看的参数里**都没有 `model`**：`image_generate` 是 `prompt` / `n` /
+`size`（`openlux-plugin-account/src/media/tool.ts:143-161`，`size` 是按所选模型取的 enum），
+`video_generate` 是 `prompt` / `aspect` / `duration`（`media/video-tool.ts:209-222`）。
+模型由部署配置定（`DEFAULT_IMAGE_MODEL`、`media/video-tool.ts:81` 的
+`DEFAULT_VIDEO_MODEL = 'veo_3_1-fast'`），两处注释把理由写死了——
+*"The model never chooses this: availability is a deployment fact it cannot see, and a
+hallucinated model name is a refused request the user pays for"*（`tool.ts:52`，
+`video-tool.ts:78` 同义）。所以成员一进白名单就能用默认模型出图出片，走的是已经端到端
+验通的那条链。现在的状态不是"出图但模型不对"，是"根本出不了"。
+
+**B. 让成员按用户指定的模型生产——是那条功能的下游，而且比它多一步。**
+第三条（把 `model` 加成取 `ROUTE_MODELS` 键的 enum）只解决"单会话里模型能选"。
+专家团还多一跳：**成员是独立子代理，用户的模型意图必须由主理人写进委派 prompt，
+成员再填进工具参数**。这里有个容易走错的路要提前钉住：子代理确实继承父的
+`provider/model/maxTokens`（`dsh-subagent/lib/index.js:492-498` 的 `resolveChildOptions`），
+但那是**对话模型**；出图/出视频模型是工具的部署配置，**不在 agent 路由里，不会被继承**。
+所以 B 不能指望"路由继承"白送，得显式透传。
+
+**B 还有两条历史教训，都在旧壳上真发生过（`references/media-video.md`）：**
+
+- **让模型能填模型名，模型就会编或写裸名。** 旧壳上有一发出图落到了内核自带的 openai
+  路径、报 `OpenAI API key or Codex OAuth missing`，而配置里 `imageGenerationModel.primary`
+  明明是 `yunwu-image/gpt-image-2`——起因是模型自己传了裸名 `model: "gpt-image-1"`
+  （`media-video.md:585-589`）。旧壳的解法是运行时钩子纠正前缀（编的前缀纠正、裸名补前缀、
+  没传就不插手，离线 8/8，`:597-602`）。DSH 上第三条打算用 enum，是在 schema 层就拒掉，
+  比运行时纠正更早——这也正是第三条判据里那句「写一个不存在的名字，被 schema 当场拒掉
+  而不是发一次付费请求」的由来。**专家团里这个风险更高**：成员看不到用户原话，只看到主理人
+  转述的 prompt，写错名字的机会比单会话多一跳。
+- **「对话里指定模型」连旧壳都没做过，别当成迁移。** 旧壳要复现的结果是「用户能在设置里挑
+  出图/出视频/朗读用哪些模型，**挑完固化**」（`media-video.md:100-103`），形状是
+  `imageGenerationModel = { primary, fallbacks, timeoutMs }`（`:241-243`）。而且那一节明写
+  **WorkBuddy 在这件事上没有可对齐的形状**（它的媒体能力是自家掏钱的固定档，不给用户选）。
+  所以 B 是一个新形状：既没有旧壳实现可搬，也没有 WorkBuddy 行为可对齐，得自己定，
+  更不该拿它挡住 A。
+
+**排法**：A 现在做（它正在造成真实伤害）；B 记成第三条的一个子项，第三条动工时一并设计，
+别做完发现漏了专家团这一跳。另外 A 阶段清人设时，**所有具体模型名一律删掉、不换成新名字**：
+`ROUTE_MODELS` 是部署事实（图 3 个、视频按厂商加行），把它抄进 2100 行人设等于把部署配置
+复制进内容，换一次模型要改所有专家；模型看得见 enum，不需要人设教它。B 阶段要不要在人设里
+提"可以让用户指定模型"，等第三条的名单定了再说。
+
+**顺序上的风险也不对等**：第三条自己记着「网关上 gemini 那几个出图模型是 503，名单得
+人工筛」，带外部依赖、工期不可控；把一个正在把用户往 WorkBuddy 引的问题挂在它后面不划算。
+
+**别和旧壳那件事混了**：`experts-and-teams.md:50-51` 记的「出图模型让用户自己选」
+在 openclaw 旧壳上 2026-08-13 已端到端验通（候选 3 → 21 个），但那是**设置里选**的配置层；
+第三条说的是**对话里说「用 xxx 模型画」**的参数面。两件事都还没迁到 DSH，互不替代。
+
+#### 根因在生成器，改产物会被覆盖
+
+那份四件套白名单不是手写疏忽，是 `dsh-plugin-desktop/scripts/materialize-expert.mjs:51`
+的 `MEMBER_ALLOW = ['skill', 'read', 'write', 'edit']`，注释写着
+*"Portable allow-list: only tools the standard preset always registers"*——为了"挂载一定
+不失败"（`toolFilter` 里的未知名字会 fail startup）选的最小可移植集，但没人验过它的后果。
+**所以要改的是生成器，不是那两份 yaml**，否则下次 materialize 覆盖回去。同时
+`marketing-growth-team` 那份说明生成器还有一条不写 `toolFilter` 的路径，两条都要对齐到
+"按角色给能力工具"：shell 那行按平台走 `!!js process.platform === 'win32' ? 'pwsh' : 'bash'`
+（这份文件里已经在用 `!!js`），出图给 `image_generate`、出片给 `video_generate`，
+检索按需给 `web_search`（它是真实存在的，`dsh-base/cordis.patch.yml` 里有，
+成员看不见纯粹是白名单挡的）。改完的判据仍是真机：让 `image_creator` 真出一张图。
+
 ### 阶段 4 · 媒体（4~6 周）· 四条闸门已通过
 
 **原本判定这是全案最大的不确定性，因为风险不在"要写多少行"，在"dsh 有没有承载它的能力"。
@@ -2085,39 +2356,106 @@ rail 态、新会话空态，六处都换成了 OpenLux；聚合 check 310 passe
   被抓的站点看到的是它。这条是现成旋钮（`Config.userAgent`），改一行补丁就行。
 - `manifest.webmanifest` 的 `name` / `short_name`（桌面壳里看不见，只有浏览器安装才用到）。
 
-#### 待排期 · 工具可见面收窄（视频做完之后做；2026-08-18 查过内核与同类产品）
+#### 工具可见面收窄（视频做完之后做；2026-08-18 查过内核与同类产品）
 
 出图、搜索、抓取三个工具现在都是「全局层 + 参数面靠 enum 兜」的形状。要收窄的有三件事，
 **内核三个缝都是现成的，都不需要改上游代码**。按价值排：
 
-**一、`web_fetch` 的网络面（优先做，这条是补默认，不是加谨慎）。**
+**一、`web_fetch` 的网络面（2026-08-19 落地并当天自检重做了一遍，补默认不是加谨慎）。**
+
 上游自己把话说在模块文档里：*"Private-network and SSRF protection is not implemented;
 do not enable this provider where it can reach sensitive internal targets"*
-（`dsh-web-fetch-http/lib/types/provider.d.ts`，`policy.d.ts` 里也写着 SSRF 判定被推迟到
-"the package Agent Note"）。而我们**正是**那种环境：回环上有我们自己的 `/openlux/*` 路由与
-webserver，局域网里有路由器、打印机、开发服务器。同类产品的默认是挡住：Claude Code 的
-WebFetch 有 pre-flight SSRF guard（社区 issue 讨论的是它连 RFC1918 都不该去试）；
-**我们上一个内核 openclaw 自己就有 `fetchWithSsrFGuard`**——本地解析 DNS 再按段判断，
-配置面是 `tools.web.fetch.ssrfPolicy.*` 加 `allowPrivateNetwork` / `dangerouslyAllowPrivateNetwork`
-这类逃生口。所以形状是抄得到的，判据也清楚：`10/8`、`172.16/12`、`192.168/16`、`127/8`、
-`::1`、`fc00::/7`、`169.254/16`（含 `metadata.google.internal` 这类名字）、`localhost` /
-`.local` / `.internal` 后缀、IPv4-mapped IPv6 都要拒。
+（`dsh-web-fetch-http/lib/types/provider.d.ts`）。动手前先拿裸 `HttpFetchProvider` 打了一发
+本机 HTTP：`127.0.0.1` 上一个返回 `<title>secret</title>` 的服务，**200 / html / 正文原样**，
+所以那条警告不是口头上的。同类产品的默认是挡住（Claude Code 的 WebFetch 拒私网，issue #39884
+列的段就是 RFC1918 + 127/8 + `::1` + `fc00::/7`；openclaw 有整套 `net-policy`）。
 
-内核给的两个缝，各挡一半：
+**「DSH 内核这块是空的」有正面证据。** 最硬的一条是上游自己逐项列的缺失清单
+（`dsh-web-fetch-http/README.md:49`）：*"no blocking of private, loopback, link-local,
+multicast, or otherwise non-public destinations, no DNS-resolve-then-validate,
+**no per-hop re-validation** … this provider is an SSRF primitive and must not be enabled
+in a deployment that can reach sensitive internal network targets"*。第二条是那个包**唯一**
+的纯策略文件 `lib/types/policy.d.ts` 全文只有五个函数——`validateFetchUrl`（http(s)、
+无内嵌凭据、长度上限）、`isSameOrigin`、`classifyContentType`、`parseCharset`、
+`decoderForCharset`——第 14 行明写 "SSRF / private-network blocking is deferred"。
+第三条是全量搜 `allowedHosts|hostAllowlist|blockedHosts|privateNetwork` 与网段字面量，
+只命中 webserver / picker / startup 里用来**绑定**本机的 `127.0.0.1`，没有任何判据或旋钮。
+唯一长得像旋钮的 `webRuntime.trustedHosts` 是**反方向**的——它守入站 `/api` 的 `Host` 头
+（`dsh-client-connection` 的「/api 浏览器信任栅栏」），出网用不上。
 
-- `ctx.tools.guard(fn)`（`dsh-tools`）：同步检查，返回字符串即拒；**便宜、能挡字面量**
-  （直接写 IP、写 localhost）。注意它只看得到参数里的 URL 字符串。
-- `ctx.web.registerFetchProvider(provider)` + 配置 `fetchProvider: '<id>'` 钉住选谁
-  （`dsh-web/lib/types/index.d.ts`，`searchProvider` / `fetchProvider` "pin which provider"，
-  明说不是隐式优先级链）。`HttpFetchProvider` 与 `HttpFetchLimits` 都是导出的，所以我们
-  **包一层自己的 provider、把上游那个当传输层**即可：在连接前 `dns.lookup` 再判断，
-  这才挡得住 DNS rebinding（域名解析到 `127.0.0.1` / `169.254.169.254`）。
-- 顺带一条已经免费拿到的：上游只跟**同源**重定向（`isSameOrigin`，跨源直接拒），
-  「先给公网 302 到内网」那条路本来就不通。
-- 还有第三条可选：pre-execute 策略支持 `ask`（走审批服务 → `allowed-once`），
-  想做成「问一次」而不是硬拒的话，机制也在。
+顺带一条**方法教训，比这个结论本身重要**：我第一版拿的证据是「用 Grep 工具在
+`node_modules/@deepseek-ai` 下搜 SSRF 关键词两轮 0 命中」，那个证据是**假的**——
+Cursor 的 Grep 工具在 `node_modules` 下不扫 `.js`（走 ignore 规则），拿一个必然存在的
+`defineTool` 去对照同样 0 命中。查内核产物只能用 `rg --no-ignore --hidden`（或直接 Read
+文件）。**判据记成：任何「内核里没有 X」的结论，先用一个必然存在的字符串验证搜索真的扫到了
+文件，再相信那个 0。** 这次结论侥幸没变（换成上面三条正面证据后依旧成立），但同样的假 0
+用在「内核有没有这个旋钮」上，就是自己造一套机制的起点。
 
-**二、工具名单按角色收窄（这条我上一轮判错了，代价小得多）。**
+落点 `dsh-plugin-desktop/src/web-fetch-guard.ts`（装配行）+ `web-fetch-policy.ts`（纯分类），
+**没有改任何内核文件**，机制全是内核的两个缝：
+
+| 缝 | 挡什么 | 挡不了什么 |
+|---|---|---|
+| `ctx.tools.guard` | 参数里的字面量，理由回给模型 | 要 DNS 才知道的（同步、看不见解析结果） |
+| `openlux-http` 把 `HttpFetchProvider` 当传输层 | 连接前 `dns.lookup({all:true})`，任一答案落在私网段就 `WEB_BLOCKED_URL` | **DNS rebinding 本身**（见下） |
+
+**上游那一行不再挂了。** 原来 `web-fetch-http` 和我们的包装并存、靠 `web.fetchProvider` 钉住，
+说法是「掉钉就是 `WEB_PROVIDER_AMBIGUOUS` 不会静默退回」。自检时判这个形状本身就脆：
+注册表里留着一个未加守卫的提供方，靠一行配置不选它。现在唯一挂的 fetch 提供方就是包装过的那个，
+零配置也只能选到它；`fetchProvider: openlux-http` 那行留着是声明，不是开关。
+**limits 也不再有第二份**——我们这行的 `Config` 直接复用上游导出的 schemastery `Config`，
+45000 只在 patch 里写一次（上一版把默认值抄进了代码，两处要人工同步）。
+`config` 整键替换，所以 `searchProvider: deepseek-official` 仍必须一起抄过来。
+
+**段表照 openclaw 抄，因为上一版是我自己拍的、窄了一大截。**
+判据来源 `openclaw/packages/net-policy/src/ip.ts:22-117`，连 `ipaddr.js` 都装成它 pin 的
+2.4.0。上一版漏掉的：CGNAT `100.64/10`、`multicast`、`broadcast`、`reserved`（含 240/4、
+192.0.2/24、203.0.113/24）、IPv6 的 `multicast` / `discard`(100::/64) / `benchmarking` /
+`orchid2` / `fec0::/10`，以及**整张嵌入 IPv4 表**——NAT64 `64:ff9b::/96`、6to4 `2002::/16`、
+Teredo `2001:0::/32`、ISATAP `::5efe:`。最后这批是真缺口：`http://[64:ff9b::7f00:1]/` 与
+`http://[2001:4860:1::5efe:7f00:1]/` 都能通过 URL 解析进来，上一版**放行**，本机有对应网关就等于回环。
+
+**`fc00::/8` 与 `198.18/15` 只在 DNS 答案里容忍，字面量照拒。** 这条是自检时被真机打出来的：
+补齐段表后 `https://example.com/` 当场挂掉，因为**本机 `example.com` 解析到 `198.18.0.76`**——
+这台开发机在 fake-ip 代理下，`github.com`、`api.openlux.ai`、连不存在的 `.invalid` 域名
+全都回 `198.18.0.x`，真实连接由代理按域名转发。国内用户这个配置很常见，照「更严」提交就是
+把整个公网挡死。openclaw 撞过同一面墙（`allowRfc2544BenchmarkRange` /
+`allowIpv6UniqueLocalRange`，issue #74351），它的旋钮按「配置里的 baseUrl 推出的可信 hostname」
+限定作用域；`web_fetch` 的目标是模型任选的，没有这种 hostname 可依，所以我们限定的是**方向**：
+占位地址只可能来自 DNS 答案，不可能是模型写在 URL 里的。IPv6 那半还比 openclaw 更窄——
+只放 `fc00::/8`（RFC 4193 未指派、fake-ip 池取自这里），真实自分配内网的 `fd00::/8` 照拒。
+
+**「挡住 rebinding」这句话上一版写过头了，改掉。** 业界判据是解析→校验→**钉 IP**
+（`undici Agent({connect:{lookup}})`），openclaw 自己就是这么做的（`src/infra/net/ssrf.ts:430`
+`createPinnedLookup` + `createPinnedDispatcher`）；不钉就留着 TOCTOU 窗口，Budibase 那个 CVE
+正是「pin 了 `http.Agent` 但 undici 用自己的 dispatcher 重新解析」。而
+`dsh-web-fetch-http/lib/index.js:226` 的 `requestOnce` 用的是**全局 `fetch`，没有 dispatcher 参数**，
+复用它当传输层就注定钉不了；它每跳 redirect 还会再 `fetch` 一次，我们只在最外层校验过。
+要钉就得自己接管传输层（redirect / 字节封顶 / 编码判定全接过来），那是另一个量级的加法。
+所以这层的定位是**缩小可达面 + 让模型当场读到理由**，不是安全边界（agent 还有 shell）。
+同源重定向上游本来就拒，公网 302 跨域到内网那条路不通。没有做 `allowPrivateNetwork` 逃生口，
+也没有做 pre-execute `ask`。
+
+真机 / 装配验过的：
+
+| 验什么 | 结果 |
+|---|---|
+| 真工具管道 | 装配里 `ctx.tools.execute({name:'web_fetch', arguments:{url}})` 打回环与 `http://2130706433/` 两发，都 `isError` 且正文是 `Blocked: … is not a public HTTP(S) target (loopback address). …` |
+| 判据真在跑 | 把期望文本临时改成一个不可能匹配的串，`verify:profile` **变红**并打出上面那句真实拒绝文本；改回后绿 |
+| 回环 HTML | 同一份装配里 `ctx.web.fetch('http://127.0.0.1:<port>/')` 抛 `WEB_BLOCKED_URL`（这页本来是 html，裸提供方会 200）。这条现在同时兼掉「pin 掉了 / 行没挂上」——那两种情形报的是 `WEB_PROVIDER_*`，不是 `WEB_BLOCKED_URL`。上一版读 `ctx.web.fetchProviderId` 那条断言删了：d.ts 里它是 `private` |
+| 公网 | 编译产物直接跑：`https://example.com/` 与 `https://www.iana.org/help/example-domains` 都 200 / html / 标题对得上（且都是经 fake-ip 解析的） |
+| 字面量 | 同一发里 8 个全拒且理由准确：`127.0.0.1`、`198.18.0.76`、`[64:ff9b::7f00:1]`、`2130706433`、`[2001:4860:1::5efe:7f00:1]`、`100.64.0.1`、`[ff02::1]`、`[fd12::1]` |
+| DNS 侧 | 注入 lookup：`['93.184.216.34','127.0.0.1']` → `WEB_BLOCKED_URL` 且消息里带那张回环地址；`['198.18.0.76']` → 放行；`['64:ff9b::a9fe:a9fe']` → 拒 |
+| 分类器 | vitest 24 条，段表逐段、嵌入 IPv4 五种形式、fake-ip 双向、fail-closed、公网放行 |
+
+一条**被 WHATWG 自己吃掉**的攻击面，顺手记下免得再写一遍死代码：`new URL()` 会把
+legacy IPv4 折成点分十进制（`0x7f.0.0.1`、`2130706433`、`017700000001`、`127.1` 全部
+`-> 127.0.0.1`，`8.8.2056 -> 8.8.8.8`），`999.1.1.1` 直接 `ERR_INVALID_URL`。所以「非规范字面量」
+那条分支在真实路径上永远不触发（上一版单测直接调纯函数才命中，给了假信心）；它留着只为
+resolver 答案和导出函数的直接调用者，而 URL 侧的正面判据是 `http://2130706433/` 被当作
+`loopback address` 拒掉。
+
+**二、工具名单按角色收窄（下一项；这条我上一轮判错了，代价小得多）。**
 上一轮我说「预设层没有 patch 语义，所以收窄工具名单要整份复制预设」——那句话只对
 「改预设自己的插件行」成立。**内核另有 `ctx.tools.restrict({allow, deny})`**：
 "Per-scope filter over global tools. Restrictions intersect and do not affect scoped
@@ -2144,14 +2482,22 @@ intended agent instead"。两处落点：
 `ROUTE_MODELS` 的键）并让 `size` 的取值跟着所选模型走。代价是工具描述变长、用户可能
 选到更慢更贵的模型，而且网关上 gemini 那几个出图模型是 503，名单得人工筛。
 
+**这条带一个必须一起设计的子项：专家团里的透传。** 成员是独立子代理，用户「用 xxx 模型画」
+这句话不会自动到成员手里——它得由主理人写进委派 prompt，成员再填进工具参数。子代理继承的
+`provider/model` 是**对话模型**，出图/出视频模型是工具的部署配置，不在 agent 路由里
+（详见上面「与『指定模型出图/出视频』的先后关系」那节，连旧壳踩过的裸模型名故障一起记在那）。
+动工时把这一跳一并画进去，别只做单会话那一档。
+
 **判据（做的时候按这个验，不按「代码写完了」验）：**
 
-- 第一条：真机让模型抓 `http://127.0.0.1:<我们自己的端口>/openlux/brand-mark.png` 要被拒，
-  错误信息说得出原因；抓公网页面不受影响；再验一个域名解析到回环的用例（本地 hosts 造）。
-  聚合 check 里加一条守卫，断言 `fetchProvider` 钉的是我们那个 id。
+- 第一条：**已验**（装配里真工具管道两发被拒 + 反向验证那条断言真在跑 + 回环
+  `WEB_BLOCKED_URL` + example.com / iana.org 200 + 八个字面量 + 注入 lookup 三种答案）。
+  唯一没验的是**在会话里让模型自己去抓一次内网**——上面全是装配与真机层的判据，没经过模型。
 - 第二条：给一个专家配 `deny: [image_generate]`，**在会话里问模型"你有哪些工具"**——
   它说不出那个名字才算成立（`ctx.tools.schemas()` 是全局视角，看不出预设/子代理的收窄，
-  这个坑已经踩过一次）。
+  这个坑已经踩过一次）。**allow 方向 2026-08-19 凌晨已在真机兑现**：`image_creator`
+  自报只有 `read`/`write`/`edit`/`skill`，并把 ImageGen / HY-Image 系列逐条标成"无对应 API"
+  （见上面「真机复验」一节）；deny 方向仍只有 `yw-team` 那轮的证据。
 - 第三条：说「用 xxx 模型画」时卡片里的 `model` 字段是那个模型；写一个不存在的名字，
   被 schema 当场拒掉而不是发一次付费请求。
 
@@ -2163,6 +2509,14 @@ intended agent instead"。两处落点：
 
 品牌、签名、更新通道、许可证附带（内核 MIT + `THIRD_PARTY_NOTICES.md` + 外壳 MIT）、
 灰度与回滚方案。
+
+**`THIRD_PARTY_NOTICES.md` 只能在目标平台生成，别在开发机上随手跑（2026-08-19 清残留时发现）。**
+`verify:notices` 是纯生成、无比对（`scripts/verify-licenses.mjs:158` 直接 `writeFileSync`），
+清单又来自当前平台**装得上**的 `optionalDependencies`。所以在 Windows 上跑一次，仓库里那份
+mac 生成的清单就会把 `@img/sharp-darwin-*` / `@koromix/koffi-darwin-*` 换成 `win32-*`——
+一条不报错的回归，而且发 mac 包时才发现。`check` 走的是不带 `--notices` 的 `verify:licenses`
+（只校验、不写），所以日常复验是安全的；加了新依赖要补清单时，手工插那一行（平台无关的包
+本来就与平台无关），整份重生成留给发布流水线。
 
 ## admin-server / admin-cloud 要改什么
 

@@ -55,6 +55,10 @@
       "types": "./lib/types/updates.d.ts",
       "default": "./lib/updates.js"
     },
+    "./web-fetch-guard": {
+      "types": "./lib/types/web-fetch-guard.d.ts",
+      "default": "./lib/web-fetch-guard.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -212,6 +216,7 @@
     "@deepseek-ai/dsh-web-fetch-http": "0.1.0-rc.6",
     "@deepseek-ai/dsh-workflow": "0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1",
+    "ipaddr.js": "2.4.0",
     "koffi": "3.1.5",
     "node-addon-require-builtin": "^0.1.4",
     "openlux-plugin-account": "workspace:^",
