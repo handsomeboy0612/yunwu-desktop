@@ -1426,8 +1426,8 @@ SendMessage 将完整结果回传给主理人**」，全文 19 处。DSH 里那�
 > 用真 launcher。这条并入本文档 967 行那个教训：**空 home 能暴露出厂层的窟窿，
 > 错 bundles 会伪造一整套不存在的产品行为。**
 
-**怎么跑的**：`DSH_HOME` 指到 live home（`%TEMP%\yw-dsh-live`，含 `.credentials.yaml`
-与用户装的 12 份 preset），`dsh --profile desktop --port 43121` 起 web 服务，浏览器驱动。
+**怎么跑的**：`DSH_HOME` 指到探针 home（`%TEMP%\yw-dsh-live`，含 `.credentials.yaml`
+与测试期间装的 12 份 preset，**不是用户桌面 home**，见下面扫描那节的更正），`dsh --profile desktop --port 43121` 起 web 服务，浏览器驱动。
 **没走 Electron 是因为 `main.ts:108` 那把 `app.requestSingleInstanceLock()`**——机器上已有
 DSH Desktop 在跑，第二实例立刻 `app.quit()`。桌面 renderer 想在普通浏览器里打开要补
 `?dsh-desktop-mode=compatibility`，少了它会被 loader 拒成
@@ -1485,16 +1485,27 @@ Node 的 `zstdDecompressSync` 只吃第一帧、流式解到第二帧报 `Unknow
 
 #### 14 份 preset 全量静态扫描（2026-08-19）：三个改变结论的发现
 
-出厂 2 份（`config/agent-presets/`）+ 真机 live home 装的 12 份，逐份解析 YAML、
-按成员取 `toolFilter`、全文数死工具名 / 死模型名 / 品牌词：
+出厂 2 份（`config/agent-presets/`）+ 探针 home 里的 12 份，逐份解析 YAML、
+按成员取 `toolFilter`、全文数死工具名 / 死模型名 / 品牌词。
+
+> **这 12 份的来处要说准，别当成用户的真实状态**（我一开始写成了"用户本地装的"）：
+> 它们在 `%TEMP%\yw-dsh-live\.agent-presets`，创建时间集中在 8/17–8/18，是**这两天测试
+> 期间装/造的**——10 份来自专家市场（`ad-creative-strategist`、`career-navigator`、
+> `computer-operations-advisor`、`douyin-strategist`、`exam-preparation-planner`、
+> `hr-digital-expert`、`market-probe-team`、`marketing-growth-team`、
+> `tencent-cloud-quote-assistant`、`thesis-writing-mentor`），2 份是探针自造
+> （`yw-finance`、`yw-team`）。**真机桌面 home（`C:\Users\000\.dsh\.agent-presets`）里只有
+> `kumo-team` / `kumo-test` 两份 8/17 的早期残留，一个正式专家都没装。**
+> 扫描结论本身不受影响（扫的是 YAML 文本，市场那 10 份正是要发给用户的东西），
+> 但凡是"用户当前装了什么"的判断都得回这个目录数，别拿探针 home 顶替。
 
 | preset | 形状 | 成员的工具面 | 死名字 |
 |---|---|---|---|
 | `ai-content-creator-team`（出厂） | 团 · 6 成员 | 六个都是 `allow=[skill,read,write,edit]` | ImageGen×13 ImageEdit×9 SendMessage×25 `deliver_attachments`×13 YT-VITA×16 `subagent_type`×7 `uploadAndGetVid`×2 `Agent 工具`×2；模型名 HY-Image×25 HY-Video×18 YT-Video×28（含小写变体）；WorkBuddy×14 |
-| `market-probe-team`（live home） | 团 · 6 成员 | 同上 | **与上面逐项相同** |
-| `marketing-growth-team`（live home） | 团 · 4 成员 | 四个都是**无 `toolFilter`** | 干净 |
+| `market-probe-team`（探针 home） | 团 · 6 成员 | 同上 | **与上面逐项相同** |
+| `marketing-growth-team`（探针 home） | 团 · 4 成员 | 四个都是**无 `toolFilter`** | 干净 |
 | `content-creator`（出厂）+ 9 份单专家 | 单专家 | 无收窄 | 干净 |
-| `tencent-cloud-quote-assistant`（live home） | 单专家 | 无收窄 | WorkBuddy×2 |
+| `tencent-cloud-quote-assistant`（探针 home） | 单专家 | 无收窄 | WorkBuddy×2 |
 | `yw-team` / `yw-finance`（探针） | 团 2 成员 / 单专家 | `allow=[skill]` 与 `deny=[pwsh,write,edit]` | 干净 |
 
 **一、`ai-content-creator-team` 与 `market-probe-team` 是同一份东西**（都 72500 字符、
