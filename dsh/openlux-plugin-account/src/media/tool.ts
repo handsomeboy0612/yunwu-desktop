@@ -30,16 +30,18 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ConsoleAccess } from '../market/console.ts'
+import { imageArtifactPath, writeImageArtifact } from './artifact.ts'
+import { describeImage, imageBlocks, imagesOf, TOOL_IMAGE_PROPERTIES, type ToolImage } from './card.ts'
+import { assertImageModel, readImageCatalog } from './catalog.ts'
 import { generateImages, ImageGenerationError, size } from './images.ts'
-import { IMAGE_TOOL_NAME } from './name.ts'
+import { IMAGE_SHOW_TOOL_NAME, IMAGE_TOOL_NAME } from './name.ts'
 
 export { IMAGE_TOOL_NAME } from './name.ts'
 
 /**
- * The model this tool draws with unless the composition names another.
+ * The model this tool draws with when nobody named one.
  *
  * Chosen from what the route actually serves through `/v1/images/generations`,
  * not from what the catalog lists: asking for `gemini-2.5-flash-image-preview`
@@ -49,40 +51,47 @@ export { IMAGE_TOOL_NAME } from './name.ts'
  * ~900 KB JPEG, renders Chinese text legibly, and is the cheapest of the
  * current-generation options on this route.
  *
- * The model never chooses this: availability is a deployment fact it cannot
- * see, and a hallucinated model name is a refused request the user pays for in
- * latency.
+ * A caller may name another one, and the reason it is allowed to is that the
+ * alternative turned out to be worse: this key's catalogue carried 22 servable
+ * image models on 2026-08-19, and a request for any of the other 21 used to be
+ * answered by drawing with this one and logging a warning nobody reads. Naming
+ * a model that is not servable is now refused with the list of ones that are
+ * (see `media/catalog.ts`), which costs no upstream round trip.
  */
 export const DEFAULT_IMAGE_MODEL = 'doubao-seedream-4-0-250828'
 
 /**
- * What each servable model accepts.
+ * The sizes this tool offers, for every model.
  *
- * Read off the gateway's own model table (`new-yunwu-api`,
- * `web/src/data/modelParams.js`), the same data its Lab UI offers — the route
- * is what refuses us, so its notion of a valid size outranks the vendor's docs.
+ * A size the upstream does not recognise is not refused, it *hangs*:
+ * `size: '123x456'` returned nothing for a full 180-second budget while a
+ * standard value answered in about 15 seconds. The gateway cannot save us from
+ * that — `relay/valid_request.go` validates only `n`, and reads `size` straight
+ * through with no enum and no binding — so the guard has to be here.
  *
- * A size outside the set is not refused, it *hangs*: `size: '123x456'` returned
- * nothing for a full 180-second budget while a listed value answered in ~15s.
- * So the set ships as an `enum` the model cannot step outside, and the tool
- * offers no size at all rather than a free-text field that can cost three
- * minutes. A deployment adopting a newer model adds its row here, because the
- * model and its sizes are one fact and a model without them is that same trap.
+ * These three are the openclaw-era plugin's `IMAGE_SIZE_BY_ORIENTATION`, and
+ * they are offered to every model rather than per model because that is what
+ * measured true: on 2026-08-19 all three answered HTTP 200 on Seedream 4.0
+ * (10.3–10.5s) and on `gpt-image-2` (22.7s), and `1024x1024` also answered on
+ * `qwen-image-max` (13.6s, a `dall-e-3`-typed model) and on the newer
+ * `doubao-seedream-5-0-260128` (29.9s). Seedream's own parameter table lists
+ * `1K`/`2K`/`4K` and 2048-wide pairs instead, so the earlier per-model
+ * enumeration read off that table refused values the route in fact serves.
+ *
+ * Three is also the whole vocabulary worth having: a longer list reads as a
+ * promise of precision this tool does not keep, since the shape is all any
+ * caller downstream distinguishes.
  */
-const ROUTE_MODELS: Record<string, { readonly sizes: readonly string[]; readonly maxImages: number }> = {
-  'doubao-seedream-4-0-250828': {
-    sizes: ['1K', '2K', '4K', '2048x2048', '2848x1600', '1600x2848', '2304x1728', '1728x2304'],
-    maxImages: 4,
-  },
-  'doubao-seedream-4-5-251128': {
-    sizes: ['2K', '4K', '2048x2048', '2848x1600', '1600x2848', '2304x1728', '1728x2304'],
-    maxImages: 4,
-  },
-  'doubao-seedream-3-0-t2i-250415': {
-    sizes: ['2K', '4K', '2048x2048', '2848x1600', '1600x2848', '2304x1728', '1728x2304', '2496x1664', '1664x2496'],
-    maxImages: 4,
-  },
-}
+const IMAGE_SIZES = ['1024x1024', '1536x1024', '1024x1536'] as const
+
+/**
+ * Images per call, matching what the replaced kernel slot allowed.
+ *
+ * `n` above a model's own cap comes back as a legible refusal from the gateway
+ * (it is the one image field that *is* validated, because `n` multiplies the
+ * bill), so this bound only keeps an obvious mistake from becoming a request.
+ */
+const IMAGE_MAX_COUNT = 4
 
 /**
  * Cooperative budget for one call: above the sum of what the request layer can
@@ -95,7 +104,8 @@ const TOOL_TIMEOUT_MS = 250_000
 const description = 'Generate one or more images from a text prompt and show them to the user in this conversation. '
   + 'Write the prompt as a single vivid description of the desired result: subject, composition, style, colours, and any text to render. '
   + 'The result you receive is text only — the images themselves are displayed to the user, and you cannot see them, '
-  + 'so do not describe their content as if you had. Each image is returned with a durable attachment id you can quote when referring to it later.'
+  + 'so do not describe their content as if you had. Each image is also saved as a file, and the result gives you its path: '
+  + `quote that path when someone else has to reach the picture, because ${IMAGE_SHOW_TOOL_NAME} takes it.`
 
 /** What the tool reads out of its own composition. */
 export interface ImageToolOptions {
@@ -122,15 +132,11 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
     ctx.logger.debug('openlux: no tool runtime or attachment store in this composition; the image tool stays unregistered')
     return
   }
-  // A configured model with no row above would ship a size the route cannot
-  // serve, so it is declined here rather than half-supported at call time.
-  const configured = options.model ?? DEFAULT_IMAGE_MODEL
-  const known = ROUTE_MODELS[configured] !== undefined
-  if (!known) {
-    ctx.logger.warn(`openlux: image model "${configured}" has no known size set; drawing with ${DEFAULT_IMAGE_MODEL} instead`)
-  }
-  const model = known ? configured : DEFAULT_IMAGE_MODEL
-  const route = ROUTE_MODELS[model] ?? ROUTE_MODELS[DEFAULT_IMAGE_MODEL]!
+  // What a call that names no model draws with. It is not checked against a
+  // table here: which models are servable belongs to the route's channel pool
+  // at call time, so that check moved to `media/catalog.ts` where it can be
+  // answered with today's answer instead of this build's.
+  const fallbackModel = options.model ?? DEFAULT_IMAGE_MODEL
 
   ctx.effect(() => tools.register(defineTool({
     name: IMAGE_TOOL_NAME,
@@ -152,15 +158,24 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
         // registry's own validation refuses an over-count and tells the model
         // what it may ask for. Numeric specs carry `enum`/`const` and no
         // range keywords, so the allowed counts are listed.
-        enum: Array.from({ length: route.maxImages }, (_, index) => index + 1),
-        description: `How many images to generate, 1 to ${String(route.maxImages)}. Defaults to 1; each one is billed separately.`,
+        enum: Array.from({ length: IMAGE_MAX_COUNT }, (_, index) => index + 1),
+        description: `How many images to generate, 1 to ${String(IMAGE_MAX_COUNT)}. Defaults to 1; each one is billed separately.`,
       },
       size: {
         type: 'string',
-        enum: route.sizes,
-        description: 'Optional output size. "1K"/"2K"/"4K" keep the square default at that resolution, '
-          + 'and a pixel pair picks an aspect ratio (e.g. "2848x1600" for 16:9, "1600x2848" for 9:16). '
-          + 'Omit it unless the user asked for a shape or a resolution.',
+        enum: IMAGE_SIZES,
+        description: 'Optional shape: square, landscape, or portrait respectively. '
+          + 'Omit it unless the user asked for a shape, in which case pick the matching one.',
+      },
+      model: {
+        type: 'string',
+        // Deliberately free text rather than an enum: the servable set belongs
+        // to the route and changes without a release here, so an enum would be
+        // a list that goes stale in both directions. An unservable name is
+        // refused by name at call time with the list of servable ones.
+        description: 'Optional. Only set this when the user named a specific image model — pass their name through verbatim. '
+          + `Leave it out otherwise and a route-verified default (${DEFAULT_IMAGE_MODEL}) is used; `
+          + 'do not guess at model names, because a name this account cannot serve is refused rather than substituted.',
       },
     },
     output: {
@@ -175,17 +190,16 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
             items: {
               type: 'object',
               additionalProperties: false,
-              properties: {
-                attachmentId: { type: 'string', required: true },
-                mediaType: { type: 'string', required: true },
-                bytes: { type: 'integer', required: true },
-                width: { type: 'integer', required: true },
-                height: { type: 'integer', required: true },
-                revisedPrompt: { type: 'string' },
-              },
+              properties: { ...TOOL_IMAGE_PROPERTIES },
             },
           },
           failures: { type: 'array', items: { type: 'string' } },
+          // Whether this call ran inside a delegated child. It belongs to the
+          // value rather than being read where the text is built, because
+          // `render` receives the arguments and the value and nothing else —
+          // there is no execution context at that point, and the answer is a
+          // fact about the execution.
+          delegated: { type: 'boolean' },
         },
       },
       render: (_args, value) => [{ type: 'text', text: renderText(value as ToolValue) }],
@@ -198,6 +212,17 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
     },
     async execute(args, exec) {
       const count = args.n ?? 1
+      // A named model is checked against the live catalogue before the request:
+      // the refusal is immediate and says what this account can draw with,
+      // where the previous behaviour — draw with the default and log a warning
+      // — spent the user's money on a picture in a style they did not choose
+      // and told nobody. The default itself is not re-checked, because the
+      // deployment verified it and a catalogue read is a round trip.
+      const named = typeof args.model === 'string' ? args.model.trim() : ''
+      const model = named === '' ? fallbackModel : named
+      if (named !== '' && named !== fallbackModel) {
+        assertImageModel(await readImageCatalog(ctx, options.access, exec.signal), named)
+      }
       const outcome = await generateImages(ctx, options.access, {
         model,
         prompt: args.prompt,
@@ -215,6 +240,15 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
             mediaType: image.mediaType,
             name: fileName(args.prompt, index, image.mediaType),
           })
+          const path = imageArtifactPath(args.prompt, String(ref.attachmentId), ref.mediaType)
+          // Best-effort, and after the commit rather than instead of it: the
+          // card is what shows this picture, so a machine that cannot take the
+          // file copy loses the path this result would have quoted, not the
+          // image. Reported as a per-image note for the same reason a refused
+          // save is — silence would leave the model quoting a path that is not
+          // there.
+          const written = await writeArtifact(ctx, path, image.data)
+          if (!written) failures.push(`第 ${String(index + 1)} 张已展示，但文件副本没写成，这一张没有可转述的路径。`)
           saved.push({
             attachmentId: String(ref.attachmentId),
             mediaType: ref.mediaType,
@@ -222,6 +256,7 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
             width: ref.width,
             height: ref.height,
             ...image.revisedPrompt === undefined ? {} : { revisedPrompt: image.revisedPrompt },
+            ...written ? { path } : {},
           })
         } catch (error: unknown) {
           // The bytes arrived and were paid for; a store that refuses them is
@@ -234,15 +269,19 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
       if (saved.length === 0) {
         throw new ImageGenerationError(`图片已生成但无法保存到本机附件库。\n${failures.join('\n')}`)
       }
-      return { model, images: saved, ...failures.length === 0 ? {} : { failures } }
+      return {
+        model,
+        images: saved,
+        ...failures.length === 0 ? {} : { failures },
+        ...exec.agent?.session.header.origin === 'subagent' ? { delegated: true } : {},
+      }
     },
     presentCall: (args) => {
       const prompt = typeof (args as { prompt?: unknown }).prompt === 'string' ? (args as { prompt: string }).prompt : ''
       return { card: 'generic', title: '生成图片', rawInput: prompt }
     },
     presentResult: (_args, result) => {
-      const meta = result.meta as { images?: unknown } | undefined
-      const images = Array.isArray(meta?.images) ? meta.images as readonly ToolImage[] : []
+      const images = imagesOf(result.meta)
       // No metadata means a nested call under a composite transport (the
       // projection is computed for top-level calls only), where the text
       // content is the whole of what a reader gets anyway.
@@ -250,20 +289,10 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
       return {
         card: 'generic',
         title: `已生成 ${String(images.length)} 张图片`,
-        content: images.map(image => ({ type: 'image', attachment: toRef(image) })),
+        content: imageBlocks(images),
       }
     },
   })), 'openlux: image tool')
-}
-
-/** One saved image, as the canonical value and the log's metadata carry it. */
-interface ToolImage {
-  readonly attachmentId: string
-  readonly mediaType: string
-  readonly bytes: number
-  readonly width: number
-  readonly height: number
-  readonly revisedPrompt?: string
 }
 
 /** The tool's canonical value. */
@@ -271,43 +300,53 @@ interface ToolValue {
   readonly model: string
   readonly images: readonly ToolImage[]
   readonly failures?: readonly string[]
+  readonly delegated?: boolean
 }
 
 /**
- * Rebuild a durable reference from the log's own copy of it.
- *
- * The metadata is plain JSON by the time it comes back, so the branded id is
- * re-asserted here rather than carried; the reference is only ever handed to a
- * reader that verifies the bytes it names.
- * @param image - one metadata entry.
- * @returns the attachment reference.
+ * Write one image's file copy, reporting rather than raising a failure.
+ * @param ctx - host context, for the log line a swallowed error owes.
+ * @param path - destination.
+ * @param data - the encoded image.
+ * @returns whether the file is there.
  */
-function toRef(image: ToolImage): ImageAttachmentRef {
-  return {
-    attachmentId: image.attachmentId,
-    mediaType: image.mediaType,
-    bytes: image.bytes,
-    width: image.width,
-    height: image.height,
-  } as ImageAttachmentRef
+async function writeArtifact(ctx: Context, path: string, data: Uint8Array): Promise<boolean> {
+  try {
+    await writeImageArtifact(path, data)
+    return true
+  } catch (error: unknown) {
+    ctx.logger.warn(`openlux: could not write the image file copy at ${path}`)
+    ctx.logger.warn(error)
+    return false
+  }
 }
 
 /**
  * The model-facing text for one completed call.
  *
- * It says the images are already visible, because they are: the card carries
- * them and the model cannot. Without that line a model tends to either
+ * Two audiences, decided by where the call ran. In an ordinary conversation the
+ * text says the pictures are already visible, because they are — the card
+ * carries them and the model cannot; without that line a model tends to either
  * describe pictures it never saw or offer to send them.
+ *
+ * Inside a delegated child that same line is a lie, and it was one we shipped: a
+ * team member drew a picture, was told the user could see it, and reported so to
+ * its lead, who repeated it. Nobody saw anything — the card was in the member's
+ * own transcript, and only text crosses back (`media/artifact.ts`). So a
+ * delegated call is told what is actually true and what to do about it.
  * @param value - the canonical value.
  * @returns the content text.
  */
 function renderText(value: ToolValue): string {
-  const lines = value.images.map((image, index) =>
-    `${String(index + 1)}. ${String(image.width)}×${String(image.height)} ${image.mediaType}`
-    + `，附件 ${image.attachmentId}`
-    + `${image.revisedPrompt === undefined ? '' : `（模型改写的提示词：${image.revisedPrompt}）`}`)
-  const head = `已用 ${value.model} 生成 ${String(value.images.length)} 张图片，已直接展示在对话中，用户可以看到；`
-    + '你自己看不到图片内容，不要描述或评价它。'
+  const lines = value.images.map((image, index) => describeImage(image, index))
+  const count = String(value.images.length)
+  const head = value.delegated === true
+    ? `已用 ${value.model} 生成 ${count} 张图片。`
+      + '**你是被派活的成员，这些图只出现在你自己这条会话里，用户和主理人都看不到。**'
+      + `把上面每一行的文件路径原样写进你的汇报，并请主理人用 ${IMAGE_SHOW_TOOL_NAME} 展示给用户；`
+      + '路径写漏了这些图就等于没出。你自己也看不到图片内容，不要描述或评价它。'
+    : `已用 ${value.model} 生成 ${count} 张图片，已直接展示在对话中，用户可以看到；`
+      + '你自己看不到图片内容，不要描述或评价它。'
   const tail = value.failures === undefined || value.failures.length === 0
     ? []
     : ['未能取回的部分：', ...value.failures]

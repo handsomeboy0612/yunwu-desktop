@@ -27,7 +27,7 @@ import { ImageToolCard, type ImageCardInjected } from './ImageToolCard.tsx'
 import { en, zh, type AccountKey } from './locales.ts'
 import { en as marketEn, zh as marketZh, type MarketKey } from './market-locales.ts'
 import { en as mediaEn, zh as mediaZh, type MediaKey } from './media-locales.ts'
-import { IMAGE_TOOL_NAME } from '../media/name.ts'
+import { IMAGE_SHOW_TOOL_NAME, IMAGE_TOOL_NAME } from '../media/name.ts'
 import { MARKET_SECTION_ID, MARKET_SECTION_ORDER, MarketSection } from './MarketSection.tsx'
 import type { MarketSectionInjected } from './MarketSection.tsx'
 import { SIGN_IN_ORDER, SIGN_IN_STEP_ID, SignInStep } from './SignInStep.tsx'
@@ -134,7 +134,18 @@ export function apply(ctx: ClientContext): void {
     name: 'tool.call.toolview',
     key: IMAGE_TOOL_NAME,
     locale: MEDIA_NS,
-    inject: (): ImageCardInjected => ({ load: images.load }),
+    inject: (): ImageCardInjected => ({ load: images.load, kind: 'generate' }),
+  }, ImageToolCard))
+
+  // The second name gets the same row: a shown picture and a generated one are
+  // the same thing to a reader, and the slot is keyed by wire tool name, so
+  // without this registration `image_show` would fall back to the generic row
+  // and print its attachment references as JSON.
+  ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
+    name: 'tool.call.toolview',
+    key: IMAGE_SHOW_TOOL_NAME,
+    locale: MEDIA_NS,
+    inject: (): ImageCardInjected => ({ load: images.load, kind: 'show' }),
   }, ImageToolCard))
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({

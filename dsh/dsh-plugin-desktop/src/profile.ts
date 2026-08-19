@@ -201,7 +201,16 @@ function shippedPresetRoot(): string {
   return join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'config', 'agent-presets')
 }
 
-/** OpenLux-authored experts live beside this package, not inside the CLI install. */
+/**
+ * A scratch root beside this package, empty in every shipped build.
+ *
+ * Experts arrive from the market and land in the home root, which is the shape
+ * WorkBuddy has: its installer carries builtin *skills* and the three welcome
+ * modes, and not one marketplace expert (`D:\workbuddy\resources\app.asar`,
+ * `resources\plugins\workbuddy-builtin\`). The root stays registered because the
+ * generator still writes here when a human runs it, and a missing directory is
+ * not an error — `dsh-agent-presets` answers ENOENT with no rows.
+ */
 function openluxPresetRoot(): string {
   return fileURLToPath(new URL('../config/agent-presets', import.meta.url))
 }

@@ -181,6 +181,7 @@ describe('published package surface', () => {
       'build/app-icon-mac.png',
       'build/openlux-mark.png',
       'build/tray-icon*.png',
+      'config/agent-presets/**',
       'docs/**',
     ]))
     expect(manifest.build?.files).toEqual([
@@ -191,6 +192,13 @@ describe('published package surface', () => {
       // and nothing anywhere else.
       'build/openlux-mark.png',
       'build/tray-icon*.png',
+      // Matches nothing today: experts ship from the market, not in the box, so
+      // `<package>/config/agent-presets` is empty (`profile.ts:openluxPresetRoot`
+      // says why the root stays registered anyway). The entry stays because both
+      // file lists are whitelists — putting a preset back in the box would
+      // otherwise leave it in the checkout and in no installed build, and that
+      // failure is invisible: the picker just shows fewer rows.
+      'config/agent-presets/**',
       'cordis.patch.yml',
       'lib/**',
       'package.json',

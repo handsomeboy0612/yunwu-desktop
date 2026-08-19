@@ -37,6 +37,14 @@ export interface ImageCardInjected {
    * render would refetch the same bytes forever.
    */
   readonly load: ImageLoader
+  /**
+   * Which of the two tools this registration draws.
+   *
+   * The row is the same row — the same gallery over the same projection — so the
+   * two differ only in their titles and in where a summary comes from. Passed in
+   * rather than read off the block, because the slot key already decided it.
+   */
+  readonly kind: 'generate' | 'show'
 }
 
 /** Full props of the image row. */
@@ -72,9 +80,9 @@ const styles = {
  * @param props - the slot payload, the bound loader, and this card's copy.
  * @returns the row.
  */
-export function ImageToolCard({ block, load, t }: ImageToolCardProps) {
+export function ImageToolCard({ block, load, kind, t }: ImageToolCardProps) {
   const settled = settledOf(block)
-  const prompt = promptOf(block)
+  const prompt = summaryOf(block)
   const images = useMemo(() => imagesOf(settled), [settled])
   const labels = useMemo<MessageImageLabels>(() => ({
     image: t('image.label'),
@@ -91,13 +99,18 @@ export function ImageToolCard({ block, load, t }: ImageToolCardProps) {
   // presentation projection is computed for top-level calls only, so the row
   // shows the text the model got instead of an empty card.
   const bare = settled !== undefined && !failed && images.length === 0
+  const idle = kind === 'show' ? t('show.title') : t('call.title')
   const title = settled === undefined
-    ? t('call.title')
+    ? idle
     : failed
-      ? t('result.failed')
-      : bare ? t('call.title') : t('result.title', { count: images.length })
+      ? kind === 'show' ? t('show.failed') : t('result.failed')
+      : bare
+        ? idle
+        : kind === 'show'
+          ? t('show.result', { count: images.length })
+          : t('result.title', { count: images.length })
   const summary = settled === undefined
-    ? (prompt === '' ? t('call.pending') : prompt)
+    ? (prompt === '' ? (kind === 'show' ? t('show.pending') : t('call.pending')) : prompt)
     : failed ? firstLine(resultText) : prompt
 
   return (
@@ -146,16 +159,23 @@ function imagesOf(settled: ToolResultNode | undefined): readonly { attachment: I
 }
 
 /**
- * Read the prompt this call was made with.
+ * What this call is about, in one line: the prompt it draws, or the files it
+ * shows.
+ *
+ * Both are read from the same place because both tools put their subject in
+ * their arguments, and the row does not need to know which tool it is to find
+ * it.
  * @param block - the running or settled call.
- * @returns the prompt, or an empty string when the arguments are unreadable.
+ * @returns the summary, or an empty string when the arguments are unreadable.
  */
-function promptOf(block: ToolCallBlock): string {
+function summaryOf(block: ToolCallBlock): string {
   const raw = 'kind' in block ? block.call?.argsRaw : block.argsRaw
   if (raw === undefined || raw === null || raw === '') return ''
   try {
-    const args = JSON.parse(raw) as { prompt?: unknown }
-    return typeof args.prompt === 'string' ? args.prompt : ''
+    const args = JSON.parse(raw) as { prompt?: unknown; paths?: unknown }
+    if (typeof args.prompt === 'string') return args.prompt
+    if (Array.isArray(args.paths)) return args.paths.filter(path => typeof path === 'string').join(' · ')
+    return ''
   } catch {
     // A truncated argument stream is normal mid-call; the row simply has no
     // summary to show yet.

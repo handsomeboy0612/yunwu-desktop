@@ -1,7 +1,13 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "rootDir": ".",
+    // The workspace, not this package: `tests/market-compose.spec.ts` checks
+    // that this package's generated presets agree with the composer that
+    // `openlux-plugin-account` installs, so it imports that source directly —
+    // the same way `scripts/materialize-expert.mjs` does, and for the same
+    // reason (neither should need the plugin built first). Nothing is emitted
+    // here, so a wider root only affects which files tsc will accept.
+    "rootDir": "..",
     "noEmit": true,
     "emitDeclarationOnly": false
   },

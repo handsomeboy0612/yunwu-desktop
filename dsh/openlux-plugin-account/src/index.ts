@@ -40,9 +40,11 @@ import { readExpertManifest, type ConsoleAccess } from './market/console.ts'
 import { installPreset, readInstallTarget, type InstallOutcome, type InstallRequest, type InstallTarget } from './market/install.ts'
 import { IMAGE_READ_ENDPOINT } from './media/name.ts'
 import { imageRefOf, readImageBytes } from './media/read.ts'
+import { registerImageShowTool } from './media/show-tool.ts'
 import { registerImageTool } from './media/tool.ts'
 import { registerVideoTool } from './media/video-tool.ts'
 import { syncModels } from './models/sync.ts'
+import { registerToolReality } from './persona/tool-reality.ts'
 
 /**
  * Logical channel owned by this plugin. The browser addresses it as
@@ -63,15 +65,15 @@ export interface Config {
   /** Console origin the account endpoints live on. */
   readonly baseUrl?: string
   /**
-   * Model the image tool draws with. Omit for the route-verified default; a
-   * deployment that prefers another one names it here rather than letting the
-   * model guess (see `media/tool.ts`).
+   * Model the image tool draws with when a call names none. Omit for the
+   * route-verified default (see `media/tool.ts`). A call may name another one;
+   * a name this account cannot serve is refused rather than substituted, which
+   * is what `media/catalog.ts` is for.
    */
   readonly imageModel?: string
   /**
-   * Model the video tool films with. Same rule as the image one: a deployment
-   * names it here rather than letting the model guess at which vendors this
-   * route has channels for (see `media/video-tool.ts`).
+   * Model the video tool films with when a call names none. Same rule as the
+   * image one (see `media/video-tool.ts`).
    */
   readonly videoModel?: string
 }
@@ -155,6 +157,17 @@ export function apply(ctx: Context, config: Config = {}): void {
     access,
     ...config.videoModel === undefined ? {} : { model: config.videoModel },
   })
+  // Reaches no route and spends nothing: it shows a picture this machine already
+  // has, which is how a delegated member's image gets back to the user at all
+  // (`media/show-tool.ts`).
+  registerImageShowTool(ctx)
+
+  // The sentence about those tools belongs next to the tools themselves, and it
+  // is stated once at runtime rather than written into each persona — see
+  // `persona/tool-reality.ts` for why that is the layer. Deferred rather than
+  // declared in `inject`: an account face is still useful in a composition that
+  // assembles no system prompt, and this is the only thing here that needs one.
+  ctx.inject(['systemPrompt'], scope => registerToolReality(scope))
 }
 
 /**

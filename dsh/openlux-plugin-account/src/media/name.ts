@@ -15,6 +15,17 @@
 export const IMAGE_TOOL_NAME = 'image_generate'
 
 /**
+ * Wire name of the tool that shows a picture already on disk, and its slot key.
+ *
+ * A second name rather than a mode of the first one: a tool that generates is
+ * the wrong place for a call that must be free, instant, and repeatable. It
+ * shares the card, because what a reader sees is the same thing either way
+ * (`media/card.ts`), and it exists because a delegated member's picture can
+ * only cross back to the user as a path (`media/artifact.ts`).
+ */
+export const IMAGE_SHOW_TOOL_NAME = 'image_show'
+
+/**
  * Wire name of the video tool.
  *
  * It has no card of its own on purpose: a finished video reaches the user as a

@@ -17,6 +17,23 @@
  * every installed expert's capability set for free, and a row the kernel adds
  * or renames arrives without us tracking it.
  *
+ * ## The persona is corrected on the way in
+ *
+ * The documents in the archive were written for another product, and they name
+ * tools, models and mechanisms that do not exist here. Those corrections are not
+ * this file's business to invent — they live in `persona-rules.ts`, shared with
+ * the build script that materialises the experts we ship in the box, so an
+ * expert installed from the market is the same agent as its bundled twin rather
+ * than a second dialect of it. This file only decides *when* they run: on the
+ * lead persona, on each member persona, and — through {@link correctAssets} —
+ * on the markdown the installer writes beside them.
+ *
+ * What is deliberately NOT done here is the paragraph that outranks a persona's
+ * claims about the local tool set. That is said once at runtime, over the tool
+ * list the agent actually has (`persona/tool-reality.ts`), because a sentence
+ * written into a file at install time would still be asserting a tool inventory
+ * a later kernel has changed.
+ *
  * Three edits are applied to that text, each one an idiom taken from a shipped
  * composition rather than invented here:
  *
@@ -67,6 +84,17 @@
  */
 
 import type { ArchiveEntry } from './targz.ts'
+import type { Scrubber } from './persona-rules.ts'
+import {
+  FABRICATED_NAMES,
+  findPhantomTools,
+  neutralizeTemplates,
+  rewriteIdentity,
+  templateVarNames,
+  unknownTemplateVars,
+  withSkillDocNote,
+} from './persona-rules.ts'
+import { MEMBER_ALLOW, withTeammateRoster } from './teammate-tools.ts'
 import { ArchiveError } from './targz.ts'
 
 /** The persona document at the archive root: the expert, or a team's lead. */
@@ -156,24 +184,201 @@ function memberIdOf(path: string): string | undefined {
   return rest.endsWith('.md') && !rest.includes('/') ? rest.slice(0, -'.md'.length) : undefined
 }
 
+/** What composing needs beyond the archive itself. */
+export interface ComposeOptions {
+  /**
+   * This package's document corrections.
+   *
+   * One scrubber for the whole install, personas and assets together: its
+   * staleness report is only meaningful once every document of the package has
+   * been through it.
+   */
+  readonly rules: Scrubber
+  /**
+   * Skill slugs that will be written under `skills/`; empty leaves the skill
+   * roots exactly as the kernel shipped them.
+   */
+  readonly bundledSkills?: readonly string[]
+  /**
+   * Where to report a persona that still names a tool nothing registers.
+   *
+   * A report rather than a refusal, and that is the whole reason this is a
+   * callback: the build script treats the same finding as fatal because a human
+   * is standing there and the package set is curated, while here the user asked
+   * for this expert and the runtime paragraph already tells it those names are
+   * not real. Refusing the install would cost them the expert to fix a sentence
+   * that has already been overruled.
+   */
+  readonly warn?: (message: string) => void
+}
+
 /**
  * Build the composition for one expert.
  * @param standard - the running kernel's `standard` composition text.
  * @param content - the expert's content.
- * @param bundledSkills - skill slugs that will be written under `skills/`;
- * empty leaves the skill roots exactly as the kernel shipped them.
+ * @param options - corrections, bundled skills, and where to report findings.
  * @returns composition text to write as `agent.cordis.yml`.
  * @throws Error when the base composition is not the flat row sequence every
  * shipped composition is.
+ * @throws ArchiveError when a persona would fail to render as a prompt.
  */
 export function composeExpertPreset(
   standard: string,
   content: ExpertContent,
-  bundledSkills: readonly string[] = [],
+  options: ComposeOptions,
 ): string {
-  let text = replacePersona(standard, content.persona)
+  const { rules, bundledSkills = [], warn } = options
+  // Members first, because the lead's roster names the tools their rows
+  // register: assigning those names is what settles both.
+  const members = plannedTeammates(content.members, rules, warn)
+  const persona = correctPersona(content.persona, rules, PERSONA_ENTRY, warn)
+  let text = replacePersona(standard, members.length === 0
+    ? persona
+    : withTeammateRoster(persona, members.map(member => ({
+      toolName: member.toolName,
+      label: labelOf(member.persona, member.id),
+    }))))
   if (bundledSkills.length > 0) text = addSkillRoot(text)
-  return content.members.length === 0 ? text : appendTeammates(text, content.members)
+  if (members.length > 0) text = appendTeammates(text, members)
+  assertRenderable(text)
+  return text
+}
+
+/**
+ * Refuse a composition whose prompts the registry could not render.
+ *
+ * Not a warning like the phantom tools are: an unresolvable `{{…}}` throws
+ * inside the registry at prompt-build time, so such an agent cannot take a
+ * single turn, and a refusal names the archive instead of leaving the user with
+ * a card that greets them and then fails on everything. Checked over the whole
+ * composition rather than per persona — which is where the build path checks it
+ * too — because the base text carries rows of the kernel's own with variables in
+ * them, and a persona's stray braces have already been neutralised by then.
+ * @param composition - the finished composition text.
+ * @throws ArchiveError naming the variables and what the registry does resolve.
+ */
+function assertRenderable(composition: string): void {
+  const unknown = unknownTemplateVars(composition)
+  if (unknown.length === 0) return
+  throw new ArchiveError(
+    `组装出来的预设引用了 ${unknown.map(name => `{{${name}}}`).join('、')}，`
+    + `而提示词变量只有 ${templateVarNames().join('、')} 可用，这样的人设每一轮都会渲染失败，已中止安装。`,
+  )
+}
+
+/** A member with everything the composition needs decided. */
+interface PlannedTeammate extends ExpertMember {
+  /** The row's `id`, unique in this composition. */
+  readonly rowId: string
+  /** The model-facing delegation tool name, unique in this composition. */
+  readonly toolName: string
+}
+
+/**
+ * Correct each member's persona and claim its names.
+ *
+ * Both name sets are de-duplicated here rather than at the point of use, and the
+ * row id needs it for a reason less obvious than the tool name's: two member ids
+ * that differ only outside the id alphabet (`video.editor@v2` and
+ * `video-editor-v2`) collapse to one row id, and the loader keys entries BY id —
+ * the second row would shadow the first and that member would vanish from the
+ * team with nothing reported.
+ * @param members - members as the archive describes them, in roster order.
+ * @param rules - this package's corrections.
+ * @param warn - where to report phantom tool mandates.
+ * @returns the members, with names claimed and personas corrected.
+ */
+function plannedTeammates(
+  members: readonly ExpertMember[],
+  rules: Scrubber,
+  warn?: (message: string) => void,
+): readonly PlannedTeammate[] {
+  const toolNames = new Set<string>()
+  const rowIds = new Set<string>()
+  return members.map(member => ({
+    id: member.id,
+    persona: correctPersona(member.persona, rules, `${MEMBERS_DIR}${member.id}.md`, warn),
+    rowId: unique(`teammate-${slugify(member.id)}`, rowIds, '-'),
+    toolName: delegateToolName(member.id, toolNames),
+  }))
+}
+
+/**
+ * Who a member is, in terms the archive can supply.
+ *
+ * The manifest a package ships is the better source and it is not in the
+ * artifact, so this reads the persona's own first heading — which is where these
+ * documents put the member's name, `# 文案创作专家 - 笔澜(Penn)` being the shape.
+ * The frontmatter carries the same thing under `displayName`, but nested per
+ * language, and reading it would mean a YAML parser in the one file that gets by
+ * without one. Falling back to the id is not a degradation worth avoiding: the id
+ * is what the imported lead persona's own member table calls that member.
+ * @param persona - the member's corrected persona.
+ * @param id - the member id, used when the document has no heading.
+ * @returns a single-line label.
+ */
+function labelOf(persona: string, id: string): string {
+  const heading = /^#\s+(.+)$/m.exec(persona)
+  const text = (heading?.[1] ?? '').trim()
+  return text === '' ? id : text.slice(0, MAX_LABEL)
+}
+
+/** Cap for a roster label, so one runaway heading cannot swell every prompt. */
+const MAX_LABEL = 80
+
+/**
+ * Apply the shared corrections to one persona document.
+ *
+ * Same order as the build script, because the two have to produce the same
+ * bytes: identity first, then the package's own fixes, then brace
+ * neutralisation last — a fix's replacement text can itself contain braces.
+ * @param text - the persona as the archive carries it.
+ * @param rules - this package's corrections.
+ * @param label - the archive path, for anything reported about this document.
+ * @param warn - where to report phantom tool mandates.
+ * @returns the corrected persona.
+ */
+function correctPersona(
+  text: string,
+  rules: Scrubber,
+  label: string,
+  warn?: (message: string) => void,
+): string {
+  const corrected = neutralizeTemplates(rules.scrub(rewriteIdentity(text)))
+  if (warn !== undefined) {
+    const found = findPhantomTools(corrected, label)
+    if (found.length > 0) warn(`${label} 仍在指示调用本机没有的工具：\n${found.join('\n')}`)
+  }
+  return corrected
+}
+
+/**
+ * Correct the markdown the installer writes beside the composition.
+ *
+ * Skill documents describe the same imaginary tool set the personas did, and a
+ * teammate is allowed to read them — a scrubbed persona pointing at an
+ * unscrubbed skill document just moves the fiction one file along. Only markdown
+ * is touched, and only the documents that actually name that tool set get the
+ * note; the rest are ordinary craft references where it would be noise.
+ *
+ * Non-text members pass through untouched, which is why this maps over entries
+ * instead of rewriting them in place after the write: an image decoded as UTF-8
+ * and re-encoded would not survive.
+ * @param entries - archive members bound for the preset directory.
+ * @param rules - this package's corrections, shared with the personas.
+ * @returns the entries, corrected where they are markdown.
+ */
+export function correctAssets(
+  entries: readonly ArchiveEntry[],
+  rules: Scrubber,
+): readonly ArchiveEntry[] {
+  return entries.map((entry) => {
+    if (entry.kind !== 'file' || !entry.path.endsWith('.md')) return entry
+    const original = decode(entry)
+    const fixed = rules.scrub(original)
+    const corrected = FABRICATED_NAMES.test(original) ? withSkillDocNote(fixed) : fixed
+    return corrected === original ? entry : { ...entry, body: new TextEncoder().encode(corrected) }
+  })
 }
 
 /** Rows are located by their `id`, which is a column-0 sequence entry. */
@@ -263,24 +468,23 @@ function addSkillRoot(text: string): string {
  * therefore still spawn an unnamed child, which costs two tool schemas and
  * changes nothing the user sees; removing them would mean editing rows the
  * kernel owns for a benefit nobody asked for.
+ *
+ * Each row carries `toolFilter.allow`, and the list is shared with the build
+ * script rather than written here (`teammate-tools.ts` says which tools and
+ * why). It is a whitelist the kernel resolves against its global tool names, so
+ * both ways of getting it wrong are quiet: a name the kernel cannot resolve
+ * fails the delegation, and a name left off takes that tool away from the member
+ * with nothing said — which is exactly how a drawing role came back describing a
+ * picture it had not made.
  */
-function appendTeammates(text: string, members: readonly ExpertMember[]): string {
-  const taken = new Set<string>()
-  // Row ids need de-duplicating for the same reason tool names do, and it is
-  // less obvious: two member ids that differ only outside the id alphabet
-  // (`video.editor@v2` and `video-editor-v2`) collapse to one row id, and the
-  // loader keys entries BY id — the second row would shadow the first and that
-  // member would vanish from the team with nothing reported. Caught by the
-  // composer probe, which is why it asserts on ids and not only on tool names.
-  const rowIds = new Set<string>()
+function appendTeammates(text: string, members: readonly PlannedTeammate[]): string {
   const rows = members.map((member) => {
-    const rowId = unique(`teammate-${slugify(member.id)}`, rowIds, '-')
     return [
-      `- id: ${rowId}`,
+      `- id: ${member.rowId}`,
       `  name: '@deepseek-ai/dsh-tool-subagent'`,
       '  config:',
       '    provider: spawn',
-      `    toolName: ${delegateToolName(member.id, taken)}`,
+      `    toolName: ${member.toolName}`,
       // One-shot and foreground: the leader asked for this member's answer and
       // continues from it. `maxDepth: 1` stops a member from re-delegating,
       // which the spawn provider can enforce (it declares `depthLimit`).
@@ -288,6 +492,9 @@ function appendTeammates(text: string, members: readonly ExpertMember[]): string
       '    enableRunInBackground: false',
       '    maxDepth: 1',
       `    persona: ${blockScalar(member.persona, 6)}`,
+      '    toolFilter:',
+      '      allow:',
+      ...MEMBER_ALLOW.map(name => `        - ${name}`),
     ].join('\n')
   })
   const header = [
@@ -312,12 +519,20 @@ function appendTeammates(text: string, members: readonly ExpertMember[]): string
  * that session rather than just that delegation. Sanitising, capping, and
  * de-duplicating here is what keeps a member id we did not choose from
  * reaching that check.
+ *
+ * A hyphen becomes an underscore even though the wire would accept it, and that
+ * is not cosmetic: `market/persona-rules.ts` rewrites a persona's own dispatch
+ * mandates into tool names with the same substitution, and the build path names
+ * its rows that way. Keeping `video-editor` as it stands would register
+ * `delegate_video-editor` beside a persona telling the lead to call
+ * `delegate_video_editor` — a team whose every delegation fails on a tool that
+ * is not there. Caught by the two-path test, not by reading either side alone.
  * @param memberId - the member id from the archive.
  * @param taken - names already used in this composition; added to.
  */
 function delegateToolName(memberId: string, taken: Set<string>): string {
-  const base = `delegate_${memberId}`.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 64)
-  return unique(base === '' ? 'delegate' : base, taken)
+  const base = `delegate_${memberId}`.replace(/[^a-zA-Z0-9]+/g, '_').slice(0, 64)
+  return unique(base === 'delegate_' ? 'delegate' : base, taken)
 }
 
 /**

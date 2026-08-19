@@ -32,14 +32,27 @@ export interface ArchiveLimits {
 }
 
 /**
- * Defaults sized against what we actually ship: a materialized WorkBuddy team
- * is tens of text files and well under a megabyte, so these leave two orders
- * of magnitude of headroom and still refuse anything resembling a payload.
+ * Defaults sized against the catalogue, not against what we happen to ship.
+ *
+ * The earlier numbers were set from the 22 materialized packages — tens of text
+ * files, well under a megabyte — and the real corpus is not shaped like that.
+ * Measured 2026-08-19 over all 994 published skill archives: the largest is 958
+ * entries (`jiayi-ads-analytics-expert-public`), the largest single member is
+ * 5.5 MB (`malaysia-finance-tax`), and the largest unpacked total is 15.7 MB
+ * (`sa-legal-references`) — that last one cleared the old 16 MB cap by 4%.
+ *
+ * The old caps refused four skills outright, which cost eight experts a skill
+ * each: the install succeeds, `SkillTally` reports the shortfall in a log line
+ * nobody reads, and the user gets an expert whose persona describes a skill it
+ * cannot load. So each cap is now roughly twice the observed maximum: high
+ * enough that the corpus fits with room to grow, low enough that a decompression
+ * bomb still hits a wall (unpacked bytes, the number that bounds memory, stop at
+ * 64 MB).
  */
 export const ARCHIVE_LIMITS: ArchiveLimits = {
-  maxEntries: 512,
-  maxEntryBytes: 4 * 1024 * 1024,
-  maxTotalBytes: 16 * 1024 * 1024,
+  maxEntries: 2048,
+  maxEntryBytes: 16 * 1024 * 1024,
+  maxTotalBytes: 64 * 1024 * 1024,
 }
 
 /**

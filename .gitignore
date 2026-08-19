@@ -24,3 +24,9 @@
 /.slidep/
 /scripts/pc-out.txt
 /空白幻灯片.pptx
+
+# 真机验证的一次性脚本与产物:里面有测试站令牌、生成的图片、装机扫描留下的
+# preset 目录,几十 MB 且只对当时那台机器有意义。复现方式写在
+# docs/dsh-kernel-migration.md 里,脚本本身不入库。
+.tmp-e2e/
+.tmp-probe/

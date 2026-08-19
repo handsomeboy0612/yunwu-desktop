@@ -470,7 +470,7 @@ WorkBuddy 的作用降为**判据来源**：某个交互该长什么样、某条
 
 | 条目 | 落点 | 判据 |
 |---|---|---|
-| **专家团成员的工具面被钉死成四个** `['skill','read','write','edit']`，六个成员一个出图/出片/shell 工具都看不到 | 生成器 `dsh-plugin-desktop/scripts/materialize-expert.mjs:51` 的 `MEMBER_ALLOW`；**改产物会被下次 materialize 覆盖** | 正确组装上让 `image_creator` 真出一张图 |
+| **专家团成员的工具面被钉死成四个** `['skill','read','write','edit']`，六个成员一个出图/出片/shell 工具都看不到 | `MEMBER_ALLOW`（已扩到 9 个，2026-08-19 起搬到两条路径共用的 `openlux-plugin-account/src/market/teammate-tools.ts`）；**改产物会被下次 materialize 覆盖** | 正确组装上让 `image_creator` 真出一张图 |
 | **同一个生成器还有第二条路径不写 `toolFilter`**（`marketing-growth-team` 四成员看得见全部工具，包括彼此的 `delegate_*`，能互相委派绕圈）| 同上，两条路径要收敛到"按角色给能力工具" | 成员看得见自己该用的，看不见别人的委派工具 |
 | **人设内容还是 WorkBuddy 的**：25 处 `SendMessage`、13 处 `ImageGen`、9 处 `ImageEdit`、13 处 `deliver_attachments`、16 处 `YT-VITA`、死模型名 HY-Image×25 / HY-Video×18 / YT-Video×28、品牌词 WorkBuddy×14 | 同上；具体清单见「14 份 preset 全量静态扫描」 | 成员不再建议用户"去 WorkBuddy 出图"；模型名一律删掉不换新名 |
 | `tencent-cloud-quote-assistant` 还有 2 处 WorkBuddy | 市场内容 | 全文零命中 |
@@ -524,6 +524,14 @@ WorkBuddy 的作用降为**判据来源**：某个交互该长什么样、某条
 - **连接器（MCP）装完要重启才生效。** openclaw 是 `mcp reload` 立即生效，DSH 没有对应物；
   "装完提示重启"是最省的做法，想做到即时得自己找 loader 重载入口，属于未验的活。
 - **视频内联播放**是第二步增强（`ui-media` 插件），第一步"白嫖现成产出行"已落地，不是欠账。
+  查证之后这条有了前置条件与形状（正文见「产物预览：主线在 DSH 客户端，缺的是一条文件通道」）：
+  **客户端没有通用的读本地文件字节通道**，只有图片附件那一条，所以第一件事是照 WorkBuddy 的
+  `local-file://` 协议造通道，**动手前先手挂一个 `local-file://` 的 `<video>` 验能不能播**。
+  通道通了之后视频 / 音频 / PDF 三类共用它；**Office 三件套与 drawio / excalidraw 明确不做**。
+- **异步出片显示成两段对话**（两排点赞、复制只复制一段）：查清了是 `tool-jobs` 在空闲 owner 上
+  只能 `followup` 开新轮，加上我们自己的工具描述让模型第一轮就收尾，**内核语义上两轮是对的**。
+  处置已定为「保留两轮、只治观感」，三件活见正文「出片通告开的是新一轮」那节，最便宜的一件是
+  让唤醒轮别复述上一轮已经说过的产出。
 
 ### 六、测试覆盖与跟随风险
 
@@ -1699,6 +1707,272 @@ hallucinated model name is a refused request the user pays for"*（`tool.ts:52`�
 检索按需给 `web_search`（它是真实存在的，`dsh-base/cordis.patch.yml` 里有，
 成员看不见纯粹是白名单挡的）。改完的判据仍是真机：让 `image_creator` 真出一张图。
 
+#### 22 份预设全量入库（2026-08-19 下午）：四个「静默不出现」的真错
+
+**分母先摆正。** 本机下载的 WorkBuddy 包 **22 个**（68 份人设、9 个团、46 个成员行），
+仓库此前只随包发 2 份。线上清单是 **421 位**（369 单专家 + 52 团），但当前壳装不了——
+`/api/desktop-market/*` 在已部署控制台 404，所以「随包发」是眼下唯一通路。
+22 份现已全部入库（822 文件 / 20.3 MB），并新增 `scripts/materialize-all.mjs`
+让重导入可复现（order = 20 + 下标，排在 dsh CLI 自带那四份之后）。
+
+**四个错全是同一种形态：不报错，只是东西不在。**
+
+| 错 | 表现 | 修法 |
+|---|---|---|
+| 生成器把人设当**替换串**喂给 `String.replace` | 人设里的 `$&` 把 tool-subagent 那一行拼进正文，`mvp-dev-expert-team` 整团静默消失 | 一律走替换函数（`spliceLiteral`） |
+| 产出的 YAML 不合法（`Map keys must be unique`，2269 行） | 一份不合法的 preset 就是「选单里没有这一项」，没有任何提示 | 新增 `assertParses`：YAML 解析 + 成员行计数 + 模板变量白名单，三条都不过就构建失败 |
+| 导入文本里的 `{{…}}`（JSX / Vue 片段，mvp-dev 一份里 18 处） | `renderPrompt` 严格解析、无转义、只认 `provider` / `model` / `cwd`，撞上就**每轮**抛错——只读文件的检查看不见 | `neutralizeTemplates` 中和成 `{ { … } }`，真的 `{{cwd}}` 保留 |
+| 打包清单漏了 `config/agent-presets/**`（npm `files` 与 electron-builder `build.files` **两份都没有**） | 开发机一切正常，装机版一份预设都没有 | 两份都补上，包内测试跟着断言；`npm pack` 现含 99 个预设文件 |
+
+**成员工具面：4 → 9。** `MEMBER_ALLOW` 从 `skill/read/write/edit` 扩到再加
+`image_generate`、`video_generate`、`pwsh`、`web_fetch`、`read_image`。
+给不了的那几个（`web_search` / `glob` / `grep` / `todo_write` / `ask_user_question`）
+不是漏了：它们是**预设自带、不是全局注册**，写进 `toolFilter.allow` 会被 restrict 挡掉。
+放开 `pwsh` 的代价查过：子会话实测 `approval/policy: never`（`source: delegation`）、
+沙箱 `workspace-write`，所以既不会给用户弹窗，也出不了工作区。
+
+**幽灵机制改在生成器里，不改产物。** 规则表 + 断言三件套：`FABRICATION_FIXES`（精确串，
+配套「没命中就报错」的失效检测）、`MECHANICAL_REWRITES`（正则）、`PHANTOM_TOOLS` +
+`assertNoPhantomTools`（我们自己的免责段落例外）。这一轮补的是派活与交付：
+`TeamCreate` / `AgentTool` / `name`+`subagent_type` → `delegate_<成员 ID>`（入参只有一段自然语言）；
+`deliver_attachments` → 把路径写进回复；`open_result_view` → 图片用 `image_show`；
+`memory_write` → `write` 落文件；`connect_cloud_service` 与 `mcp__…`（企查查、ima 知识库）
+→ `web_search` / `web_fetch`，并要求说清这是公开检索的结果。
+
+> **词级替换会造出读得通但仍然错的句子。** 「团队创建（本机没有这一步）必须且只能由主理人执行」
+> 仍在命令它做那一步；高考那份更露骨——换完变成「调用 `web_search` 获取凭证」。
+> 判据是：**整句只为强制那个不存在的步骤而存在时，就整句换成它本来想达到的目的**
+> （真派活、别自己替成员发言；本机没有凭证服务，这几类改走公开检索）。
+
+**工作目录那句是被我们自己盖掉的。** 生成器用导入人设整体替换默认人设，
+`你的工作目录是 {{cwd}}` 跟着没了。已补进工具真相块，真机复验主理人与成员两侧
+都渲染成绝对路径（`dsh-agent-loop` 注册 `provider`/`model`/`cwd`，子会话走同一张注册表）。
+
+**复验：22/22 逐包冒烟全过**——预设真的生效（判据是日志里的 `agent-preset/selected`，
+不是窗口文字）、工具真相块在场、`cwd` 已解析、无残留花括号、无错误事件。
+
+**派活复验：46 位成员一个不漏，全部真机跑过。** 判据取三处对不上就算失败的地方：
+父会话日志里的 `delegate_*` 调用、子会话自己的工具清单与调用记录、磁盘上的文件。
+先是 9 个团各派一位（9/9 过），再是每团一发把该团**全部**成员各派一次——
+9 个团、46 次 `delegate_<成员 ID>` 调用、46 个子会话（工具面都是 **9 个**、`pwsh` 在内、
+审批 `never` 且 `source: delegation`）、46 个文件真落在工作目录、子会话零报错。
+先前只派头一位是不够的：成员人设各自是独立文件，主理人那份干净不代表他们干净。
+
+覆盖面按层说清楚，免得含混：**13 个单专家**在逐包冒烟里各真跑过一发（它们没有派活这一环），
+**9 位主理人**冒烟 + 派活各一发，**46 位成员**如上。三层加起来正好是 68 份人设。
+
+**指定模型两发（都用非默认模型，判据是日志里的调用参数，不是模型的说法）：**
+
+| 验什么 | 结果 |
+|---|---|
+| 新装专家出图（种草草 / `xiaohongshu-operations-expert`） | 点名 `doubao-seedream-5-0-260128`（默认是 seedream-4.0），调用参数与结果 `meta.model` 都是这个名字，3200×3200 JPEG 落盘 |
+| 新装团出片（袋鼠帝宣传片创作团队 / `promo-creator-team`） | 点名 `veo_3_1`（默认是 `veo_3_1-fast`），提交参数 `{"model":"veo_3_1","duration":6,"aspect_ratio":"16:9"}`，约 2 分钟出片、11.7 MB mp4 |
+| 改动最大的那个团整条回路（内容创作专家团） | 主理人只派珀西、把点名的 `qwen-image-max` 原样写进任务描述 → 珀西填进 `model` 一次成功并汇报路径 → 主理人调 `image_show` 把图摆进父会话，并如实解释「我不摆你就看不到」 |
+
+**审计收口：假的不只是名字，还有能力清单。** 拿 473 条线上模型当判据扫完 22 份，
+`ai-content-creator-team` 一份里就有 23 处指向本机调不到的腾讯系模型；但真正危险的不是名字，
+是**围着这些名字长出来的承诺**——「文生 3D / 图生 3D / 图片特效 / 视频内容理解」四项能力清单、
+一棵每片叶子都是死模型的选型决策树、一条「A 模型失败换 B 模型」的兜底链，
+以及一个整份人设都建立在视频理解模型上的成员（艾达）。这些都改成了本机的真形状：
+两个媒体工具、按「有没有参考图」选路、失败就去掉参考图 / 换提示词而不是换模型名、
+要「看视频」就 `pwsh` 跑 ffmpeg 抽帧再 `read_image` 看帧。图生图 / 局部编辑本机没有，
+「改图」明确写成重出一张或用 ffmpeg / ImageMagick 做机械编辑。
+扫到最后人设层只剩 6 处可疑引用，逐条看都是审计的假阳性
+（Godot 的 `EventHandler`、`SignalName`、美团记忆文件的字段名这类）。
+技能参考文档里的旧模型名不动，改由文档顶部那段免责说明兜住——顺带把 MiniMax 那套
+`MINIMAX_API_KEY` 也纳进触发条件，否则「前端资产用 MiniMax CLI 生成」这份文档不会带上说明。
+
+**验证链自身修了两个假阳性。** 一个是驱动脚本在选单可视区外的坐标上空点却报「已选中」
+（现在先 `scrollIntoView`，再校验触发器改名）；另一个是它按文字找预设触发器，
+而触发器会改名成上一次选中的预设——`中文法律咨询团` 不含「模式 / 专家」，
+于是 9 连测出现了严格的一发过一发失败。现在按预设名单匹配 `aria-haspopup=menu`，
+并且在派活脚本里补上「选中真的落上了吗」这道校验。
+
+#### 全量 421 个包过一遍生成器（2026-08-19 傍晚）：规则表覆盖住了整个语料
+
+**先修一处口径。** 上面写的「装不了所以只能随包发」只对一半：装机那条路确实断着
+（`https://api.openlux.ai/api/desktop-market/items` 现打是 404，`desktop_market_items`
+这张表在 `openlux_mysql` 与 `openlux_test` 里都不存在，所以设置里的市场页是空骨架），
+**但拉包这条路一直是通的**。上游那份清单与包体都在公开 COS 上，
+`admin-server/service/desktop_market/import_expert_center.go:43,448` 写着地址形状：
+清单 `expert_center.json`，包体 `<base>/bundles/<plugin>.tar.gz`，解出来正好是生成器要的布局
+（`.codebuddy-plugin/plugin.json` + `agents/*.md` + `skills/`）。421 个包全拉下来 1,015.7 MB，零失败。
+
+**真实分母比 22 大一个数量级。** 清单 421 条 = 369 个单专家 + 52 个团；
+52 个团在清单里声明 52 位主理人 + **289 位成员**（12 位没有 `promptFile`），
+即全量约 **710 份人设**——我们跑过的 68 份是其中 10%。
+本机那 22 个包里 21 个仍在清单上，`redfox-xiaohongshu-ops-team` 不在（上游改名或下架）。
+
+**结果：421/421 全部通过生成器，一个都没炸。** 这句话的分量在于它经过的那几道断言：
+`assertNoPhantomTools`（一个假工具名都不许活到产物里）、`assertParses`（YAML + 成员行计数
++ 模板变量白名单）、`assertFixesLanded`。也就是说规则表**覆盖住了整个语料**，
+不只是我们手上那 22 个：原始人设里 **57 个包共 983 处**点名了本机不存在的机制
+（`SendMessage` 567、`subagent_type` 212、`TeamCreate` 123、`AgentTool` 30、
+`open_result_view` 22、`deliver_attachments` 15、`use_skill` 9、`connect_cloud_service` 8、
+`memory_write` 3），产物里一处不剩。
+
+**头一遍是 4 个失败，两类原因，都值得记：**
+
+| 包 | 现象 | 归属 |
+|---|---|---|
+| `fundus-disease-analysis`、`python-fullstack-engineer` | 找不到 `agents/腾讯健康-…-专家.md` / `skills/09-python全栈工程师` | **我的解包**：Windows 自带 bsdtar 按 ANSI 代码页解头部，中文名成了 `鑵捐鍋ュ悍…`。换 node-tar（按 UTF-8 读）就对了 |
+| `executing-marketing-campaigns` | 包内 `plugin.json` 没有 `agentName`，回退到 slug 后找不到人设（真实文件叫 `marketing-campaign-expert.md`） | **上游包**：生成器比参考实现窄 |
+| `rum-fullstack-team` | `plugin.json` 写 `./skills/tencent-cloud-rum`，包里实际是 `tencent-cloud-rum-zh-2.1` | **上游包**：同上 |
+
+后两个照管理端导入器的做法改（它吃的是同一批包，早就踩过）：人设按
+`expert_bundle.go:361-384` 三段回退——声明的 id → `promptFile` 的文件名 →
+`agents/` 下唯一那份；技能**从包里扫 `skills/` 目录**而不是信 `plugin.json` 的清单
+（`:436-455`），并要求目录里有非空 `SKILL.md`（`:522-529`，这一条同时挡掉了把
+`skills/references/` 当技能的误判）。全量里 `plugin.json` 与包体对不上的有 12 个，
+11 个是包里有、清单没写。**对已发的 22 份是零变化**（822 个文件数不变，
+`preset.yml` 只有 order 因确定性排序变动）——本机那份 `plugin.json` 恰好都写全了。
+
+**顺手补上一类新的幽灵：只是名字不一样的同一个工具。** 这是只有全量才看得见的——
+`WebSearch` 出现在 **76 个包**、`WebFetch` 65 个、`AskUserQuestion` 30 个、`read_file` 23 个、
+`ImageGen` 7 个，而这些在本机都有一一对应的真工具（`web_search` / `web_fetch` /
+`ask_user_question` / `read` / `image_generate`）。改名就是全部修法，也是最便宜的一种：
+没有一句话改变意思，agent 不再去找一个就在手边、只是换了拼法的工具。
+`read_file` 这类停在 `(` 前面——技能文档里的 `read_file(path)` 是代码示例，改了会留下一份
+读者看不出错在哪的坏样例。刻意不改的三类：`ImageEdit`（2 个包，本机没有图生图，是能力缺口
+不是拼法）、`present_files` / `show_widget`（17 / 6 个包，只决定结果怎么呈现，缺了退回聊天里给结论——
+`expert_bundle.go:404-415` 拿两条证据得出同一结论，还推翻了自己早前「为这个词丢掉整条技能」的旧判据）、
+`execute_e2b_code` 那套托管沙箱（1 个包，`pwsh` 不是同一回事，改名等于说谎）。
+补完这七条，产物里残留的假媒体名从 55 处降到 22 处，集中在 6 个包，且剩下的都是刻意留的：
+`ImageEdit` 11、`HY-*` 9（模型名是数据，填错会被路由当场拒掉并告知有哪些能用）、`多模态内容生成` 2。
+
+**还查到一条与「该发哪些」直接相关的既有判据。** 导入器对随包技能有一套上架政策
+（`expert_bundle.go:386-415`）：名字命中腾讯专属服务（`westock*` / `tencent-*` / `12306-*` /
+`meituan-*` / `andonq` / `cloudq` / `migraq`）或正文点名 `HY-Image` / `HY-Video` / `YT-Video` /
+`youtu-vita` 的技能一律不收；上游给了技能而一条都没留下的专家判为空壳、**不上架**。
+按这条规则扫全量：**14 个包是空壳**，其中一个是我们已经发出去的 `ai-content-creator-team`
+（唯一那份随包技能整篇在讲 HY-*）。我们的版本不算空壳——人设已经改成指向真的
+`image_generate` / `video_generate`，假的只剩技能文档，由文档顶部那段免责说明兜住。
+真要扩发的时候，这 14 个是第一批该单独判断的。
+
+**没做的，和为什么不做。** 421 份不该全塞进仓库：22 个包已经是 822 文件 / 20.3 MB，
+按这个比例全量约 390 MB 进安装包，而且装机路径本来就该是市场按需装。
+真机也不该全跑：710 场会话按实测节奏（约 2 分钟一场）是 24 小时起步，
+而真机唯一独占能验的三件事——YAML/模板炸不炸、预设在选单里出不出现、成员工具面对不对——
+前两件现在是静态判据（`assertParses` + 打包清单那条测试），第三件对 710 份是同一个答案。
+**真正的缺口不在跑，在装机路径**：`openlux-plugin-account/src/market/compose.ts` 把服务端
+下发的人设**原样**塞进预设，整份文件里 `allow` / `deny` / `toolFilter` 一个字都没有，
+工具真相块与改写规则也都不在。市场一上线，从市场装进来的专家会把这 983 处幽灵原样带回来，
+成员也退回内核默认那 6 个工具。规则表搬进这条路径之前，扩发多少份都是白改。
+
+#### 装机路径怎么补（2026-08-19 夜，查完三个参考源后重判分层）
+
+**先修上一节末尾那句的口径。** 上面说「工具真相块与改写规则也都不在 `compose.ts`」，
+这句把两件性质不同的事按在了同一层。查完参考实现才看清：**真相块根本不该写进人设文件**。
+
+**WorkBuddy 没有「改写层」（本机实测，它装在这台机器上）。** 市场是整棵目录树原样同步到
+`~/.codebuddy/plugins/marketplaces/cb_teams_marketplace/plugins/<slug>`，装好的副本里幽灵名字
+**原样在**：`plugins/trading-agent/rules/trading-agent_rules.md` 6 处、
+`plugins/ai-hedge-fund/rules/ai-hedge-fund_rules.md` 3 处、
+`plugins/ardot-design-generator/skills/…/references/slides-agent-teams-workflow.md` 3 处
+（按 `HY-Image|HY-Video|YT-Video|TeamCreate|SendMessage` 计）。它的规则放在**运行期提示层**，两级：
+宿主级 `~/.workbuddy/{BOOTSTRAP,IDENTITY,SOUL,USER,MEMORY}.md`（582 B ~ 1.9 KB，都是小文件），
+插件级 `plugins/<name>/rules/<name>_rules.md` —— 位置与 frontmatter 有成文标准，就在市场根上那份
+`marketplaces/cb_teams_marketplace/rules-standard.md:9-11,19-27`，其中 `alwaysApply: true` /
+`enabled: true` 是「始终设为 true」的硬要求。旁证：`~/.workbuddy/teams/<team>/` 里只有
+`config.json` 与 `inboxes/*.json` 这类运行态，**没有人设副本**——人设不落第二份，只在运行期拼。
+它当然不需要改写：那些名字对它是真的。
+
+**Claude Code 同形。** 包原样装（市场只管文件与版本），plugin 自带的 agent 用 frontmatter 的
+`tools` / `disallowedTools` 声明工具面、由宿主执行（`code.claude.com/docs/en/plugins-reference`，
+同一处还写明为安全原因不接受包里的 `hooks` / `mcpServers` / `permissionMode`）；换人设走
+output styles，也是运行期。两边合起来给出同一条分界：**工具白名单跟着包走，工具真相跟着宿主走。**
+
+**内核的旋钮现成，而且比静态文本强。** `section(section: PromptSection): () => void`
+（`dsh-system-prompt/lib/types/index.d.ts:187`）：global 层对每次 assemble 都生效，agent 层按
+scope shadow 同名段；order 带是 `-100` 身份 / `0` 人设 / `100~199` 工具指导；只有
+`complete: true` 会把其他段全压掉（`dsh-persona/README.md:18,21`，默认 `false`），
+而我们 22 份预设一个都没开（`agent-presets` 里搜 `complete` 只命中 plan 模式的散文）。
+同一个服务还给了 `variable()` 与 `system-prompt/assemble` 瀑布，**能拿到本次 assemble 的真实工具表**——
+真相块因此可以现算，而不是我写一份、工具面一变就过期。
+
+**于是三样东西各归其层：**
+
+| 东西 | 该在哪层 | 为什么 |
+|---|---|---|
+| 本机工具真相（有哪些工具、没有 MCP、模型名照原样传、成员出的图要 `image_show` 才到用户眼前） | 运行期：`systemPrompt` 全局段 | 讲的是「这个构建」的事实。一处生效于普通对话 / 出厂 22 份 / 市场装的 / 用户自己写的；写进文件只会过期 |
+| 人设正文里写错的工具名、模型名、机制 | 落盘处：生成器与 `compose.ts` 共用一份规则模块 | 错的是正文本身，运行期改不动 |
+| 成员工具白名单 `MEMBER_ALLOW` | 组装层：两条路径共用 `market/teammate-tools.ts`，各自写进自己的 teammate 行 | 与 Claude Code 把 `tools` 放包里同层；写错名字内核 fail loud 并列出已知全局工具（`dsh-tool-subagent/lib/types/index.d.ts:45-55`） |
+
+搬完的净效果还省 token：真相块从 68 段人设各带一块，收成全局一段。
+
+**动手前必须先拿到的一条真机输出**：全局段能不能到三档——普通对话、出厂专家团（它的 persona 行
+已经 shadow 掉 `deployment:persona`，要验全局段没被连带压掉）、派活给成员（子会话 scope，要验段能到
+且能按 scope 换成成员版文本）。第三档若拿不到 child scope，退路是成员那份真相仍由 `compose.ts:290`
+那个每成员一份的 `persona:` 带着走，前两档照搬。
+
+#### 落地结果（2026-08-19 夜，三档真机 + 22 包逐字节回归）
+
+**真相块搬完了，在 `openlux-plugin-account/src/persona/tool-reality.ts`。** 注册一个全局段
+（`order: 150`，落在工具指导带里），静态文本只写「与人设冲突时以本段为准 + 工作目录 + 模型名是数据」
+这几条恒真的；工具清单、没有 MCP、媒体那几句、成员版 / 主理人版的差别，全在
+`system-prompt/assemble` 瀑布里按 `assembly.tools` 与 `agent.session.header.origin` 现算。
+生成器里的 `TOOL_REALITY` / `LEAD_TOOL_REALITY` / `MEMBER_TOOL_REALITY` 三个常量删掉，22 份预设重生。
+
+**一个坑记着：瀑布里要原地改，不能返回副本。** 第一版写的是 `return { ...assembled, sections }`，
+探针于是读到 `next()` 那个旧对象、把派活成员报成「只有静态正文」——不是段没到，是我们自己看错了。
+内核把 assembly 叫 mutable，就照它的字面改 `assembled.sections[at]`。
+
+**三档真机（`.tmp-probe/reality-reach.mjs`，`ai-content-creator-team` + 真派活）：**
+
+| 档 | 工具数 | 真相块 | 附带证到的 |
+|---|---|---|---|
+| 普通对话 | 4 | 现算 | `image_generate` / `image_show` / `video_generate` / `web_fetch` 是全局层 |
+| 出厂专家团主理人 | **33** | 现算，含 6 条 `delegate_*` 名册 | persona 行 shadow 掉 `deployment:persona` **不影响**全局段 |
+| 派活成员（真子会话） | 9 | 现算，含成员版那两句 | `header.origin === 'subagent'` 是可靠判据；`toolFilter.allow` 生效 |
+
+**规则搬进共用模块，两条路径同源：**
+
+| 模块 | 装什么 | 谁用 |
+|---|---|---|
+| `market/persona-rules.ts` | `FABRICATION_FIXES`（逐包精确改写）/ `MECHANICAL_REWRITES`（通用正则）/ `PHANTOM_TOOLS` / `SKILL_DOC_NOTE` / `createScrubber` | 生成器 + `compose.ts` + `install.ts` |
+| `market/teammate-tools.ts` | `MEMBER_ALLOW`（9 个）+ `withTeammateRoster` | 同上 |
+
+生成器**按源码 import**（`node --experimental-strip-types`），不走构建产物：重生预设不该依赖先构建插件。
+搬完重生 22 份，`git diff` 对预设产物**零变化**——这是「搬对了」的判据，不是「跑通了」。
+
+**`compose.ts` 补齐四件**（原先一件都没有，市场装的专家等于绕过全部规则）：
+人设过 `rewriteIdentity → scrub → neutralizeTemplates`；teammate 行补 `toolFilter.allow`；
+主理人人设补名册；组装完 `assertRenderable` —— 只有「渲染必失败」这一类走 `ArchiveError`（转成拒装并回滚），
+幽灵工具名只 `warn`（用户要的是这个专家，而运行期那一段已经压过它了）。
+
+**测试抓出一个真 bug，两边读代码都看不出来。** delegate 工具名：生成器是 `id` 里连字符换下划线
+（`delegate_video_editor`），`compose.ts` 保留连字符（`delegate_video-editor`）——两个都过线上那条
+`^[a-zA-Z0-9_-]{1,64}$`，所以谁都不报错；但 `MECHANICAL_REWRITES` 把人设里的派活指令改写成的是
+**下划线那版**。市场装的团于是每次派活都调一个不存在的工具。已按生成器口径统一。
+测试在 `dsh-plugin-desktop/tests/market-compose.spec.ts`（54 例，其中 44 例是 22 个真包的两路径等价）。
+
+**两处差异是不可消除的，写下来免得下次当 bug 修：**
+
+| 差异 | 为什么消不掉 |
+|---|---|
+| 成员顺序：生成器按 `plugin.json` 的 `teamInfo.memberAgents`，装机按 `members/<id>.md` 文件名排序 | 制品里没有清单，档内只有文件。每行自带人设与工具名，顺序只影响名册列出的先后 |
+| 名册标签：生成器用清单的 `displayName / profession`，装机用人设自己的第一个 `#` 标题 | 同上。frontmatter 里那份是按语言嵌套的 YAML，读它要给这个刻意不带解析器的文件加一个解析器 |
+
+**顺带查证的一条内核事实**：`dsh-tool-subagent` 的 config 只有 `provider` / `toolName` /
+`enableRunInBackground` / `backgroundMode` / `agentOptions` / `persona` / `toolFilter` / `maxDepth`
+（`lib/index.js:22-38`），**没有 description 旋钮** —— 工具说明是内核自己那段通用措辞。
+所以「哪个工具找到谁」只能是主理人人设里的散文，名册那一块删不掉。
+
+#### 两处分歧的裁决：都判给「不删内核的东西」
+
+**`tool-ralph` / `tool-workflow`：不关。** 生成器原先给专家团关掉这两行，代码里没写为什么、
+本文档也搜不到依据；而装机路径对同类问题早有成文判断（「删内核自己拥有的行，没人要求，不做」）。
+拿不出依据就按那条办。**改完真机复验**：主理人工具数 31 → 33，多出来的正是 `ralph` 与 `workflow`
+（行真的挂上了，不是静默失败），同一轮派活仍然成功、成员仍是 9 个工具。
+
+**`includeDefaultRoots`：不关。** 这条本文档自己在「不关 `includeDefaultRoots`」一节里已经判过——
+出厂 `cordis` 自己带技能也只**加**一个根——生成器却一直写着 `false`，是它没跟上。
+`false` 真正屏蔽掉的是 `<cwd>/.dsh/skills`、`~/.dsh/skills` 及其 `.agents` 同胞
+（`dsh-skill-filesystem/lib/index.js:152-178`），也就是**用户自己写的和项目自己带的**技能，
+不是我们的哪一堆；而本机这两个 home 根都不存在、`DSH_BUNDLED_SKILL_DIR` 也没设，
+所以它没隔离到任何东西，只保证了「用户召唤专家的那一刻，自己写的技能失效」。
+上面那两格旧结论已就地改掉。
+
 ### 阶段 4 · 媒体（4~6 周）· 四条闸门已通过
 
 **原本判定这是全案最大的不确定性，因为风险不在"要写多少行"，在"dsh 有没有承载它的能力"。
@@ -2109,6 +2383,98 @@ dsh 的工具收窄是运行时 API `ctx.tools.restrict({ allow?, deny? })`，�
   但真机上中文裸发直接就对（青石板/白墙黑瓦/薄雾全中），而这个开关在回执里既不回显也没有
   `enhanced_prompt` 可查。**既非必需又无从验证，就不声明。**
 
+#### 出片通告开的是新一轮：两排反馈按钮是这条路的代价（2026-08-19 查证，处置已定）
+
+上一节那张表里「出片通告」那一行，用户看到的实际形状是**两段独立的回答**：交活那一轮末尾
+一排「复制 / 点赞 / 点踩 / 重试」，出片通告之后又是一排，而复制只复制它自己那一段。
+这不是重复渲染，是**真的两轮**，四个环节全在内核里：
+
+| 环 | 出处 | 事实 |
+|---|---|---|
+| 完成投递先挑 owner 状态 | `jobs/tool-jobs/src/index.ts:294-299` | owner 空闲且投递方式是默认 `wakeup` 时走 `owner.followup(message)`，否则 `owner.inject()` |
+| `followup` 必然开新轮 | `core/agent/src/runtime-types.ts:119-124` | 原话「becomes the sole ordinary message of **its own turn**」|
+| 空闲 owner 上的 `inject` 不会被消费 | `core/agent-loop/tests/loop.spec.ts:640-667` | 空闲时 `inject` 之后 `turn/start` 为 0 条，要等下一次 followup 或 steer 才进上下文——所以「不开新轮」和「模型能知道」在空闲态下不可兼得 |
+| 反馈按钮按轮次挂 | `ui-conversation/src/client/conversation-nodes/turn-tail.ts:152-188` | `turn-tail` 节点按 `event.data.turn` 分组，一轮一个；`ui-message-feedback` 的模块注释说它挂进这排 IconActions、「sit between copy and branch」，正是截图里那个图标顺序 |
+
+**而第一轮为什么会提前收尾，是我们自己写的**：`video-tool.ts:144-146` 的工具描述
+（"answer the user that it is running … instead of waiting in silence"）和 `:313-318` 的结果
+文本（「现在先告诉用户正在生成，不要空等」）都在要求模型立刻收尾。模型照做 → agent 转空闲
+→ 六分钟后任务完成 → 内核在空闲 owner 上只剩 `followup` 这一条路。**所以这既不是 bug，
+也不是「没用好内核」，是这条路自带的代价**——`references/media-video.md` 当初只把这一环记成
+白拿的能力，这笔代价已经补进那一册的「交给 jobs 的真正代价」一节。
+
+**两个参考实现都走不到这个形状，但原因不同，所以它们的做法搬不过来**：WorkBuddy 出图 46 秒
+在同一轮里等完，产物靠随后一条 final 事件补挂回同一轮（`references/workbuddy-ui.md:302`），
+一轮一排按钮；豆包的视频生成是产品级固定流程，同一条气泡原地更新成完成态，它没有「模型
+必须自己读回结果再复述」这一步。我们是 agent 循环，模型不调 `job_output` 就不知道结果，
+这一步天然占一个轮次。
+
+**处置：保留两轮，只治观感。** 三个旋钮都不用改内核文件，前两个的代价更大：
+
+| 旋钮 | 位置 | 为什么不选 |
+|---|---|---|
+| `completionDelivery: 'quiet'` | 每份 preset 的 `tool-jobs` 行。**我们 20+ 份 preset 一个都没配**，全是默认 `wakeup` + `maxConsecutiveWakes: 3`（`jobs/tool-jobs/src/index.ts:29-53`）| 空闲 owner 的通告不再被认领，等于模型永远不知道片子出了。内核自己的注释把这个后果写成「a completion the model never learns about」|
+| 工具描述改成同轮 `job_output(wait: true)` 死等 | `video-tool.ts:144-146` | 轮次要挂 1~6 分钟，而这正是 `video-tool.ts` 开头那段注释长篇论证要避开的（"Holding a conversation turn open that long is exactly what the kernel's job registry exists to avoid"）|
+| **保留两轮，治观感** | 我们的文本 + 一处客户端小改 | 选它：两轮在内核语义上是对的，要改的是「看起来像两段互不相干的回答」|
+
+三件具体的活，按收益排：
+
+1. **唤醒轮别复述上一轮说过的东西。** 真机那一发里它把「图片 9:16 竖构图、雨夜霓虹街头…」
+   整条又说了一遍。治法在我们自己的文本里——`filmInBackground` 写回的收尾行
+   （`video-tool.ts:504-505`）要明确「只报视频这一件事，不重述这轮之前的产出」。
+2. **产物卡片和「已完成」被切在两段里。** 产出行读的是 call view，而 `video_generate`
+   的调用发生在第一轮，所以文件片永远挂第一轮；第二轮只有 `job_output` 的读卡片，模型只能
+   抄一串绝对路径给用户看，**真正能点开的那张片子在上面一段**。这是产出行契约的必然结果
+   （上一节那条硬约束的另一面），跟 `ui-media` 那步一起解。
+3. **唤醒轮在视觉上并进上一轮。** 判据内核给得出：`user/message` 事件带 `source`，唤醒那轮是
+   `{kind:'plugin', plugin:'tool-jobs'}`，而 `TurnLocation.start` 就是那条 `turn/start`
+   （`core/agent-loop/tests/loop.spec.ts:1306-1326` 证明两个 followup 各开一轮且 `source`
+   各自保留）。所以「这一轮是谁开的」是可判的，不用靠猜文案。
+
+#### 产物预览：主线在 DSH 客户端，缺的是一条文件通道而不是预览库（2026-08-19 查证）
+
+起因是「md、视频这些点开都走系统程序」。查完分三层，第一层就纠正了一个会白干的判断。
+
+**一、别在旧壳上做。** 旧壳那套 `.artifact-preview` 抽屉（`Workspace.tsx:5218-5317`：文本上限
+512 KB、图片 6 MB 转 base64、`TEXT_EXT` 白名单之外一律「不支持文本预览」，限额在
+`src/main/workspace.ts`）属于 openclaw 那边，本文档第七节已经把它划进「旧壳遗留，不在 DSH
+主线上」。用户现在跑的是 DSH compatibility 外壳（`dsh-plugin-desktop/src/profile.ts:1` 原话：
+composition over the **official Web bundle**），界面整套是内核一方客户端。在旧壳上补 PDF、
+视频预览，是给一个正在下线的壳投资。
+
+**二、「点开走系统」是内核的设计，不是我们漏接。** 产出行加 Host opener 就是内核给产出文件的
+完整答案（`TurnTailOwnerProps.openFile`，`ui-conversation/src/client/contract/slots.ts:326-330`）。
+真正缺的是另一样东西：**客户端没有通用的「读本地文件字节」通道。** `packages/client` 全搜
+下来只有 `loadImage(attachment)` 一条（同文件 `:365`），走的是 session 授权的图片附件；而视频
+进不了附件库（`ImageMediaType` 没有视频成员，见本阶段「视频产物显示」那节的定价表）。
+**所以内联播放的第一步是造这条通道，而不是挑预览库。**
+
+**三、这条通道的现成答案在 WorkBuddy 手里。** 它注册一个 `local-file://` 协议，处理器就是把
+路径交给 `electron.net.fetch(filePath)`，再在 CSP 的 `img-src` / `media-src` 里放开
+`local-file:`，然后 `<video src="local-file://…">` 直接播——解码全归 Chromium，零第三方库。
+它连能播的扩展名白名单都单独切了一个 chunk（视频是 mp4 / webm / ogv / ogg / m4v / mov / 3gp，
+音频另一份）。取法照 `SKILL.md` 的「WorkBuddy 的界面源码怎么读」：协议注册在 `main/index.js`
+里搜 `local-file`，白名单和分派器在 renderer 侧按语义搜，**文件名带构建 hash，别写死**。
+
+据此定该弄与不该弄：
+
+| 类型 | 做不做 | 依据 |
+|---|---|---|
+| 视频 / 音频 | **先做这一档** | Chromium 原生解码，只欠那条通道；而且是用户当下的痛点（刚出的片子要跳出应用才能看）|
+| PDF | 同一条通道，随后 | ClawX 的取舍值得照抄：**不用 pdf.js**，读字节 → Blob URL → `<iframe>` 让 Chromium 的 PDFium 画。`ClawX/src/components/file-preview/PdfViewer.tsx` 自己的注释写明理由是避开 CMap/CID 字体在中文生成 PDF 上的白屏 |
+| Markdown / 纯文本 / 代码 | 看对齐目标再定 | 旧壳已经内联渲染 md，这不是能力缺口而是产品选择 |
+| Office 三件套（docx / xlsx / pptx）| **不做** | WorkBuddy 是 `docx-preview` / `@fortune-sheet/react` / `pptx-preview` 三套库各自适配，还挂了腾讯文档 SDK 兜底。这是「一个一个适配」的重灾区，而这三类恰是我们产品最少产生的文件 |
+| drawio / excalidraw | **不做** | 我们没有产生这类文件的工具 |
+
+所以「是不是每种格式都得单独适配」这个问题的答案是分裂的：**图片 / 视频 / 音频 / PDF 四类
+不用**，Chromium 全包、共用一条通道；**Office 那三类必须逐个适配**，而且没有可靠的
+all-in-one——查过 npm 与开源方案，维护中的都是单一用途库，all-in-one 要么停更要么小众，
+商业的贵。
+
+**动手前要拿到的那条真机输出**：在 DSH 的 web 客户端里手挂一个 `local-file://` 的 `<video>`，
+能播再往下写。验不过说明通道形状不对（CSP、协议特权、Range 请求任一环），那时候写下的每行
+播放器代码都是白写。
+
 #### 图生视频接完了：那条「已知阻点」不存在，本地字节直接进 `images`（2026-08-19 真机验完）
 
 上一版这里写着「`images` 收的是公网 URL 数组，我们手里是本地字节，data URI 收不收未验」。
@@ -2179,7 +2545,7 @@ dsh 的工具收窄是运行时 API `ctx.tools.restrict({ allow?, deny? })`，�
 |---|---|---|---|
 | 出厂几个专家 / 专家团 | 桌面包自己的 `config/agent-presets/<id>/`，组合里加一条 `system` 根（**不要**写进 `@deepseek-ai/dsh/config/agent-presets`，升级会覆盖） | `ctx.agentPresets.list()` | `system`，只读、升级覆盖、选择器不当作用户创作 |
 | 市场装的专家 / 专家团 | `$DSH_HOME/.agent-presets/<id>/` | 同上，`includeUserRoot` 默认就会扫 | `user`，可删；卸载走 `ctx.agentPresets.remove(id)` |
-| 市场装的**独立**技能 | `$DSH_HOME/skills/<id>/` | 出厂 `standard` / `code` / `cordis` 的 `skill-filesystem` 默认 `includeDefaultRoots: true` | 用户技能根。专家 preset 必须 `includeDefaultRoots: false`，只扫自己的 `skills/`，否则独立技能会漏进每个人设 |
+| 市场装的**独立**技能 | `$DSH_HOME/skills/<id>/` | 出厂 `standard` / `code` / `cordis` 的 `skill-filesystem` 默认 `includeDefaultRoots: true` | 用户技能根。**这一格原先写「专家 preset 必须 `includeDefaultRoots: false`」，2026-08-19 已推翻**：出厂 `cordis` 自己带技能也只**加**一个根（见下面「技能根」一节的裁决） |
 | 连接器 | profile 用户层一行 MCP（阶段 5 已定） | `dsh-mcp-client` | 与专家无关 |
 
 **WorkBuddy 包 → preset 目录的映射（内容保留，机制换掉）：**
@@ -2188,7 +2554,7 @@ dsh 的工具收窄是运行时 API `ctx.tools.restrict({ allow?, deny? })`，�
 |---|---|
 | `plugin.json` 的 `displayName.zh` / `displayDescription.zh` | `preset.yml` 的 `name` / `description`；`id` 是目录名，必须 `[a-z0-9][a-z0-9-]*` |
 | `agents/<lead>.md` 正文 | `dsh-persona` 的 `text`（身份指令里的 CodeBuddy 换成 OpenLux） |
-| `skills/*` | 档内 `skills/` + `skill-filesystem.customSkillDirs` 指向 `new URL('skills/', baseUrl)`，`includeDefaultRoots: false` |
+| `skills/*` | 档内 `skills/` + `skill-filesystem.customSkillDirs` 指向 `new URL('skills/', baseUrl)`（**只加根，不关默认根**，同上已推翻） |
 | 专家团 `teamInfo.memberAgents` | 一成员一行 `dsh-tool-subagent`：`toolName` / `persona` / `toolFilter`（**显式 deny 全部 `delegate_*` 和 MCP 工具**，闸门已踩过） |
 | 成员加入哪份组装 | **不要**给成员单独 preset。内核规定子代理 `composeFrom()` 加入父方常驻组装（README「组装子 agent」），成员技能名录 = 团的 `skills/` |
 | 头像 / 开场白 / 快捷提示 | 内核 `preset.yml` 只有 name/description/order。这些是**市场画廊**的字段，挂我们自己的 gallery，不要塞进组装文件 |
@@ -2572,8 +2938,624 @@ intended agent instead"。两处落点：
 减小影响面、不是安全边界（有 Bash 的子代理照样能碰网络）。同一句话对我们成立：收窄
 `web_fetch` 的可见性不能替代第一条的网络面判定。
 
-**三、用户在对话里指定模型出图 / 出视频（「用 xxx 模型画」），即模型选择面（最后做，
-属于参数面）。**
+**三、用户在对话里指定模型出图 / 出视频（「用 xxx 模型画」），即模型选择面。**
+
+> **2026-08-19 定形（用户口径 + 联网核对 + 真机目录复量）：参数面是对的形状，
+> 但真正的瓶颈是清单宽度，而清单宽度是「旧壳接过、DSH 没迁」。**
+>
+> **用户口径先摆上，它决定形状**：我们是中转站，模型很多，**用这个产品的大多数是我们中转站
+> 自己的用户，他们进来时脑子里已经有模型名**。所以**不做界面选择器**——对这批人，
+> 「用 flux-kontext-pro 画」就是他们在 API 里写 `model` 字段的同一个动作，
+> 选择器是多一层，而且装不下这么长的清单。
+>
+> 这条把联网查到的行业形状**筛掉了一半**：Picsart 把 59 个模型摆进 playground、
+> FluxoKit / Morphic / Chatday 全是「一个画布 + 模型选择器」，那套的前提是
+> **用户不知道有哪些模型、要摆出来让他挑**（它们的用户是创作者）。我们的用户画像相反，
+> 所以那个形状对我们不成立，别照抄。
+>
+> **仍然有效的那一半**是 Claude Code 的教训，而且在参数面形状下**更重要**：它的子代理
+> `model` 是定义时的 frontmatter（默认 `inherit`），per-invocation 参数取值域
+> 只有 `sonnet`/`opus`/`haiku`/`fable` 四个别名，传完整 model ID 会被 schema 拒；
+> 解析有四层优先级（env > per-call > frontmatter > 主会话），生产上三个 issue
+> **全是静默的**——不在 allowlist 里就悄悄换成别的（#57718）、env 抢掉 per-call
+> 而回执里没有任何字段能看出真相、frontmatter 被上层 `--model` 无条件覆盖（#43869）。
+> 它们自己提的修法是给 `tool_result` 加 `effective_model` / `clamped_by`。
+> **用户明确说了模型名的场景下，这两个字段是入场券**：我们要么真用他说的那个，
+> 要么明确告诉他没用、以及为什么。**静默替换是这条路上唯一不可接受的失败形态。**
+>
+> ### 为什么现在只有出图 3 / 出视频 2（2026-08-19 查实，三层原因）
+>
+> 现状：出图 `doubao-seedream-4-0-250828`（默认）/ `4-5-251128` / `3-0-t2i-250415`，
+> 出视频 `veo_3_1-fast`（默认）/ `veo_3_1`（`media/tool.ts:72-85`、`video-tool.ts:113-116`）。
+>
+> **一、进表要连尺寸一起进，因为非法 size 不是被拒而是挂住。** `size: '123x456'`
+> 跑满 180 秒预算什么都没回，而表里的值 15 秒就回（`tool.ts:58-70` 的一手记录）。
+> 所以尺寸做成 `enum` 让模型没法越界，而**一个模型和它的合法尺寸集合是同一个事实**，
+> 不能只抄名字。这是「验一个进一个」的直接原因。
+>
+> **二、目录里有 ≠ 这条路由能服务。** `gemini-*-image-*` 整族在
+> `/v1/images/generations` 上回 HTTP 503 + 一串「每个分组都没有渠道」（`tool.ts:44-50`）。
+> 所以照目录抄一份名字进来，等于把「选中即必然失败」铺给用户。
+>
+> **三、根本原因：旧壳早就接宽了，DSH 这一侧是从零重写的，没迁过来。**
+> 旧壳（openclaw 内核）时代真机复量过：**出图 23 条**
+> （`image-generation` 14 + `images-generations` 4 + `dall-e-3` 4 + `openai-绘图` 1，
+> 2026-08-19 拿 `.tmp-probe/v1models-live.json` 那份 478 条目录重数，与册子记的 23 一字不差）、
+> **视频在选 19 条** + **十一家专属异步适配器**（MJ / 可灵 / Vidu / 海螺 / PixVerse /
+> 百炼 happyhorse / Runway / Luma / Replicate / fal-ai / grok），而且 2026-08-17 下午
+> **口径就已经改成「渠道不用管，只管接」**（见 `references/media-video.md` 同名小节）。
+> 那套实现在 `resources/yunwu-video-plugin/index.mjs` + `shared/media-endpoints.ts`，
+> 是 openclaw 插件形状，DSH 用不了；`openlux-plugin-account/src/media/` 是新写的，
+> 只把当场真机验过的几条填进了新表。**所以这不是「当时没接」，是「接了但没迁」。**
+>
+> ### 零、动手前的方向修正（2026-08-19 真机三条，推翻了下面几节的一部分）
+>
+> 用 `yw_zhoucongjie` 那把 `auto` 令牌（openlux 库 token 2379977，`routing_priority=auto`，
+> 客户端打的就是 `api.openlux.ai`，见 `openlux-plugin-account/src/index.ts:80`）
+> 现打 `/v1/models` 与 `/api/model_preset`，得到三条与下面几节冲突的事实。**以这一节为准。**
+>
+> **一、零新路径的真实分母是 22 条出图 + 3 条视频，不是 46 / 97。**
+> 现拉 470 条、85 个端点类型。出图那三个同族类型合起来 22 条
+> （`image-generation` 14 + `dall-e-3` 4 + `images-generations` 4），
+> 逐个查 `/api/model_preset` 确认**三个类型名指向同一条 `/v1/images/generations`**。
+> 视频这侧**`Unified video format` 已经从目录里消失了**（现在 0 条），
+> 我们在用的 `veo_3_1` 挂的是 `OpenAI video format` → `/v1/videos`，全族只有 3 条
+> （`veo_3_1` / `-fast` / `-components`），我们接了 2 条，只差 `-components`。
+> `sora` 在这把 key 的目录里**一条都没有**。所以下面第一节写的
+> 「`image-generation` 21 + `Unified video format` 25」两个数今天都不成立——
+> 那是更早的快照，而且目录随渠道天天变，**任何写死的条数都会过期，只能现拉**。
+>
+> **二、这批模型旧壳早就全接完了，而且形状比我这份方案更干净。**
+> `resources/yunwu-video-plugin/index.mjs`（**181 KB，2026-08-17 还在改**）是 openclaw 时代的
+> 媒体插件，出图认领 33 条（OpenAI 兼容 23 + Gemini 对话端点 6 + MJ 2 + 可灵 2）、
+> 视频认领 15 个模型十几家适配器，参数表 82 处。它的做法是：
+> **模型名压根不写死**（`assertImageModel` 按端点类型在线校验，`IMAGE_DEFAULT_MODEL`
+> 只是缺省值），尺寸只收 `IMAGE_SIZE_BY_ORIENTATION` 那**三个通用安全值**
+> （`1024x1024` / `1536x1024` / `1024x1536`，`:562-566`），并且**故意只给 `sizes`
+> 不给 `aspectRatios`**，理由写在 `:3632-3634`：给了内核会把比例吸附到清单最近值，
+> 而我们真正只区分横竖方三档，清单越长越像在承诺我们并不遵守的精度。
+>
+> 反过来看，DSH 侧那份逐模型枚举 8 个 size 的 `ROUTE_MODELS`（`media/tool.ts:72-85`）
+> **是迁移时新造的、更窄的一条路**。它注释里那条硬约束是真的（非法尺寸不报错、直接挂满
+> 180 秒），但旧壳的解法不是逐模型列举，而是固定用三个安全值——**同一个约束，成本差一个数量级**。
+> 这是「没查成熟做法就自己造一条路」的又一次现形，而且这次撞的是我们自己三天前的实现。
+> **所以第 0 步不是「从零接 22 条」，是「把旧插件已验过的判据搬过来」**，
+> 判据表现成的在 `src/shared/media-endpoints.ts`（342 行，主进程与旧插件共用同一份口径）。
+>
+> **三、真正的 bug 是一条断链：用户在界面上选的媒体模型，到 DSH 这侧不生效。**
+> 桌面端**早就有媒体模型选择器**，整条链是通的：选择器 → `saveSelectedMediaModels`
+> → `config-writer.applyMediaSelection()` → 写 `agents.defaults.imageGenerationModel.primary`
+> 与 `.fallbacks`（`config-writer.ts:220-283`）→ 旧插件消费。
+> 而 DSH 侧的 `imageModel` / `videoModel` 只从**插件自己的 composition config** 读
+> （`openlux-plugin-account/src/index.ts:70-76, 150-157`），`cordis.patch.yml` 里没有这两行，
+> 于是永远落到 `DEFAULT_IMAGE_MODEL`。叠上 `tool.ts:127-133` 那段
+> 「不在 `ROUTE_MODELS` 里就换回默认、只打一条 `logger.warn`」——
+> **用户选了 `flux-1.1-pro`，实际出图仍然是 `doubao-seedream-4-0-250828`，界面上没有任何提示。**
+> 顺带一个对不上的默认值：主进程预勾的是 `IMAGE_MODEL_PREFERENCE = ['gpt-image-2', …]`
+> （`shared/public-models.ts:93`），DSH 插件的默认是 seedream 4.0，两边从一开始就不是一个模型。
+>
+> 所以真实的活按依赖是：**接上这条断链**（用户已经选了，只是不生效）、
+> **把 3+2 硬编码换成旧插件那套按端点类型判的形状**、然后才是专家那两档的白名单与人设清理。
+> 下面第一、二节的源码勘查结论（路由判据、`size` 不校验、`duration` 会 400、sora 静默改写、
+> `desktop_model_profiles` 没迁起来）**全部仍然成立**，只是「要接多少条」和「参数表从哪来」
+> 这两个问题已经有现成答案，不必再去 `api-reference` 写导出脚本。
+>
+> ### 零之二、已落地（2026-08-19 下午，含对上面第一、三条的两处纠正）
+>
+> 用同一把 key（openlux 库 token 2379977）复打，并把结论落成代码。**上面第一条的 22 要改成
+> 23，第三条的「断链」框错了。**
+>
+> **纠正一：出图分母是 23，而且它每天在动。** 现拉 470 条，四个同族类型
+> `image-generation` 14 + `images-generations` 4 + `dall-e-3` 4 + `openai-绘图` 1 = **23**。
+> 上面写 22 是漏了 `openai-绘图` 那 1 条。更值得记的是**六天里它从 21 涨到了 23**
+> （旧插件 `index.mjs:368-369` 记的 2026-08-13 是 12/4/4/1）——两次读都用同一把 key、
+> 同一套判据。所以文档里任何「一共 N 条」都只是当天的读数，判据（端点类型）才是稳定的那层，
+> 这正好是把它做成在线校验而不是写死清单的理由。改图侧 7 条可用，
+> 四个类型里 `images-edits` 今天命中 0（其余 4/1/2）。
+>
+> **纠正二：不存在「用户在界面上选了但不生效」这条断链——DSH 侧压根没有媒体选择器。**
+> 上面第三条把旧壳的链路当成了 DSH 的现状。实测（`5c3e31d1` 那轮勘查，逐条带 path:line）：
+> `dsh-plugin-desktop/src` 与 `openlux-plugin-account/src` 里**没有任何媒体模型选择界面**，
+> 客户端文件清单只有账号、市场、图片卡三类；`cordis.patch.yml:28-29` 的 `openlux-account`
+> 行**没有 `config:` 块**；而 `cordis.patch.yml` 是**打进安装包、每次启动只读**的构建期文件
+> （`src/profile.ts:312` 读它，`:310` 每次启动还把 profile 的 `cordis.yml` 截成 `[]`），
+> 全仓**没有任何运行期改插件行 config 的路径**。内核给的持久化位置是 settings 服务
+> （`settings-file/src/index.ts:227` 原子写 `settings.yaml`），但 rc.6 运行体对它加了命名空间
+> 白名单（`dsh-host-apiproxy/lib/index.js:888-896`），`openlux` 不在里面。
+>
+> **而这条断链本来也不该接**：用户明确说了不做界面选择器——「我们是中转站，模型很多，
+> 用我们这个项目的大多数是我们中转站的用户，他们自己知道有哪些模型」。
+> 所以模型来源就一条：**用户在对话里点名，工具原样接住**。选择器与它的配置写入都不做。
+>
+> **落地的四件事**（都在 `openlux-plugin-account` 与 `dsh-plugin-desktop`）：
+>
+> | 改了什么 | 落点 | 形状 |
+> |---|---|---|
+> | 出图放开到全部可服务模型 | `media/catalog.ts`（新）+ `media/tool.ts` | 判据搬旧插件的端点类型，`/v1/models` 现拉 + 5 分钟缓存 + 读不到就放过；`model` 是自由文本，不在名单里的**当场拒并列出可用的**，不再静默换默认 |
+> | 尺寸从逐模型枚举换成三档 | `media/tool.ts` | `IMAGE_SIZES` 三个通用安全值，`ROUTE_MODELS` 整个删掉 |
+> | 视频放开 veo 全族 | `media/video-tool.ts` | 加 `veo_3_1-components`，`model` 做成 enum（视频**不能**照出图那样放开：每家路径与 body 都不同，而且 `duration` 是真会 400 的那个参数）；选定模型后按它自己那行校验时长/画幅/首帧 |
+> | 成员拿得到这两个工具 | `scripts/materialize-expert.mjs` | `MEMBER_ALLOW` 加 `image_generate` / `video_generate` |
+>
+> **为什么视频没跟出图一样放开**：出图那 23 条共用一条 URL、一套参数词汇，所以「名字能不能服务」
+> 就是全部问题，目录答得了。视频不是——目录把 veo 标成 `OpenAI video format` → `/v1/videos`，
+> 而我们提交的是异步统一入口 `/v1/video/create`；**路由由调用方选的路径决定，不由模型名决定**，
+> 所以对视频模型问端点类型本身就是问错了。
+>
+> **人设清理改成机械化的，因为手改会被下一次导入吃掉。** 那份包里 175 处引用的是我们没有的
+> 东西（`HY-*`/`YT-*` 104、`ImageGen`/`ImageEdit` 26、`SendMessage` 24、`use_skill`、
+> 「多模态内容生成」技能），而且**技能正文里也有**（7 个 md 文件全中）。做法：
+>
+> - **不改导入的正文，在它上面压一段**「本机工具真相」——形状与内核自己拿会话人设盖部署默认一样。
+>   主理人一份（多一条：派活只有自然语言，用户点名的模型名必须写进任务描述才到得了成员）、
+>   成员与单专家一份、技能文档一份。插在 frontmatter **之后**，插前面会把 name/maxTurns 变成正文。
+> - **三类会真失败的，机械改掉**：`必须通过 SendMessage 回传`（要一个没注册的工具）、
+>   `人物场景必须用 YT-Video-HumanActor`（必须，用一个调不到的模型）、
+>   `直接说出你的生成意图，WorkBuddy 会自动识别并调用对应工具`（**最危险那条**：
+>   它让模型以为说一句就等于画了，于是那一轮什么都没调、却告诉用户图在路上）。
+>   结构性的（表格、决策树、工具边界）用整段精确串替换并**断言每条都命中过**，命中不了就构建失败；
+>   反复出现的工具名（`SendMessage` 20 处 + `use_skill` 3 处）用短语规则批量改，
+>   再用 `assertNoPhantomTools` 断言产物里**一行都不剩**（我们自己那段引用块豁免）。
+> - **假模型名故意不进这条断言**：模型名是数据不是调用，它作为 `model` 参数走出去、被路由拒掉时
+>   报文里会列出可用的；而残留一个 `SendMessage` 是白烧一轮去找一个不存在的工具。
+> - 结果：`config/agent-presets/ai-content-creator-team` **与生成器输出逐字节相同**
+>   （2208 行，diff 双向 0），也就是说这个产物已经完全可重放，没有任何手改要维护。
+>
+> **验过的**（都用线上 key，不是离线桩）：
+>
+> | 验什么 | 怎么验 | 读数 |
+> |---|---|---|
+> | 判据与线上目录对得上 | 把 `catalog.ts` 里的常量**从源码里解析出来**再打 `/v1/models`，避免验的是副本 | 23 条出图 / 7 条可改图；四条判据命中 14/4/4/1 |
+> | 出图模块本体（不是它的复制品） | `node --experimental-transform-types` 直接 import `media/catalog.ts` 打真机 | 首读 1169ms 拿到 23 条、二读 0ms 命中缓存；5 个真机验过的名字全放行；`HY-Image-V3.0`/`HY-Image-Lite`/`ImageGen`/`gemini-3-pro-image` 全拒且报文列出 23 个可用名；目录传 undefined 时放过 |
+> | 三档尺寸真的通用 | 逐模型发图 | `1024x1024`/`1536x1024`/`1024x1536` 在 seedream 4.0、gpt-image-2、qwen-image-max、seedream 5.0 上都出图；不带 `size` 也正常 |
+> | `-components` 能纯文字出片 | 真机提交 | 7.2 秒受理、122 秒出片（同 prompt 的 `veo_3_1` 是 175 秒），**不需要参考图** |
+> | 人设产物没有幽灵工具 | 生成器内断言 + 事后扫 | 非引用块里 `SendMessage`/`use_skill` 0 行；7 个人设 + 7 个技能文档各带一段声明 |
+> | 没弄坏别的 | 聚合 check | `openlux-plugin-account` 与 `dsh-plugin-desktop` 全绿，334 测试通过 |
+>
+> ### 零之三、真机三档验完（2026-08-19 13:14–13:41，线上 key、线上模型、CDP 驱真窗口）
+>
+> 三档全过，而且是在**会话日志里**核的——主理人嘴上说用了哪个模型不算证据，成员是独立
+> 子会话，得去它自己的日志里看入参。每档故意点一个**不是默认值**的模型，否则「传通了」
+> 和「回落默认」这两件事看起来一样。
+>
+> | 档 | preset | 点名的模型 | 工具入参 | 回执 `meta.model` | 出图 |
+> |---|---|---|---|---|---|
+> | 不用专家 | 标准模式 | `qwen-image-max` | ×3 全对 | `qwen-image-max` | 出了（内容有问题，见下） |
+> | 单专家 | 文爆爆 | `flux-1.1-pro` | ×9 全对 | —（连吃 3 个 429） | 没出，但**没有偷偷换模型** |
+> | 专家团·主理人直接出 | 内容创作专家团 | `gpt-image-2` | ×3 全对 | `gpt-image-2` | 出了，画面对 |
+> | 专家团·派给成员 | 同上 | `doubao-seedream-5-0-260128` | ×3 全对（**成员自己的子会话**） | 同名 | 出了，画面对 |
+>
+> 派活那档是这次唯一有新机制的一档，主理人第一轮就照 `LEAD_TOOL_REALITY` 做对了，
+> 原话：「按照人设，我需要把珀西的 Agent ID image-creator 传给他的委托工具，
+> 并把用户点名的模型名原样写进任务描述里」。落到 `delegate_image_creator` 的入参里是：
+>
+> ```
+> 【必传信息】
+> - 用户点名的模型：doubao-seedream-5-0-260128。请在调用 image_generate 时，
+>   把 model 参数原样填为 doubao-seedream-5-0-260128，不要改用其他模型。
+> ```
+>
+> 单专家那档吃了三次 `HTTP 429 当前分组上游负载已饱和`（是我自己前面几轮探针把分组打满的），
+> 但它的表现恰好验到了另一件事：**它没有降级成默认模型**，而是把 429 原文摆出来、说明
+> 「和模型名无关，flux-1.1-pro 是合法传参」，然后问用户要不要等或者换默认。
+> 这正是把「静默换模型」改成「当场拒绝并说明」想要的效果。
+>
+> **顺带查实两件与我们无关但会被当成我们 bug 的事：**
+>
+> **一、`qwen-image-max` 上有一类中文提示词会被上游换成完全无关的图，还不报错。**
+> 第一档出的图是个旗袍女子，跟「雨后天台橘猫」毫无关系。落盘的**附件本体**就是那张，
+> 所以不是渲染错文件。撇开客户端直打 `/v1/images/generations` 复现了 8 次，结论很干净：
+> 中文没问题（中文拖拉机一次就对）、天台没问题（中文天台无猫，对）、橘猫没问题
+> （中文橘猫蹲栏杆，对）、英文同场景没问题（英文天台橘猫，对）；
+> **只有「中文 + 天台 + 活物蹲在栏杆上」这个组合会翻**，翻了 4 次 4 次都翻，
+> 每次给一张不同的无关人像。最合理的解释是中文安全分类器把「天台 + 栏杆上蹲着一个活物」
+> 读成了自伤场景，而这条链路**用一张安全图顶替，而不是回一个错误码**——
+> 于是模型以为出图成功，还照着自己的 prompt 把画面描述了一遍。
+> 客户端这边没得治（我们拿不到判定信号），但它是中转站侧值得查的一条：
+> 静默顶替比明确拒绝坏得多。
+>
+> **二、成员出的图，用户一辈子看不到。** 派活那档成员真出了图
+> （`doubao-seedream-5-0-260128`，2.4 MB，画面完全对，钱也花了），主理人回话说
+> 「图已直接展示在上方对话里」——**上方没有图**。整页只有一个 `<img>`，是上一轮主理人
+> 自己出的那张；展开「1 个子代理」也没有。原因是结构性的：出图的产物是
+> **attachment 内容块**（`media/tool.ts:277`），它留在子会话里，回到主理人手上的只有
+> 成员的最终文本。视频没这个问题，因为视频**落文件**（`video-tool.ts:29-31` 写明
+> attachment 存储只收图片，所以视频只能走文件），路径能随文本传回来。
+> 所以修法基本确定是**让出图也落一份文件**，跟视频对齐，成员才有东西可交；
+> 这条是新发现的缺口，不在原计划里。**已修完并真机验通，见下一节。**
+>
+> ### 零之四、成员出的图现在能到用户眼前了（2026-08-19 14:26–14:41 落地并真机验通）
+>
+> 落一份文件是必要条件，不是充分条件：路径能过子→父那道墙，但**光有路径图还是不在对话里**。
+> 内核这两条把形状定死了——`dsh-tool-subagent` 回给父会话的只有子代理的最终文本，
+> 产出行又是按 Turn 折、只读那一个 Turn 自己的 call view，所以父会话不可能继承子会话的产物。
+> 结论只有一个：**必须由父会话里的一次调用把图摆出来**。于是两件事一起做：
+>
+> | 改动 | 为什么是这个形状 |
+> |---|---|
+> | `image_generate` 额外落一份文件（`media/artifact.ts`），路径进结果文本与 `presentationMeta` | 文本是唯一能过那道墙的东西。文件名走**内容寻址**（`<提示词头>-<摘要12>.<真扩展名>`），不像视频那样必须是 args 的纯函数——视频的产出行要靠 args 重算路径，我们这条路径是随结果当文本传的，所以能用摘要，同一句提示词出两张图不会互相覆盖 |
+> | 新增 `image_show`（`media/show-tool.ts`），收 `paths`，把文件重新交给 `saveImage` 再摆成卡片 | 校验与授权就是 `saveImage` 自己那一套（解码、限额、内容寻址），手搓 ref 等于重写那道栅栏。顺带解决另一件事：文本模型的会话里用户拖不进图（附件按 `inputModalities` 把门），而摆卡片不进模型内容，所以照样能看 |
+> | 两个工具名共享同一张卡片（`media/card.ts` + 第二个 toolview 键） | 键槽按**工具名**派发，漏注册不会报错，只会静默退回通用行把 ref 打成 JSON |
+> | 人设机械化加两条（`materialize-expert.mjs` 的 `MEMBER_TOOL_REALITY` / `LEAD_TOOL_REALITY`） | 成员被告知「你的图只在你自己这条会话里，把路径抄进汇报」；主理人被告知「收到路径就调 `image_show`，转述路径不算展示」 |
+>
+> **真机四发全过**（本机 dev 壳 + CDP，线上 key）：
+>
+> | 验什么 | 结果 |
+> |---|---|
+> | `image_show` 单点 | 拿今早那张「成员出了却没人看见」的对象文件（3200×3200、2.4 MB、无扩展名）直接展示，卡片「已展示 1 张图片」+ 图出来了。扩展名不影响：类型是嗅字节得来的 |
+> | 派活整条回路 | 主理人派珀西 → 珀西 `image_generate` 出图并把路径写进汇报（还自己加了一句「请主理人用 `image_show` 展示」）→ 主理人调 `image_show` → **父会话里出现那张图**。日志核到子会话结果文本正是 `delegated` 那一支，父会话 `image_show` 的附件摘要与子会话一致 |
+> | 普通会话没被改坏 | 「晴天海边白色灯塔，水彩」照常出图、照常展示，回话里多了一句文件路径 |
+> | 拒绝路径 | 一个非图片文件（`package.json`）+ 一个不存在的路径 → 卡片「展示失败」，逐条给原因（不是 PNG/JPEG/WebP/GIF；ENOENT） |
+>
+> 残留一条不打算追的：模型仍会把**提示词**当画面描述转述一遍（「厚涂笔触、暖猫冷雪」这类）。
+> 人设里写了「看不到就不要评价画面」，但它转述的是自己写的提示词，不是凭空编内容，
+> 而且现在图真的在用户眼前，用户自己能对。
+>
+
+> ### 定稿方案（2026-08-19 两路源码勘查 + 只读 SQL 复核，全部带出处）
+>
+> **真实分母先摆正。** openlux 生产库 `models` 表 `status=1` 的媒体档共 **321 条**
+> （图像 160 + 音视频 157 + 视频 3 + image 1，只读 SQL 现查）。客户端现在接 5 条。
+> 而 relay 里唯一成形的参数约束表只有 22 条，覆盖 7%。
+>
+> **一、清单与路由：两个接口就够，全部 DB 驱动，上游上新自动跟上。**
+>
+> - 清单判据 `GET /v1/models`（带用户 `sk-` key）。权威源是 `channels.models`
+>   （逗号分隔）× `channels.group_ids`，且只算 `status=enabled` 的渠道
+>   （`model/channel_cache.go:115-162`，注释明写「不再依赖 abilities 表」——**别去查
+>   `abilities`**）。`models` 表只是元数据装饰层，不决定模型存不存在。
+>   因为按 token 分组过滤，**拿到的就是「这个用户此刻真能调」的那一份**，比任何静态表准。
+> - 路径判据 `GET /api/model_preset?model=<id>`（**匿名可访问**，`api-router.go:85`）。
+>   它返回 `endpoint_configs`，即「端点类型 → 具体 path」，而且在 DB 查不到时会回落
+>   `GetDefaultEndpointInfo`（`controller/pricing.go:32-79`）。
+>   **不能用 `/api/endpoint_map` 代替**：那个直接吐 `GetSupportedEndpointMap()`，而
+>   `model/pricing.go:848-857` 把「内置端点入 map」整段注释掉了，所以最常用的
+>   `openai` / `image-generation` / `gemini` 在它那儿查不到。
+> - **方向性纠正**：路由判据是**请求路径**，不是模型名。路径是调用方选的，模型名只用来
+>   选渠道和计价（`middleware/distributor.go:613` 起那个千行 if/else 按 path 前缀定
+>   platform）。所以「该往哪个 URL POST」必须客户端自己决定，这就是上面第二个接口的用途。
+> - 真机那 84 种端点类型名（`images-generations` / `dall-e-3` / `openai-绘图` 这些）
+>   **Go 源码里一个都没有**——`constant/endpoint_type.go` 只有 11 个、
+>   `common/endpoint_defaults.go` 只有 7 条默认路径，其余全部来自 `models.endpoints`
+>   这个 JSON 列（`model/pricing.go:819-898`，形状 `{"<类型>":{"path":...,"method":...}}`，
+>   还兼容双重序列化）。**所以清单绝对不能从 Go 常量抽**：`unified_video/models.go:6-24`
+>   的 `ModelList` 至今停在 `veo3` 时代，没有 `veo_3_1`——`modelParams.js` 的错名就是抄它。
+> - 兜底一条必须写：`supported_endpoint_types` **可能是空数组而模型是好的**。
+>   因为它来自 `models.endpoints`，而 `models` 表靠 `SyncUpstreamModels`
+>   （`controller/model_sync.go:254`，RootAuth **手动点**，只补 `GetMissingModels()`
+>   缺的，且**丢掉 endpoints 与 model_type**）从 `basellm.github.io/llm-metadata` 拉。
+>   没人点同步 → 新模型没 meta 行 → 类型为空。此时按
+>   `web/src/pages/Lab/capability/registry.js:46-153` 的 `ENDPOINT_RULES` 反推
+>   （那是一份「路径 → 出图/出视频、同步/异步」的 JS 字面量表，可直接搬）。
+> - 拼路径要复制 `web/src/pages/Lab/shared/labEndpointPath.js:11-18` 的
+>   `fillEndpointModel`：替换 `{model}` / `%7Bmodel%7D` 占位符并剥掉
+>   `:floor` / `:nitro` / `:stable` 路由后缀，**否则 Gemini 那条路径拼不出来**。
+> - **三家目录 id ≠ 请求体 model，只能硬编码**（无法从任何接口推导）：可灵
+>   （计费名 `kling-video`，请求体要 `kling-v2-5-turbo`，`kling/models.go:341-382`
+>   还有一张点号→横线归一表 `:147-164`）、PixVerse（计费名 `pixverse-video`，
+>   请求体要 `v5`，`pixverse/models.go:97-106`）、Runway（目录
+>   `runwayml-gen4_turbo-5`，请求体要 `{model:'gen4_turbo',duration:5}`，网关自己拼，
+>   `middleware/distributor.go:1330-1335`）。抄语义的最佳位置是
+>   `middleware/video_model_guard.go:44-67` 的 `dedicatedVideoModelSet`——
+>   全仓库**唯一**把「模型集合 → 该走哪条专属路径」写在一起且可编译期枚举的表（6 家）。
+> - **`GET /v1/models/:model` 单查接口不可用**：只查 Go 常量 map，DB-only 的模型
+>   （`veo_3_1` 这类）返回 `model_not_found`（`controller/model.go:325-350`）。
+> - `/api/pricing_new` **不能当清单判据**：它跳过 `show_in_square=0` 的模型
+>   （`model/pricing.go:909-917`），只能补 `model_type` / `tags` / 计费类型。
+>
+> **二、参数：「挂住 180 秒」的成因已定位，结论对我们有利。**
+>
+> - 出图 `size` **网关从头到尾不校验**：`relay/valid_request.go:106-133` 只校验 `n`
+>   （1..128，因为 n 是计费乘数），`size` 读进来原样转发；`dto/dalle.go:262-292` 上
+>   `size` 没有任何 binding 或枚举。而 `RELAY_TIMEOUT` 默认 **0**
+>   （`common/init.go:130`）⇒ `service/http_client.go:66-70` 不设 Timeout。
+>   **所以那 180 秒不是网关设的**（全仓库无此常量，自带 nginx 是 300s），
+>   是上游卡住、网关陪着等、耗尽的是我们客户端自己的预算。
+> - 推论一（**这条让方案变干净**）：**不传 `size` 完全安全**——网关不校验、不改写、
+>   直接转发，上游用自己的默认值。所以「用户点名任意目录内模型 → 不传尺寸直接发」
+>   这条路没有挂住风险。
+> - 推论二：**网关不会帮我们挡，也不会告诉我们什么合法**。想给 `size` 就必须客户端
+>   自带白名单，范围可以收得很小（只覆盖我们主推的那几个）。
+> - `duration` 相反，**是真会 400 的**：`relay_tasks/sora/duration_validate.go:18-64`
+>   （但它 `switch originalModelName`，只覆盖 4 个 sora 名字，`veo_3_1` 走不到，
+>   时长完全不校验）、`minimax/models.go:109-142`（只认 6 / 10 秒）、
+>   `dto/ali/bailian/bailian.go:166-218`（3~15 秒 + 按模型分支的必填校验）。
+>   这几张表值得抄成客户端预校验，省掉一次白等。
+> - **sora 的 `size` 是静默改写，不报错**：`relay_tasks/sora/handler.go:160-189`
+>   把任意 `WxH` 按宽高比归一到 4 个合法值之一。**客户端以为指定了尺寸，其实被改了。**
+> - 各家严格程度横跨整个区间，没有集中表：从 `unified_video/adaptor.go:160-183`
+>   （结构体原样 marshal，零校验）到 `pixverse/models.go:443-530`（三级白名单 +
+>   per-action 必填）。VIDU 的参数枚举**只写在注释里**（`dto/vidu.go:119-124`），
+>   代码不校验。`xaivideo/models.go:16-56` 形状最理想——**参数白名单和计费表是同一张表**，
+>   查不到即不支持，不会漂移。
+>
+> **二·补、参数面写成什么：三源合一，产出一份 JSON，生成脚本挂在 `api-reference`。**
+>
+> 用户问「relay 的 Go 常量表没有 API 暴露，那我们能不能写成什么」。答案是**不要在网关
+> 加接口，也不要手抄进客户端**——`D:\work\yunwu-jihe\api-reference` 这个仓库就是为这件事
+> 存在的，而且已经有成熟工具链。
+>
+> **它是什么**：「云雾 API 文档管理系统」独立 monorepo（管理端 `apps/admin` + 开发者门户
+> `apps/portal` + Go 后端 `services/docs-api`），`relay/<platform>/openapi.yaml` 是内容
+> SSOT，共 **30 家**（veo / sora / kling / vidu / pixverse / minimax / volc / seedance /
+> tencent-vod / mj / fal-ai / replicate / runway / luma / jimeng / ideogram / grok /
+> alibailian / ali-pix / avatar / omni / gemini-v1beta / v1 / v1-models …），
+> 标准 **OpenAPI 3.1**（`paths` + `components.schemas` + `x-platform` / `x-i18n`）。
+> 44 个脚本里已有 `check:manifest`（manifest ↔ 后端路由对账）、`generate:relay`
+> （**从 `relay-router.go` 自动生成 manifest**，每份 manifest 首行就写着
+> `# AUTO from relay-router.go`，还带 `task_adaptor` 与 `code_ref`）、`lint:content`
+> （Spectral）、`export:seed`、`sync-relay-yaml-to-pg`，甚至有
+> `scan-cross-model-contamination.mjs` 专扫「参数写串到别的模型上」。
+> 管理端「发布 OpenAPI 会写入 `relay/<platform>/openapi.yaml`」——**所以运营改参数走管理端，
+> 不用改代码、不用发版**。
+>
+> **三个来源各补一块，缺一不可**：
+>
+> - **`api-reference` 的 OpenAPI 枚举 —— 端点级参数，主力。** 带 enum 的分布：
+>   kling 76 / pixverse 48 / **v1 26** / avatar 24 / mj 17 / gemini-v1beta 16 /
+>   minimax 9 / veo 8 / volc 8 / vidu 7 / fal-ai 6 / omni 6 / ideogram-v1 5 / runway 5。
+>   veo 那份实测拿到的是真数据：`aspect_ratio: 16:9 / 9:16 / 1:1`、
+>   `resolution: 720p / 1080p`、sora 的 `orientation: portrait|landscape` 与
+>   `size: large|small`（正好对上网关 `sora/handler.go:66-71` 那 4 个合法尺寸），
+>   还有一条完整的异步状态流转枚举（`pending → image_downloading → video_generating
+>   → … → completed`）——**那正是我们轮询要认的字面量**。
+> - **relay 的 Go 常量 —— 补「会真 400」的硬约束。** OpenAPI 是契约、Go 才是执法者，
+>   两者不一致时以 Go 为准。要抄的就三张：`sora/duration_validate.go:18-64`、
+>   `minimax/models.go:109-142`、`dto/ali/bailian/bailian.go:166-218`。
+>   理想形状仍是 `xaivideo/models.go:16-56`（参数白名单与计费表同一张，不会漂移）。
+> - **`modelParams.js` —— 只补 OpenAPI 缺的那块模型级尺寸。** `v1/openapi.yaml` 的出图
+>   `size` 枚举**停在 OpenAI 系**（`256x256/512x512/1024x1024`、
+>   `1024x1024/1536x1024/1024x1536/auto`、`1024x1024/1792x1024/1024x1792`），
+>   没有我们主力 seedream 的 `2K`/`4K`/`2848x1600` 那一套。而这套恰好在
+>   `modelParams.js` 里、且**名字对得上**（seedream / gpt-image / qwen-image 都在能对上的
+>   那 17 条里）。所以它降级为「补 17 条主力模型的 size」，不当清单、不当路由判据。
+>   注意那份 yaml 有中文编码损坏（`常�?1024x1024`），抽取时别把描述带进产物。
+> - **模型名一律不从这三处取。** `veo/openapi.yaml` 的 `model` 枚举同样是
+>   `veo3 / veo3-fast / veo3-pro / sora-2 / grok-video`，与 Go 常量同源、同样没有
+>   `veo_3_1`。清单只认 `/v1/models`。
+>
+> **产出与落点**：在 `api-reference/scripts/` 加一个 `export:media-params`（与既有 44 个
+> 脚本同形），遍历 30 家 `openapi.yaml` 抽出媒体端点的 `enum` / `default` /
+> `minimum` / `maximum`，合并 Go 那三张硬约束与 `modelParams.js` 的 17 条尺寸，
+> 产出一份 `media-params.json`。短期客户端内置这份 JSON（构建期拉取），
+> 长期塞进 `desktop_model_profiles.params`（服务端可改，前置是修迁移，见第四节）。
+> 校验照 LiteLLM 那两个阈值（条数下限 + 不得少于兜底表的一半）。
+>
+> **接宽的工作分层（按线上真实端点分布，只读 SQL 现查）。** 在架媒体模型按
+> `endpoints` 第一个 key 聚合，头部极集中、尾部极分散，共 146 种 key：
+>
+> | 端点类型 | 条数 | 异步标记 | 对我们的意义 |
+> |---|---|---|---|
+> | `Unified video format` | 25 | 23 | **DSH 已在打这条**（`/v1/video/create`）|
+> | `image-generation` | 21 | 0 | **DSH 已在打这条**（`/v1/images/generations`），全同步 |
+> | `openai` | 20 | 1 | 对话端点出图/出视频，旧壳的「第二条路」|
+> | `OpenAI video format` | 13 | 11 | sora 官方那条 `/v1/videos` |
+> | `MJ action` | 9 | 9 | MJ 后处理动作，不该当模型挑 |
+> | `gemini` | 8 | 0 | Gemini 图像族（对话端点）|
+> | `dall-e-3` / `images-generations` | 5 / 5 | 0 | 与 `image-generation` 同族请求形状 |
+> | `Text to image` / `Image remix` | 7 / 7 | 0 | 待认领 |
+> | `Grok video` / `Doubao video (Async)` | 6 / 5 | 3 / 5 | 待认领 |
+> | `fal-ai/…`、`black-forest-labs/…`、`stability-ai/…`、`google/imagen-4…` 等长尾 | 每个 1 | 1 | **一个模型一个端点类型**，但路径形状统一，一个适配器覆盖一片 |
+>
+> 由此分四层，按收益递减：**第一层 46 个模型零新路径**（放开
+> `image-generation` 21 + `Unified video format` 25 的模型名即可，这是今天就能拿的）；
+> 第二层 51 个（`dall-e-3` 5 + `images-generations` 5 同族形状，
+> 加 `openai` 20 + `gemini` 8 的对话端点出图，加 `OpenAI video format` 13 的
+> sora 官方——那条**成品不给直链**，要带我们自己的 key 打 `/v1/videos/{id}/content`）；
+> 第三层 fal-ai / replicate 长尾约 60 个（形状统一，一个适配器覆盖一片）；
+> 第四层各家专属（Vidu 10 + Happyhorse 4 + Runway 4 + 海螺 3 + Wan 3 + Doubao 7 +
+> Grok video 6 + 可灵 / PixVerse / Luma / 腾讯 AIGC，旧壳每家约 450 行）。
+>
+> **321 全接是个错的目标——有相当一批压根不该当「模型」挑。** 这个账旧壳盘点时算过一次
+> （广场 46 条图像里 13 条不该挑，见 `references/media-video.md`），线上分布里同样成立：
+>
+> - **`MJ action` 9 条是对「已有任务」的后处理**（upscale / variation / reroll /
+>   inpaint / pan / zoom），走 `/mj/submit/action`，没有前置任务就无从谈起；
+>   `MJ modal` 是 inpaint/zoom 的第二步，`MJ image upload` / `MJ blend` 同理。
+> - **图生文不是出图**：`MJ describe`、`Image recognition`、`Image to text`、
+>   `kling-image-recognize`。
+> - **另一档能力，不能塞进出片档**：`Upscale` / `Reframe` / `Replace background` /
+>   `Subject swap`（含 mask）/ `Restyle video` / `Video modify` / `Video extend` /
+>   `Multi-transition` / `Motion control` / `Motion imitation` / `Lip-sync`
+>   （含 `Pix lip-sync`）/ `Digital human` / `Multi-element video editing` /
+>   `Virtual try-on` / `custom-elements`。内核的出图出片工具没有对应模式，
+>   铺出去就是「选中即必然失败」。要开这一档，先决定它是独立工具还是独立模式。
+> - **语音 / 音效 / 音乐不在本条线内**：`Sync speech` 6 + `Async speech` 6 +
+>   `Text to speech` 5 + `Speech to text` 3 + `Suno music generation` 3 +
+>   `Sound effect` / `Speech synthesis` / `Custom voice` / `Vidu speech synthesis` 等。
+>
+> 扣掉这些，**接得动的范围是第一层加第二层约 97 个**，第三层长尾按需要再加。
+> 提「缺口」之前先按上面四类拆，别拿 321 当分母——这正是旧壳踩过的算错账。
+>
+> **同步还是异步，判据在 `tags` 里，不用猜**：`image-generation` 那 21 条异步标记全为 0，
+> `Unified video format` 那 25 条里 23 条带「异步」。
+>
+> **线上没有地方存参数**：`models` 表 27 列（只读 SQL 现查），有
+> `preset_prompt` / `preset_image` / `example_output` 这些体验预设，**没有任何参数字段**。
+> 所以参数的落点只能是新表/新列，而 `desktop_model_profiles.params` 已经把这个位置占好了。
+>
+> **三、回报：静默替换是这条路上唯一不可接受的失败形态。**
+>
+> 我们自己的网关就在干这事（sora 归一 `size`），我们客户端也在干（`ROUTE_MODELS`
+> 命中不到就 fallback 到默认模型，只打一条 `logger.warn`）。Claude Code 的三个 issue
+> 全是同一个病（#57718 / #43869），它们自己提的修法是给 `tool_result` 加
+> `effective_model` / `clamped_by`。**所以工具结果里必须回报真正用了哪个模型、哪个尺寸**，
+> 用户点名了就更是硬要求：要么真用他说的那个，要么明确说没用成、以及为什么。
+>
+> **四、参数的长期家已经存在，只是没接通（这是最省的一条）。**
+>
+> `admin-server` 早就为桌面端造了专用管道 `GET /api/desktop-config`
+> （`router/api-router.go:288`，`TokenAuth()` 认的就是我们已持有的 `sk-` key，
+> 带 ETag 重校验与灰度开关），背后 `desktop_model_profiles` 表**已经有 `category`
+> （chat/image/video/audio）与 `params text` 列**，注释原话是
+> 「媒体参数预留(图片/视频的默认时长、分辨率档位等)。本期只建字段,客户端不读」
+> （`model/desktop_model_profile.go:53-54`、`:84-85`）。接通它 = 客户端加 `Params`
+> 到 `clientModelProfile`（`controller/desktop_model_profile.go:456-468` 现在没带）
+> + admin 页面加编辑器 + 从 relay 那 22 条种子化。**收益是参数以后改服务端就行，
+> 不用发客户端版本**——而这些事实每次上游上新都会变。
+>
+> **前置：那张表在生产库里不存在。** 只读 SQL 现查：openlux 业务库只有 `models`
+> （1292 行），云雾主库只有它前面那张 `channel_ops_permissions`（0 行），
+> **两个库都没有任何 `desktop_*` 表**。成因写在代码注释里：
+> `MigrateAdminOwnedTables` 只要任一模型失败就整体 return，而
+> `ChannelOpsPermission`（撞 MySQL 64 索引上限）与 `ProformaInvoice`（有一条重复
+> 发票号）长期迁不动，`DesktopModelProfile{}` 挂在名单最后（`migrate_admin_owned.go`
+> 约 :111 与 :159-163），永远执行不到。
+>
+> **形状照 LiteLLM，它的两个阈值是买来的教训。** LiteLLM 的模型能力表也不内置在代码里：
+> 启动时从远端拉 JSON（5 秒超时），失败回落包内 backup，并且**校验完整性——拉到的表
+> 必须至少 50 条、且不少于 backup 的一半，否则丢弃**（`MODEL_COST_MAP_MIN_MODEL_COUNT`
+> / `MODEL_COST_MAP_MAX_SHRINK_RATIO`），免得一次坏响应把能力表清空。它文档自己警告
+> 的失败形态是「静默回落且健康检查不报警」。我们照这个形状做，并且**回落时要让模型知道**。
+>
+> **另一条更短的路（要运维给系统令牌）**：`GET /api/sync/models`
+> （`controller/sync_export.go:72-81`，`SystemTokenAuth()`）一次返回整张 `models` 表、
+> 不分页、含 `endpoints` JSON 原文与 `name_rule`。它是「声明的目录」不是「启用的目录」，
+> 所以仍要与 `/v1/models` 求交集：`/v1/models` 定「有哪些」，`sync/models` 定「每个怎么走」。
+> 两个请求覆盖全部 478 条。
+>
+> **五、顺手能修的两个缺陷（与本功能独立，但都是真实损失）。**
+>
+> - `web-server/model/pricing_new.go:176-194` 的 `parseEndpoints` 把
+>   `models.endpoints` 当「JSON 数组或逗号分隔」解析，而生产库里绝大多数是**对象**
+>   （只读 SQL 现查：在架图像 155/160、音视频 150/157 是对象形式），
+>   `json.Unmarshal` 失败后逗号兜底把 JSON 文本撕成碎片 → **模型广场那侧
+>   `supported_endpoint_types` 对媒体模型几乎全错**。改成按对象解析（键就是端点类型、
+>   值给出 path），立刻能修好 969 个模型的路由信息。
+> - `SyncUpstreamModels` 明明声明了 `Endpoints json.RawMessage`
+>   （`controller/model_sync.go:60-69`）却在写库时丢掉它和 `ModelType`（`:345-353`），
+>   这是「1268 行里只有 969 有 endpoints、838 有 model_type」的直接成因。
+>
+> **六、别再挖的地方（省下一次重复劳动）。**
+>
+> - `API-server` 是**废弃骨架**：`git log --all` 只有 1 次提交（2026-06-09），
+>   15 个 Go 文件，处理器全是 `RelayNotImplemented` 占位，README 自己写明只有
+>   「分组结构 + 鉴权链」。当前在跑的网关只有 `new-yunwu-api`（module `one-api`，
+>   最近提交 2026-08-17，分支「国际站分支」，1131 个 Go 文件）。
+> - `web-server` 不是前端，是从单体拆出来的**用户端后端**（`go.mod` module
+>   `github.com/yunwu/web-server`）；模型广场前端是另一个不在本工作区的 `web-cloud`。
+>   同一个 `/api/pricing_new` 由谁应答会改变返回内容：单体带
+>   `GetSupportedEndpointMap()`，`web-server` 那份 `supported_endpoint` **硬编码为空**
+>   （`controller/pricing.go:21-34`）。
+> - 仓库内**没有** OpenAPI / Swagger / Apifox 导出。`Lab/capability/registry.js:10`
+>   引用的 `.cursor/skills/ai-gateway-api/reference/all-endpoints.md`（apifox 243 操作）
+>   被 `.gitignore` 排除，只在某人本地——**值得单独去要**，它是参数面唯一成体系的文档
+>   （但已知有 schema 写错的先例，只能当补充、不当判据）。
+> - `model_type` 不可信：admin-server 自己的注释写着实测 `aigc-video-hailuo` /
+>   `kling-omni-video` 的 `model_type` 是「对话」（`model/desktop_model_profile.go:481`），
+>   openlux 库里还有 469 行是空值。客户端要按端点类型判档，别信这个字段。
+> - **`models.endpoints` 那 84 个类型名的源头是站外第三方元数据仓库**：
+>   `https://basellm.github.io/llm-metadata/api/newapi/models.json`（newapi 生态的公开
+>   元数据，`controller/model_sync.go:26-52`，可用 `SYNC_UPSTREAM_BASE` 覆盖）。
+>   它是「上游的上游」，只带 `description` / `endpoints` / `model_name` / `name_rule` /
+>   `tags` / `vendor_name`（`:60-69`），**没有参数约束**，所以它补不上参数面这一块。
+> - 顺带一条对中转站用户有用的：`quota_type` 是计费维度——
+>   **0 按量 / 1 按次 / 2 按像素 / 3 按视频尺寸 / 4 按视频时长**（`model/pricing.go:93-99`），
+>   配 `/api/pricing_new` 里的 `model_price` / `model_ratio` / `image_ratio`。
+>   我们的用户花的是自己的余额，所以出图出视频的结果里**顺带说清按什么计费**是真价值，
+>   而且这份数据匿名就能拿。这条独立于本功能，先记着。
+>
+> **七、三档（聊天 / 单专家 / 专家团）的完整分解。**
+>
+> **先纠正一句话**：之前写的「参数面一改三档同时活」是错的。工具是全局的、没有 preset
+> 自挂媒体行，这点没错，但**只有「聊天出图」那一档是真的一改就活**。另外两档各有硬前置，
+> 而且专家团那档**现在就是坏的**——坏因不是缺工具，是人设在教成员用不存在的模型、
+> 并明文禁止我们唯一能用的那个。
+>
+> | 档 | 现状 | 硬前置 |
+> |---|---|---|
+> | 聊天出图（不用专家） | 能用 | 无。工具层改完即活 |
+> | 单专家出图 | 工具可能不在白名单 + 人设里有假模型表 | 白名单 + 人设清理 |
+> | 专家团出图 | **坏的**：人设明文禁 Veo、教用 `HY-Image-V3.0` 这类不存在的名字、教「说出意图系统会自动识别」 | 白名单 + 人设清理 + 主理人转述纪律 |
+>
+> **四层改动，按依赖排序：**
+>
+> **1. 工具层（改一次，三档共享）**：`model` 参数放开（取值不设死枚举，判据是
+> `/v1/models`）、size 分两档（表里有给 enum，没有就不传）、结果里回报真正用了哪个模型
+> 与哪个尺寸。
+>
+> **2. 白名单层（专家 / 专家团的硬前置）**：`scripts/materialize-expert.mjs` 里硬编码的
+> `MEMBER_ALLOW` 要给需要出图出片的成员放开 `image_generate` / `video_generate`。
+> **不改这一层，后两档永远不活**——工具 schema 改得再好，工具不在成员的可见集合里。
+>
+> **3. 人设层（三份各自清理）。原则是「删多于写」：**
+>
+> - **人设不复述工具能力，工具描述才是权威。** 理由是工具描述随代码走、人设是静态文本，
+>   两者一冲突就是现在这个局面。所以那几张「模型选型表」整段删掉，让
+>   `image_generate` / `video_generate` 自己的 description 说话。
+> - **不写具体模型名——连我们自己的也不写**（不要把 `HY-Image-V3.0` 换成
+>   `doubao-seedream-4-0-250828`）。清单是运行时从 `/v1/models` 来的，人设里任何静态
+>   模型表都必然过期，而且写死了用户就没法点名别的。
+> - **不抄别的产品的机制描述**，也**不抄别人的商业约束**。
+> - 只留角色职责与判断力（什么时候该出图、出几张、什么构图、结果怎么回报）。
+> - 加一条纪律：**用户点名了模型就把那个名字原样填进 `model` 参数；没点名就不要填。**
+>
+> **具体要改的位置（2026-08-19 grep 实得，动手时不用重查）**，全部在
+> `config/agent-presets/ai-content-creator-team/`：
+>
+> - `agent.cordis.yml:99` —— video-generator 那行的假模型表
+>   （`HY-Video-1.5` / `YT-Video-2.0` / `YT-Video-HumanActor` / `YT-Video-FX`）
+> - `:100` —— image-creator 那行（`HY-Image-V3.0` / `HY-Image-Lite` / `ImageGen` / `ImageEdit`）
+> - `:496` 与 `:1400` —— 两处「工具边界」禁令，明文写着**不得引用 Grok / Veo / Gemini**，
+>   而我们唯一能用的视频能力就是 `veo_3_1`
+> - `:1127` —— 维欧人设里的「WorkBuddy 内置的 AI 视频生成模型」
+> - `:1439` —— **假机制**：「直接说出你的生成意图，WorkBuddy 会自动识别并调用对应工具」。
+>   在我们这里说出意图什么都不会发生，必须真的调工具
+> - `:1448` / `:1456` —— `HY-Image-Lite` 那张选型表与决策树
+> - `skills/ai-content-production/SKILL.md:94` —— 第三处同样的禁令
+> - `skills/ai-content-production/references/image-generation-guide.md:31` —— 同一张假模型表的副本
+>
+> **4. 验证层**：三档各验一次。聊天档说一句「用 xxx 画」；单专家档进专家会话说同样的话；
+> 专家团档要**查会话日志里成员的 `tool/call` 参数**，确认模型名真的传到了成员手上——
+> 因为那条链是自然语言，看主理人的回话看不出来。
+>
+> **自由与约束的界线（查实，避免以后又绕着走）：**
+>
+> - **我们的自由有三处**：人设正文（就是我们仓库里的 YAML）、成员白名单
+>   （`materialize-expert.mjs` 里的 `MEMBER_ALLOW`）、团队结构（几个成员、谁管什么）。
+>   这些都不是内核约束，改写不需要任何人同意。**照抄 WorkBuddy 正文反而违背对齐的判据**
+>   ——技能规则第一条就是「判据是结果，不是形式」，人设里写它的内部模型名，
+>   结果是成员用不存在的模型，行为反而不一致。
+> - **内核逼的只有一条**：委派工具的入参只有 `description`（3-5 词，显示用）、
+>   `prompt`（自然语言）与 `run_in_background`，**没有任何结构化透传槽位**
+>   （`dsh-tool-subagent/lib/index.js:142-157`，那三处 `properties` 是 output schema
+>   的 `background` / `continuable` / `foreground` 三种形状，不是入参）。
+>   所以「用户点名的模型名」传给成员只有一条路：主理人写进 `prompt` 的自然语言里。
+>   这是三档里唯一真正被逼出来的额外工作，只能靠人设纪律，机制保证不了。
+>
+> **八、执行顺序与每步的真机判据（照「查 → 验 → 改 → 复验」）。**
+>
+> | 步 | 做什么 | 依赖 | 动手前要拿到的证据 | 做完的判据 |
+> |---|---|---|---|---|
+> | 0 | 工具层：`model` 放开、不传 size、回报实际用了什么 | 无 | 手工打 2~3 个**没验过**的目录模型，确认返回载体与耗时 | 聊天档说「用 xxx 画」真出图，且结果回报的模型名与请求一致 |
+> | 1 | 白名单：`MEMBER_ALLOW` 放开两个媒体工具 | 无（可与 0 并行） | 读一次现有 `MEMBER_ALLOW` 实际值 | 进单专家会话问「你有哪些工具」，两个工具在列 |
+> | 2 | 人设清理三份（按第七节的行号清单） | 第 1 步 | 无（纯文本） | 单专家真出图；专家团成员真出图 |
+> | 3 | 主理人转述纪律 | 第 2 步 | 无 | **查会话日志里成员的 `tool/call` 参数**，模型名到了成员手上 |
+> | 4 | 参数面：`api-reference` 加 `export:media-params` | 无（可延后） | 先抽一家跑通再全量 | 指定比例出图，尺寸真生效 |
+> | 5 | 接通 `desktop-config` 的 `params` | 修迁移（要运维） | 确认迁移已通、灰度开关已开 | 客户端拉到 `params`，且完整性校验与回落都生效 |
+>
+> **第 0 步为什么能先做且无依赖**：出图这侧**已经两种载体都吃**——`carrierBytes`
+> 读到 `b64_json` 就解码、读到 `url` 就自己下载，而且**刻意不发 `response_format`**
+> （`media/images.ts:8-16` 的注释写明理由：网关的归一化只对一个短白名单生效、
+> 失败就原样透传另一个载体，而白名单外的模型收到这个参数会被上游当未知参数拒掉）。
+> 所以旧壳踩过的「`qwen-image` 返 url 拿不到 base64」在 DSH 这侧已从根上避开，
+> 放开模型名不会撞上它。
+>
+> **顺手可做、与主线完全独立的两件**（都在第五节）：修 `web-server` 的
+> `parseEndpoints` 按对象解析；让 `SyncUpstreamModels` 别丢 `endpoints` 与 `model_type`。
+>
+> **已知会骗人的地方，动手时别被绕进去：**
+>
+> - **sora 的 `size` 被静默改写**，回执里看不出（`sora/handler.go:160-189`）。
+> - **我们自己的 `ROUTE_MODELS` fallback 也是静默的**：命中不到就换默认模型，
+>   只打一条 `logger.warn`（`media/tool.ts:127-133`、`video-tool.ts:196-201`）。
+>   第 0 步必须把这条变成对模型可见的回报。
+> - `detail.input.images` 会回显成 `[""]`——那是回显把长串抹了，不是被剥掉。
+> - `model_type` 不可信、`supported_endpoint_types` 可能为空而模型是好的
+>   （成因见第一节与第六节）。
+> - **`/v1/models` 因 token 分组过滤而因人而异**，所以「有哪些模型」不是全站常量，
+>   不能缓存成一份发给所有用户。
+>
+> 下面这一段是原设计记录，其中「取值域收成 enum」已被上面第一、二节取代。
 现在出图模型是部署配置（默认 `doubao-seedream-4-0-250828`），工具参数只有
 `prompt` / `n` / `size`，模型选不了、用户说了也不算；搜索固定走我们网关上的
 `claude-haiku-4-5-20251001`。要让「用指定模型出图」生效，就把 `model` 加成 enum（取
@@ -2944,6 +3926,89 @@ high / xhigh / max`）。admin-cloud 的模型档案页（`src/pages/desktop-mod
    是 `logger.warn` **静默忽略**，不报错。所以"装完了"不等于"看得见"，判据必须是
    会话里的 skill-catalog，而不是盘上有没有那个目录。
 
+### 两条路径真机对完了（2026-08-19）：差异只剩导入器自己追加的三节
+
+本地 admin-server 起在 3011、库指线上测试库 `jishu_test`（市场数据已导入：420 个专家**全都有**
+`expert-content.tar.gz` 归档、其中 52 个是团、264 个带随包技能；另有 994 个技能、3 个连接器；
+13 个专家被"空心专家"规则判成隐藏 `status=2`）。探针 `install-reach.mjs` 把
+`promo-creator-team` / `xiaohongshu-operations-expert` / `content-creator` 从这台控制台装进临时
+`DSH_HOME`，再与出厂预设逐字比：
+
+- **5 行派活工具名一致**（`delegate_asset_producer` 等），成员工具面 `toolFilter.allow` 一致；
+- **5 份成员人设在导入器追加的三节之前逐字相同**，没有"只有出厂才有"的段落丢失
+  （追加的是「语言与身份」「正文排版规范」「协作纪律」）；
+- lead 人设的差异查清了、是服务端设计而非漂移：Go 导入器**剥掉**上游那段
+  `CRITICAL IDENTITY DIRECTIVE` 换成自己的「语言与身份」，再追加「内置技能」与人设来源署名；
+  生成器则保留那段、只把厂商名擦掉（于是留下 `NOT a generic coding assistant, NOT a generic
+  coding assistant` 这种重复）。两份都把身份和中文作答钉住了，装出来的那份反而更干净。
+
+**点名模型透传，真机走完最后一段**（`generate-reach.mjs`，账号 `yw_zhoucongjie` 的桌面客户端
+令牌，预设根指向上面装出来的那三份）：这把密钥的出图目录有 23 个模型；先直接点名
+`doubao-seedream-3-0-t2i-250415`（**不是**默认的 `doubao-seedream-4-0-250828`）出图成功；再把
+同一句"用 <模型> 出一张咖啡海报"当**自然语言**派给装出来的团的 `delegate_asset_producer`——
+没有任何地方告诉成员该填哪个参数，成员照样用点名的那个模型出了图，回报了文件路径并提示
+主理人用 `image_show` 展示。**网关账单两笔出图都是 `doubao-seedream-3-0-t2i-250415`，默认模型
+一笔都没有**——链路上不存在静默替换。
+
+两条探针教训，都不是产品的错：
+
+1. `openlux-plugin-account/lib/index.js` 比 `src/` 旧了一小时，第一轮"装出来的团没有成员、
+   没有派活工具"跑的其实是**重构前的包**。探针跑之前先 build，这条比任何猜测都便宜。
+2. 成员行的 id 前缀是 `teammate-<slug>` 而不是 `member-<slug>`，探针正则写错就会把
+   "5 个成员都在"读成"一个都没有"。判据来自落盘文件本身，不是记忆里的命名。
+
+### 界面那一段也点通了（2026-08-19，CDP 真机）：「召唤」就是安装路径
+
+前面那轮走的是宿主 RPC，这轮补的是用户真正走的那条：**设置 → 市场 → 搜索 → 召唤**。
+拿 `video-dissection`（视频解剖专家团，出厂 22 份与本机已装 11 份里都没有）做样本，
+证据链完整：卡片上是「召唤」而不是「安装」→ 点它先弹「安装到本机?」并把落盘目录写在弹窗里
+（第一次召唤才问）→ 同意后盘上出现 `.agent-presets/video-dissection`，
+`agent.cordis.yml` 24423 字符带 2 行 `teammate-*`、2 个同名 `delegate_*`、2 份成员工具面，
+两个随包技能连 `references/` 与 `scripts/`（29KB JS + 32KB Python）一起解包 →
+设置面板自己关掉、输入框上方的预设选择器变成「视频解剖专家团」、并预填了主理人的开场白。
+
+**装完之后在界面里真发了一次请求（22:48，1 分 02 秒跑完）**，一句话把四层一起验了：
+「派一位成员用 doubao-seedream-3-0-t2i-250415 出一张横版视频封面图……」。四层证据都取自
+界面自己的「轨迹」面板，不是模型的自述：
+
+| 层 | 记录下来的东西 |
+|---|---|
+| 主理人派活的**参数原文** | `delegate_script_analyst {"description":"生成黑金封面图","prompt":"…模型参数必须原样填写：doubao-seedream-3-0-t2i-250415（这是用户点名的模型，不要替换、不要省略）…"}` |
+| 成员的**调用参数** | `image_generate {"prompt":"…","model":"doubao-seedream-3-0-t2i-250415","size":"1536x1024"}` |
+| 工具回执（`delegated` 分支） | 「已用 doubao-seedream-3-0-t2i-250415 生成 1 张图片。**你是被派活的成员，这些图只出现在你自己这条会话里**……请主理人用 `image_show` 展示给用户」 |
+| 用户看到的 | 主理人照办调了 `image_show`，图渲染在对话里；2848×1600、`sha256:3ffe7c53…`、落盘在 `media/image/` |
+
+派活这一跳没有结构化参数可用，模型名是**主理人把它原样抄进任务描述**过去的——这正是
+`persona/tool-reality.ts` 里那句中继要求在真机上的样子，不是靠成员猜。
+请求侧到此是逐字证据（`tool.ts:222` 的 `model` 就是发出去的那个名字，且点名模型发请求前
+还过了一次 `assertImageModel` 真实目录校验）；上游**账单**那一侧的证人在前一轮 RPC 复验里
+已经拿到过（同一条工具路径、同一个模型名、两笔账单都是它），这轮 MCP 只读 SQL 代理断线没能复取。
+
+**顺带暴露一件产品事实：今天线上没有任何一台服务器在供这个市场。** 客户端默认
+baseUrl 是网关站 `https://api.openlux.ai`，那儿没有 `/api/desktop-market/*`，市场页直接
+`目录读取失败（HTTP 404）`；线上主库 `yunwuapi` 117 张表里 `desktop*` 一张都没有
+（`skills*` 那 6 张是网站 Skills Hub，与桌面市场是两个产品面）。也就是说市场目前只在
+「本地跑 admin-server + 库指 jishu_test」这一种形态下活着，本机那 11 份已装专家就是这么来的。
+判据别看客户端界面，看 `information_schema`。
+
+两个把人骗住的坑，都值得记：
+
+1. **应用跑在哪个 home，问 `DSH_HOME` 而不是想当然。** 这台机器的 shell 里
+   `DSH_HOME=%LOCALAPPDATA%\Temp\yw-dsh-live`，于是我往 `~/.dsh` 写的补丁与令牌全是白写，
+   现象是"补丁明明在组装里却不生效"。判法：`prepareDesktopProfile` 打印 home，或者读
+   安装确认弹窗里那行落盘路径——它显示的就是真 home。
+2. **机器级补丁文件在 `<home>/cordis.patch.yml`**（`PROFILE_PATCH_FILENAME`，`profile.ts:325`
+   读的是 home 根），不是 `profiles/<name>/cordis.patch.yml`。写错位置不报错、只是没效果。
+
+顺手核了「测试库里会不会残留旧设计误导人」这个担心：`jishu_test.desktop_market_items`
+现在只有 19 列，与 `model.DesktopMarketItem` 一一对应，制品三列
+（`artifact_key` / `artifact_sha256` / `artifact_size`）**根本不存在**——这张表是制品拆表之后
+才由 AutoMigrate 建的，所以结构体注释里"旧列删不掉"的情形在这台站上没发生。
+真正咬过我们一口的是反方向：8/16 编的 `admin-dev.exe` 还在按拆表前的模型查
+`desktop_market_items.artifact_key`，对着新表报 `Error 1054`，admin-cloud 于是一片空白。
+**结论：怀疑库脏之前先怀疑二进制旧。** 判据是 `information_schema.columns` 与结构体对照，
+不是界面有没有数据。
+
 ### 这一轮修掉的三处真错配（客户端 ↔ 控制台）
 
 都是"没照服务端已经写明的设计对齐"造出来的，不是内核缺功能：
@@ -3093,3 +4158,307 @@ new-session 芯片"（它自己靠包内的 `rosterChanged` 回调解决，跨�
 2. **视频产物显示选路 —— 已定**：不加 `ContentBlockMap` 模态，照 `ui-deliverables`
    的形状自己写 `ui-media` 插件；第一步先用 `presentCall` 的 `kind:'edit'` + `locations`
    白嫖现成的产出行。四条路的逐条定价与理由见上面「视频产物显示：选路结论」。
+
+## 全量装机扫描：407 个专家逐个真装（2026-08-19）
+
+**为什么要跑这一遍。** 生成器那条路早有全量证人（421/421 过断言），装机这条路却只装过 4 个包
+——而两条路是两个写者，它们之间唯一被抓到的差异（delegate 工具名连字符 vs 下划线）在被比较之前
+是完全不可见的。所以把清单上的 407 条全部走一遍真装机：真签名链接、真对象存储、真在启动起来的
+内核里组装。**没有一次模型调用**，所以这一遍的成本只有时间（约 12 分钟）。
+
+探针 `dsh-plugin-desktop/.tmp-probe/market-sweep.mjs`，两个阶段各回答一个问题：
+
+1. **装得进去吗** —— `market.install` 的真实结果。安装器本来就会把内核判为坏的预设回滚
+   （`broken-after-install`），所以"报成功"等于"组装出来的东西内核认"。
+2. **站得起来吗** —— 逐个挂载：工具解析、派活行变成 `delegate_*` 工具、系统提示词拼得出来
+   （不可渲染的模板变量就在这一步炸）。**45 个团全挂**（派活是脆的那一半），单专家抽 40 个。
+
+### 第一轮：403/407，四类失败全是真缺陷
+
+| 失败 | 数量 | 根因 | 处置 |
+|---|---|---|---|
+| `the stream contains non-printable characters` | 3 | 上游人设里是**被压坏的 emoji**：`## 🔄 Your Workflow Process` 到我们手里是 `## =` + `U+0004`，正是 `U+1F504` 的 UTF-16 代理对（`D83D DD04`）被当低字节写出来。读着没事，装不进去——内核 YAML 拒收非打印字符，于是组装、判坏、回滚 | `persona-rules.ts` 加 `stripNonPrintable`（放在 `scrub` 第一步，早于所有按可读文本写的规则），外加一条只改标题行的残渣改写。**修的是装机路径**：22 个出厂包的源文件扫过，控制字符与残缺标题各 0 命中 |
+| slug 撞内核自带预设 | 1 | 上游有一条 `plugin: code`，内核自带的 `code` 是「PTC 模式」。撞上不报错：安装器回「已经装过 code 了（来源：system）」，市场页却显示已安装，用户召唤到的是内核那个预设 | 导入器判**不上架**（`isKernelPresetId` + 建条目时置 hidden），不改名——改名能保住这个专家，但要凭空造一个上游没有的标识，少一个我们认。两条 Go 单测钉住 |
+| 随包技能静默丢失 | 8 个包 | 撞的是**我们自己的归档限额**，不是缺东西：`jiayi-ads-analytics-expert-public` 958 条 > 512、`ppt-implement` 708 条 > 512、`malaysia-finance-tax` 单文件 5.5MB > 4MB、`pdb-viewer-skill` 4.8MB > 4MB（它被 4 个 omics 专家共用）、`html-ppt` 压缩 9.8MB > 8MB 下载上限。旧限额是照 22 个出厂包的形状定的（几十个文本文件、不到 1MB），真语料不是那个形状 | 把 994 个已上架技能归档**全量测了一遍**（0 个失败）再定阈值：真实上限是 958 条 / 单文件 5.5MB / 解压 15.7MB / 压缩 9.8MB，其中解压总量离旧的 16MB 只差 4%。新值取实测最大值的两倍上下：`maxEntries 2048`、`maxEntryBytes 16MB`、`maxTotalBytes 64MB`、`MAX_DOWNLOAD_BYTES 24MB` |
+| 幽灵工具残留 | 1 处 | `content-creation-expert-prod` 里一处 `read_file` | 不改：规则刻意在 `read_file(` 前止步，那是代码样例，改了样例就错了 |
+
+**结构判据同时全过：0 个"可疑"**——团的成员数 = 派活工具数 = allow 表数，且没有一个残留不可渲染的
+模板变量（`provider` / `model` / `cwd` 之外的花括号）。
+
+### 复验：改完再全量装一遍
+
+| 判据 | 结果 |
+|---|---|
+| 装机 | **406/407**，唯一拒的是 `code`（撞名那条要下次导入才隐藏，本轮没对共享测试站重跑导入器） |
+| 结构可疑 | 0 |
+| 随包技能 | **762 个全部落地，0 个包缺技能**（改限额前是 752 个、8 个包缺） |
+| 挂载 | **85/85 站起来**（45 个团 + 40 个单专家抽样），45 个团的派活工具数与成员数一一相等 |
+| 全局工具真相段 | 85/85 在场 |
+| 工具面 | 单专家 29 个，团 33–41 个（多的是 `delegate_*`） |
+
+### 记账：还没解决的三件
+
+1. **`code` 那条**要等下一次 `IMPORT_EXPERT_CENTER` 才隐藏。共享测试站的数据我没重导。
+2. **一个包的人设 201KB**：`sg-finance-tax` 的 `SKILL.md` 是 201,177 字节 / 119,227 字符
+   （汉字占 30%），装出来系统提示词 126,610 字符——第二名 38,786。**粗估 6.1 万 token，
+   每一轮都付**，在 128K 上下文的模型上先吃掉近一半窗口。**它真跑过了**：抽样那一轮里
+   6 步 58 秒完成、答出 2878 字，上游没有拒收（见下一节），所以体积是价钱问题而不是功能问题。
+   既然这不是对错问题：要不要为这类专家付这个价，是**产品/运营的取舍**，不是技术判据能自动裁决的。
+   技术侧能给的三个选项，代价各不同：(a) 导入侧按人设体积告警或直接不上架——最省，但等于替
+   运营决定了下架谁；(b) 装机侧截断，照内核 `DEFAULT_MAX_SKILLS_PROMPT_CHARS = 18_000`
+   那个旋钮的思路——保住条目但用户拿到的是被削过的专家，且削哪一段没有好答案；
+   (c) 什么都不改，把体积显示在后台条目上让运营自己看着办——最诚实、最没成本。
+   **默认建议 (c)**，等真出现成本或上下文告警再谈闸门。全量里归档 >500KB 的有 9 个、
+   >1MB 的 6 个，所以这是个别现象，不是普遍问题。
+3. **覆盖面别含混**：这一节新增的是「407 个全部真装 + 85 个真挂载」。装机与挂载是静态到
+   半静态的判据，真发一轮是另一件事。**已被下面「抽样真跑」那一节接上**：30 个包各真发一轮
+   全部干净，并且顺手把成本量出来了——全量真跑约 16 美元、并发 3 约 6 小时，所以
+   「上线前跑全量」是可行的，此处原先写的「24 小时起步、不打算全跑」按实测作废。
+
+### 管理端这一半要不要改：要，且有一个是现在就坏的
+
+| 项 | 拦上线？ | 判断与修法 | 量级 |
+|---|---|---|---|
+| 制品上传缺 `format` | **拦**（运营根本传不上包） | **已修**。服务端拆表后要求 `format`（`controller/desktop_market_admin.go:307`），而 admin-cloud 只发 `file` + `version`，任何上传都必然回「format 非法」。格式由条目类型推出来（专家 → `expert-content.tar.gz`，技能 → `skill-dir.tar.gz`），不新增界面 | 已完成，3 个文件 |
+| `artifact_key` / `artifact_sha256` / `artifact_size` 三列 | 不拦，但**会误导运营** | 服务端模型里这三列已删（`model/desktop_market_item.go:46` 只留历史说明），前端类型与列表仍在渲染，所以「制品」列永远空、编辑抽屉的"已上传"块永不出现——看起来像"传失败了"。**注意列表接口不带制品**（`GetAdminDesktopMarketItems` 只回 items，制品只在详情里：`:100-110`），所以修法二选一：① 列表去掉这一列、制品只在抽屉里按详情返回的 `artifacts` 渲染（纯前端，零服务端改动）；② 要保留列表列就服务端补一个按 `item_id` 的制品汇总（一条 group by），别在前端按行拉详情。**建议 ①** | 小（前端 2 处） |
+| 制品列表 / 删除 | 不拦 | 服务端两头都齐：详情回 `artifacts` 数组，`DELETE /items/:id/artifact?format=&kernel_api=` 会连对象存储一起清并回新列表（`:390-411`）。纯前端接线 | 小 |
+| 重跑导入的入口 | 不拦 | 见下面第二节：**先定覆盖策略再谈入口**，上线用一次性命令 | 未定 |
+| 条目预览 | 不拦 | **建议不做界面预览**：运营真想问的是"客户端装进去会是什么"，而预览只能给一份渲染后的文本，答不了这个。已有更强的替代——全量装机扫描（`.tmp-probe/market-sweep.mjs`，407 条 12 分钟真装真挂载）。把它挪进 `admin-server/scripts/` 当**导入后的准入检查**跑一遍，比任何预览界面都硬 | 中（脚本已有，要挪位置 + 定跑法） |
+
+**上线还差的是服务端形态，不是专家包。** 三件事按依赖排：
+
+#### 一、谁来供 `/api/desktop-market/*`：反代那一段，别给客户端加第二个源
+
+客户端整个账号插件只有**一个** `baseUrl`（`openlux-plugin-account/src/index.ts:99`，默认
+`https://api.openlux.ai`），登录、余额、模型、市场全走它；而这套路由只存在于 admin-server
+（`new-yunwu-api` 全仓搜 `desktop-market` 零命中），它默认还是纯管理端
+（`middleware/admin_cloud_only.go:32`）。
+
+**三个前提今天已经成立**，所以这不是"要打通两个系统"，只是"入口上分一条路径"：
+
+| 前提 | 判据 |
+|---|---|
+| 同一个库 | 两个服务都读 `SQL_DSN`，`admin-server/.env:13` 与 `new-yunwu-api/.env:2` 是同一条 DSN 字面量；`admin-server/cmd/admin/main.go:3-7` 写着「与 yunwu-newapi 共享同一套 MySQL + Redis + Session Cookie」 |
+| 令牌互通 | 两边的 `ValidateUserToken` / `GetTokenByKey`（`model/token.go:141`、`:221`）逐字一致，读同一张 `tokens`、同一个明文 `key` 列（`char(48)` 唯一索引，不哈希） |
+| 路径不冲突 | 中转站没有这个前缀；admin-server 反过来也不挂任何 `/v1`、`/mj`、`/pg`（它自己的 `deploy/nginx.conf.example:85` 还额外 404 掉这些） |
+
+**先例有四条，反代这条路是本仓房子里的既有做法，不是新发明**：
+
+1. **反方向的同一件事已经在跑**：`admin-server/router/mainsite_proxy.go` 是一个
+   `httputil.ReverseProxy`，把 `/api/channel/*` 从 admin-server 转到中转站
+   （`MAIN_SITE_API_BASE`，不配就回落本地控制器）。它连跨服务的坑都踩完了：主站只认
+   `users.access_token`，而 admin-cloud 前端刻意不持有它，所以是**服务端现签**
+   （`EnsureUserAccessToken` + `New-Api-User` 头 + 删掉自己的 cookie）。
+   **我们要的方向比它简单**：桌面端带的是 `sk-`，两边同库同校验，不需要身份翻译。
+2. 中转站那边为了"被人前置"专门加了豁免：`X-Internal-Proxy` 头让域名守卫放行被改写的 Host
+   （`new-yunwu-api/middleware/sub_station_domain_guard.go:11-22`），密钥走共享 `options` 表。
+   **admin-server 这一侧不需要对应物**——它没有全局 Host 守卫（`CheckDomainRestriction`
+   是逐路由挂的，且未知域名直接放行），桌面市场那组只挂了 `TokenAuth`。
+3. `API-server/docs/从单体裁剪清单.md` 第 4 节已经写过按子路径分流的纪律：精确 `location`
+   必须写在 `/api/` 通配之前。这正是我们要的那条规则。
+4. `admin-cloud/nginx.conf` + `deploy/README.md` §3.3：一个域名两个后端，上游地址走环境变量，
+   并记了 `Host` 改写与 cookie domain 的坑。
+
+**口径其实早就定过，只是没进文档，而且新客户端把旋钮丢了**：老客户端的
+`yunwu-desktop/src/main/market/market-client.ts:19-30` 写着生产形态是「激活配置里的 baseUrl
+——**若把 admin-server 反代到同域 `/api` 下即可直接命中**；独立部署时用 env 指向公网地址」，
+并配了 `YUNWU_MARKET_BASE_URL` / `YUNWU_MARKET_TOKEN` 两个覆盖口。DSH 那套账号插件只有一个
+`baseUrl`，等于把这两个旋钮收掉了。
+
+**所以结论是反代，不是给插件加第二个源**：加第二个源就是把老客户端那两个旋钮重新造一遍，
+多一个能配错的面、且开发期还得配第二把令牌（因为两把令牌来自两个库）；而反代之后客户端
+一行不用改，令牌天然是同一把。要落的就一条 `location`：
+
+```
+location /api/desktop-market/ { proxy_pass http://admin-server:3001; }   # 写在 /api/ 通配之前
+```
+
+**待运维确认的一条**：`admin-server/cmd/admin/main.go:229-234` 的注释说「当前部署已无
+yunwu-newapi 主进程」。如果这句是当前事实，那么 `api.openlux.ai` 背后到底是谁、
+`mainsite_proxy` 那条转发今天有没有目标，都要拿真机确认再定 `proxy_pass` 的上游。
+仓库里没有任何一份文件写着生产拓扑（所有 nginx 都是 `your-domain.com` 模板）。
+
+#### 二、生产库建表 + 跑一次导入；「后台重跑入口」要不要做，先答覆盖策略
+
+两站线上库今天 `desktop*` 一张表都没有（判据看 `information_schema`），所以是 AutoMigrate
+建表 + `IMPORT_EXPERT_CENTER=1` 跑一次。**上线不需要后台入口**：导入是一次性命令，跑完就退出、
+不绑端口（`cmd/admin/main.go:54-155`），生产就是起一个临时容器/一次性 job 的形状。
+
+**但"要不要做入口"这个问题问反了**。上游清单是活的（2026-08 实测 406 条，8-19 数到 421 条），
+所以刷新目录这件事一定会重复发生；真正要先定的是**目录的所有权**：
+`import_expert_center.go:1027-1029` 明说「每轮都按当轮事实重算上架状态……代价是运营在后台
+手工改过的上架状态会被下一次导入覆盖」。也就是说今天做一个"重跑导入"的按钮，等于给运营一个
+会悄悄抹掉他自己上下架决定的按钮。三种口径，选一个再谈入口：
+
+| 口径 | 含义 | 代价 |
+|---|---|---|
+| 导入永远赢（今天的行为） | 上架状态完全由规则算出来 | 运营不能手工下架任何一条；按钮很危险 |
+| 运营赢 | 加一列"人工锁定"，导入跳过被锁的条目 | 上游修好了空壳包也不会自动回架，要人工解锁 |
+| 分层 | 规则算"可不可上架"，运营只在可上架集合内决定"上不上" | 语义最清楚，改动最大 |
+
+按依赖排：**上线用一次性命令，不阻塞**；入口排到覆盖策略定了之后再做，形状照 admin-server
+既有的异步任务先例（`ExportTask` 那种落表 + 进度），别做成一个同步请求跑十几分钟。
+
+#### 三、制品对象存储配 S3
+
+不配会回落本地磁盘（`service/desktop_market/artifact.go:25-29`），多实例或重启后预签名直链
+就断。这条没有争议，属于部署清单。
+
+**专家包本身不用改，这一点是有机制托着的**，不是运气：Go 导入器把上游包归一成
+`expert-content.tar.gz`（人设 + 成员 + 随包技能清单），客户端装的时候再过 `compose.ts` 那一层
+——人设改写（`FABRICATION_FIXES` + `MECHANICAL_REWRITES`）、成员 `toolFilter.allow`、派活行、
+技能根、不可渲染变量拒装。所以"线上拉一遍数据就能用"成立的前提是这层转换在装机时跑，
+而不是有人逐个手改了 407 个包。今天这一遍 406/407 就是这个前提的证据。
+
+## 抽样真跑：30 个专家各真发一轮（2026-08-20）
+
+**这一遍回答的是上一节答不了的那半个问题。** 装机与挂载都是不发模型的判据：文件组装得出来、
+工具解析得开、提示词拼得出来。而只有真发一轮才会暴露**请求本身**坏掉的那一类——人设大到上游
+拒收、人设指使模型去调一个不存在的工具、派活派出去成员回不来、模板到建请求那一步才炸。
+这一类失败由**包的形状**决定，不由行数决定，所以按形状取 30 个，等于把 407 行里所有不一样的
+形状各走一遍；剩下的 377 个是同形状的重复。
+
+### 抽样怎么挑：按会出事的形状，不摇号
+
+| 类 | 个数 | 为什么非它不可 |
+|---|---|---|
+| `mangled` 非打印字符 | 3 | 控制字符剥离是新加的，装得进去只证明 YAML 过了，不证明模型读得动那份被改过的人设 |
+| `huge` 超大人设 | 3 | 提示词 12.6 万 / 12.5 万 / 7.7 万字符，上下文拒收只会在这里出现 |
+| `skills` 随包技能 | 7 | 归档限额刚放开，含之前实测缺技能的 `malaysia-finance-tax`、`ppt-implement`，和共用 4.8MB 单文件技能的 omics 一支 |
+| `team` 专家团 | 9 | 派活是脆的那一半。铺开规模：12 / 10 / 8 / 8 / 6 / 6 / 6 / 4 / 3 个成员位，含唯一残留幽灵工具 `read_file` 的 `content-creation-expert-prod` |
+| `thin` 最小组合 | 4 | 货架上组合最小的四个（`agent.cordis.yml` 13.6k–13.9k 字符，装出来提示词 9.0k–9.3k），空壳包会藏在这里 |
+| `ordinary` 中段 | 4 | 不能整个样本都是异常值 |
+
+出厂的 22 个刻意排除（它们早跑过冒烟），所以这 30 个全是**市场装机得来的**副本。
+
+### 怎么跑的
+
+探针 `dsh-plugin-desktop/.tmp-probe/turn-smoke.mjs`，分两段是**被凭据逼的**：装机要拿测试站令牌
+打本地 admin-server，真发一轮要拿生产令牌打网关，而账号插件只有一个 `OPENLUX_API_KEY`。
+所以第一段用 `SWEEP_HOME=<dir>` 把装机结果留在盘上（`market-sweep.mjs` 加了这个口），
+第二段启同一个 home、换回生产凭据、`agent-presets` 的根指向 `<home>/.agent-presets`。
+
+- 模型：`openlux/deepseek-v4-flash`，**就是默认选择**，没有为测试挑一个更强的。
+- 一句提示词打全部 30 个：自述身份与可用技能/成员 → 挑最典型的任务做出第一步**实际产出** →
+  有成员必须至少派一位并转述结果。三句都是判据：自述看人设有没有压住通用身份，
+  "实际产出"逼出真步骤而不是一份计划，"必须派活"是团的成员进场的唯一途径。
+- 并发 3（网关在压力下回过 429），单轮上限 8 分钟。
+- **无人在场的两处代偿**，都记了账：审批一律放行（实测被问 **0** 次——这个 profile 下
+  `pwsh` / `write` 走的是沙箱与 fs 观察策略，不走审批）；"问人"的工具（`ask_user_question` /
+  `exit_plan_mode`）在分发前拒掉，拒绝理由本身就是给模型的指令（实测触发 **0** 次，
+  提示词里那句"不要问我问题"是有效的）。
+
+### 结果：30/30 干净
+
+| 判据 | 结果 |
+|---|---|
+| 一轮跑完并给出答复 | **28/30 在 8 分钟内 `turn/end = completed`**，答复 377–6661 字符、1–40 步；另 2 个撞上限，换 25 分钟重跑后也完成（见下），合起来 **30/30** |
+| 调用了自己没有的工具（`unknown tool` 那条路） | **0**——含那个人设里还留着 `read_file` 的包，它一次都没去调 |
+| 团真派活 | **9/9** 都至少派了一位，9 个团共派出 12 位；成员会话真跑工具，最多一个团的成员合计 76 次 |
+| 非打印字符修过的 3 个 | 全跑通（4 / 14 / 21 步） |
+| 超大人设 | `sg-finance-tax` 提示词 **126,610 字符**、6 步 58 秒完成，**上游没有拒收** |
+| 随包技能真被用 | `skill` 工具真被调用 14 次（此前只有单体专家有过一次正面证据） |
+| 工具报错 | 只有 `opc-team` 两处 `FS_NOT_OBSERVED`（内核的"覆盖前先读"策略在正常工作，模型自己绕过去了）；第三处是探针到点取消留下的 `ABORTED`，不算包的事 |
+
+人设确实压住了通用身份，四条随手抽的自述都对得上号：`sg-finance-tax` 自称新加坡财税金融专家
+并列出 IRAS/MAS/ACRA 规则库；`kdocs-ppt-creator` 自称 WPS AIPPT 创作助手、点名自己的
+`aippt` 技能；`fbsir-eight-seat-board` 把成员交回的风险清单逐条转述并标了证据边界；
+`omics-tfold-expert` 撞上本机没装 `omics-platform-cli`，**如实报告失败而不是编数据**。
+
+### 两个撞上 8 分钟上限的：判据是耗时不是超时
+
+`references/experts-and-teams.md` 记着一条实测：首发上游等过 3 分 16 秒，所以
+**"多久没回就算失败"不是判据**。探针照这条把截断记成「慢」而不是「坏」，然后换 25 分钟上限
+单独重跑这两个——**2/2 完成**：
+
+| 包 | 8 分钟那轮 | 25 分钟那轮 |
+|---|---|---|
+| `malaysia-finance-tax` | 15 步 / 20 次工具，产出已落盘、子代理已派出 | **349 秒完成**，34 步 / 40 次工具，答复 12,434 字符（中途 3 次 `FS_NOT_FOUND`，读了个不存在的路径，自己改对了）|
+| `trading-agent`（12 个成员位） | 1 步 / 2 次派活，成员会话已跑 76 次工具 | **478 秒完成**，派了 4 位成员、成员会话合计 134 次工具，答复里逐位列出四位分析师的评分 |
+
+`trading-agent` 只比原来的上限多用了 **2 秒**。所以那两条"截断"是**我给的上限**造成的，
+不是包的问题——这也说明上限本身是判据风险的一部分，全量跑要给到 20 分钟以上。
+
+### 这一遍花了多少钱：网关账单说 $1.19
+
+探针自己数的 token 只覆盖 leader 会话，所以口径以网关账单为准
+（`openlux` 站 `logs`，`user_id=745453`「云雾桌面客户端」令牌，`QuotaPerUnit=500000`）：
+
+| 模型 | 调用 | 输入 token | 输出 token | 折美元 |
+|---|---|---|---|---|
+| `deepseek-v4-flash` | 776 | 22,648,222 | 315,366 | $1.08 |
+| `claude-haiku-4-5` | 189 | 132,299 | 153,056 | $0.11 |
+
+**那 189 次 haiku 是我们自己配的，不是意外**：明细日志里的请求体是
+`{"tools":[{"type":"web_search_20250305"}]}`，对应
+`dsh-plugin-desktop/cordis.patch.yml:168-172` 把 `web-search-deepseek` 的模型定为
+`claude-haiku-4-5-20251001`——那一段注释（`:146-158`）记着 2026-08-18 的实测理由：
+deepseek 渠道不支持 Claude 格式、`deepseek-v3-search` 只回散文没有引用字段，只有 haiku 的原生
+`web_search_20250305` 会回带 `url` / `title` 的结构化结果。所以这不是缺陷。
+**但它是一条与聊天模型无关的独立账单**，重搜索的专家（`lazy-travel-planner` 那一类）成本结构
+和别人不一样，全量估算时不能只按聊天模型算。
+
+**由此全量真跑的价钱第一次有了实测底数**：30 个 28 分钟 / $1.19 → 407 个约
+**$16、并发 3 约 6.3 小时、并发 6 约 3 小时**。钱不是障碍，时间也在一个晚上之内，所以
+**上线前跑一遍全量是可行的**，判据照这一节，上限调到 20 分钟以上、并发看 429 再定。
+
+### 这一遍没证明什么
+
+- **不证明产出质量。** 判据是"机器没坏"：跑完、有答复、没调不存在的工具、该派活的派了。
+  产出好不好是运营看内容，技术判据给不了。
+- **只跑了一个模型**（默认的 flash）。换模型会变的是行为而不是机制，但确实没测。
+- **无人值守下不能问人。** 真实用户会答，探针只能拒；所以"模型问了问题就卡住"这条路径
+  这一遍没走到（也没触发）。
+- **成员没有逐位跑遍。** 45 个团 × 平均 6 位成员是 260 多个角色，这一遍进场的是被 leader
+  自己选中的那些（9 个团共派出 12 位）。要逐位跑就得绕开 leader 直接调 `delegate_*`，
+  那是另一件事。
+
+**怎么复现 / 证据在哪**：
+
+```powershell
+# 一、装机（测试站令牌打本地 admin-server:3000），home 留在盘上
+$env:SWEEP_HOME="…\.tmp-e2e\smoke-home"; $env:SWEEP_ONLY="<逗号分隔的 slug>"
+node .tmp-probe\market-sweep.mjs
+# 二、真跑（本机生产凭据 → 网关），并发与上限走环境变量
+$env:SMOKE_HOME="…\.tmp-e2e\smoke-home"; $env:SMOKE_CONCURRENCY="3"; $env:SMOKE_CAP_MS="480000"
+node .tmp-probe\turn-smoke.mjs
+```
+
+逐轮记录 `.tmp-e2e/smoke/turns-30.jsonl`、汇总 `.tmp-e2e/smoke/smoke-30.json`
+（含每一轮的工具调用序列、答复尾巴、结束原因、token 数），重跑那两个在 `smoke.json`；
+`.tmp-e2e/smoke-report.mjs` 把它们印成上面这些表。
+
+## 出厂预设目录清零：22 份全删，专家只从市场来（2026-08-20）
+
+`dsh-plugin-desktop/config/agent-presets/` 原先躺着 22 份物化好的专家（822 文件 / 20.3 MB，
+其中 `content-creator` 与 `ai-content-creator-team` 已入库 100 个文件，其余 20 个一直是未入库的
+本机产物）。**全部删掉**，安装包里不再随包任何专家。
+
+**这是 WorkBuddy 的形状，不是我们省事。** 解包它的安装包（`D:\workbuddy\resources\app.asar`，
+21000 条）看随包插件：`resources\plugins\workbuddy-builtin\` 下 825 条里有 `skills\`（含
+`recommend-experts` / `expert-manager`）、`mcps\`、`prompt-common\`、`welcomemode\{work,design,code}\agents\*.md`
+——**一个市场专家都没有**，市场专家全在下载来的 `%USERPROFILE%\.workbuddy\plugins\marketplaces\`
+里，这与技能那一节早先量到的「`.workbuddy\skills` 是空的」是同一件事。
+
+**删之前钉了四处会踩空的地方，四处都不踩：**
+
+| 疑点 | 事实 | 证据 |
+|---|---|---|
+| 预设根指向不存在的目录会不会启动失败 | 不会，ENOENT 直接当零行 | `dsh-agent-presets/lib/index.js:240-242` |
+| 新会话的默认预设会不会指到被删的 slug | 不会，默认是内核只读的 `standard` | `dsh-plugin-desktop/cordis.patch.yml` 自己写着 *Our product default IS the shipped read-only `standard`* |
+| 打包白名单那条断言会不会挂 | 不会，它断言的是数组本身，glob 匹配不到东西不算错 | `tests/package.spec.ts:187-206`，改后 74 例全过 |
+| 启动守卫会不会按预设数量断言 | 不按，它只查工具行与 `web_search` 的注册位置 | `scripts/verify-profile-boot.mjs`，删后 exit 0 |
+
+**代价只有一条，而且是产品决定不是技术缺陷**：市场服务端上线之前，新装机器的选择器里只剩内核
+那 4 个（标准模式 / PTC 模式 / 极简模式 / 创造模式，全是编码向的），召唤市场专家要先登录且要有人供
+`/api/desktop-market/*`。WorkBuddy 对同一个空档的答案是随包三个欢迎模式（work / design / code），
+我们今天的答案是内核 `standard`——**要不要也给一组产品化的开箱人设，是运营/产品口径**，
+技术上现在两条路都通（放回 `config/agent-presets/` 就是随包，白名单和预设根都还在）。
+
+**顺手补掉一个被这次删除暴露的空洞。** 两条写入路径的等价性测试原先是拿
+`config/agent-presets/<pkg>/agent.cordis.yml` 当比对目标，且写着「没物化过就跳过」——
+目录一删它会 22 例全部**静默空过**（文件耗时从 465 ms 就能看出来什么都没跑）。改成测试自己
+把生成器跑进临时目录再比：生成器多认一个 `OPENLUX_PRESET_OUT_ROOT`
+（`scripts/materialize-expert.mjs:41`），测试按包 spawn 它、从它自己报的 `dest` 读回
+（`tests/market-compose.spec.ts:280-295`）。**现在这 22 例是真跑的**：同样 54 例，耗时
+237 ms → 10.3 s，且不再依赖"有人先手工物化过"这个前提。

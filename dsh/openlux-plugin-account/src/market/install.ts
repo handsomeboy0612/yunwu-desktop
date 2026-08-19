@@ -52,7 +52,8 @@ import type { AgentPreset, AgentPresets, PresetRoot } from '@deepseek-ai/dsh-age
 // package, so the kernel's own `~` handling is reachable.
 import { expandHomePath } from '@deepseek-ai/dsh-home-paths'
 import { requestBytes } from '../account/http.ts'
-import { composeExpertPreset, readExpertContent, SKILLS_DIR } from './compose.ts'
+import { composeExpertPreset, correctAssets, readExpertContent, SKILLS_DIR } from './compose.ts'
+import { createScrubber } from './persona-rules.ts'
 import { ConsoleError, readExpertManifest, signArtifact, type ConsoleAccess } from './console.ts'
 import { ARCHIVE_LIMITS, ArchiveError, readTarGz, type ArchiveEntry } from './targz.ts'
 import { EXPERT_CONTENT_FORMAT, PRESET_DIR_FORMAT, SKILL_DIR_FORMAT } from './wire.ts'
@@ -121,8 +122,15 @@ const BASE_PRESET_ID = 'standard'
  */
 export const PROVENANCE_FILE = 'openlux-market.json'
 
-/** Compressed size cap for one artifact download. */
-const MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024
+/**
+ * Compressed size cap for one artifact download.
+ *
+ * 24 MB against a measured maximum of 9.8 MB (`html-ppt`, the largest of the 994
+ * published skill archives on 2026-08-19; the largest expert archive is 3.2 MB).
+ * The previous 8 MB refused exactly that one skill, which is why
+ * `humanize-ppt-team` installed with four of its five skills.
+ */
+const MAX_DOWNLOAD_BYTES = 24 * 1024 * 1024
 
 /** Longer than an account call: this is a file transfer, not a form post. */
 const DOWNLOAD_TIMEOUT_MS = 60_000
@@ -303,6 +311,13 @@ export async function installPreset(
   // What the archive is decides what has to be built. A whole preset is written
   // as it arrives; expert content has no composition, so one is composed from
   // the running kernel's own `standard` (see `compose.ts`).
+  //
+  // Only the composed path corrects documents, and that asymmetry is the point:
+  // a whole preset already carries a composition, so its persona is inside a
+  // YAML block scalar rather than in a file of its own, and correcting it would
+  // mean editing text through a structure this installer deliberately does not
+  // parse. Such an artifact is one we built and scrubbed at build time; an
+  // imported one arrives as expert content.
   let plan: PresetFiles
   let skills: SkillTally | undefined
   // Recorded in the sidecar as well as returned, so summoning this expert
@@ -327,9 +342,20 @@ export async function installPreset(
       prompts = manifest.prompts
       const bundled = await fetchBundledSkills(ctx, access, manifest.bundledSkills, signal)
       const metadata = metadataOf(request)
+      // One scrubber for the whole install, so a fix aimed at the lead's persona
+      // and one aimed at a skill document are counted against the same package.
+      // Keyed on the preset id, which is the id the catalog was imported under
+      // and therefore the same slug the build script keys on; when a package has
+      // no entry the generic rewrites still run, which is the difference between
+      // an expert arriving slightly wrong and not arriving at all.
+      const rules = createScrubber(request.id)
       plan = {
-        entries: [...content.assets, ...bundled.entries],
-        composition: composeExpertPreset(base, content, bundled.slugs),
+        entries: correctAssets([...content.assets, ...bundled.entries], rules),
+        composition: composeExpertPreset(base, content, {
+          rules,
+          bundledSkills: bundled.slugs,
+          warn: message => ctx.logger.warn(`openlux: ${request.id}: ${message}`),
+        }),
         ...metadata === undefined ? {} : { metadata },
       }
       if (bundled.total > 0) skills = { installed: bundled.slugs.length, total: bundled.total }
