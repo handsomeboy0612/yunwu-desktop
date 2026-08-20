@@ -4220,10 +4220,10 @@ new-session 芯片"（它自己靠包内的 `rosterChanged` 回调解决，跨�
 | 项 | 拦上线？ | 判断与修法 | 量级 |
 |---|---|---|---|
 | 制品上传缺 `format` | **拦**（运营根本传不上包） | **已修**。服务端拆表后要求 `format`（`controller/desktop_market_admin.go:307`），而 admin-cloud 只发 `file` + `version`，任何上传都必然回「format 非法」。格式由条目类型推出来（专家 → `expert-content.tar.gz`，技能 → `skill-dir.tar.gz`），不新增界面 | 已完成，3 个文件 |
-| `artifact_key` / `artifact_sha256` / `artifact_size` 三列 | 不拦，但**会误导运营** | 服务端模型里这三列已删（`model/desktop_market_item.go:46` 只留历史说明），前端类型与列表仍在渲染，所以「制品」列永远空、编辑抽屉的"已上传"块永不出现——看起来像"传失败了"。**注意列表接口不带制品**（`GetAdminDesktopMarketItems` 只回 items，制品只在详情里：`:100-110`），所以修法二选一：① 列表去掉这一列、制品只在抽屉里按详情返回的 `artifacts` 渲染（纯前端，零服务端改动）；② 要保留列表列就服务端补一个按 `item_id` 的制品汇总（一条 group by），别在前端按行拉详情。**建议 ①** | 小（前端 2 处） |
-| 制品列表 / 删除 | 不拦 | 服务端两头都齐：详情回 `artifacts` 数组，`DELETE /items/:id/artifact?format=&kernel_api=` 会连对象存储一起清并回新列表（`:390-411`）。纯前端接线 | 小 |
-| 重跑导入的入口 | 不拦 | 见下面第二节：**先定覆盖策略再谈入口**，上线用一次性命令 | 未定 |
-| 条目预览 | 不拦 | **建议不做界面预览**：运营真想问的是"客户端装进去会是什么"，而预览只能给一份渲染后的文本，答不了这个。已有更强的替代——全量装机扫描（`.tmp-probe/market-sweep.mjs`，407 条 12 分钟真装真挂载）。把它挪进 `admin-server/scripts/` 当**导入后的准入检查**跑一遍，比任何预览界面都硬 | 中（脚本已有，要挪位置 + 定跑法） |
+| `artifact_key` / `artifact_sha256` / `artifact_size` 三列 | 不拦，但**会误导运营** | **已修**，走的是②：服务端列表随条目带一份按 `item_id` 索引的制品 map，前端「制品」列照它渲染。选②不选①（去掉这一列）是因为列表上运营唯一要问的就是「这条能不能被装到」，去掉列等于把这个问题挪进抽屉里逐条点 | 已完成 |
+| 制品列表 / 删除 | 不拦 | **已修**。抽屉里逐份列出「格式 × 内核版本 + 体积 + sha + 时间」，每份带「看内容 / 下掉」；下掉走既有的 `DELETE /items/:id/artifact?format=&kernel_api=`。两页共用 `_artifacts.tsx` | 已完成 |
+| 重跑导入的入口 | 不拦 | **定了：不做**。导入是一次性命令，上线跑一遍即可（用户口径）。真要重复刷新目录，先答下面第二节的覆盖策略，别先加按钮 | 不做 |
+| 条目预览 | 不拦 | **已做，但不是"渲染后的文本"那种预览**：服务端解开归档，报结构与体积（主文件字数、成员逐位字数与开头、随包技能是否缺 `SKILL.md`、其余文件按体积排序）。这答的是"包里装了什么"，而条目字段一个都答不了。全量装机扫描仍是更硬的准入检查，两者不互斥 | 已完成 |
 
 **上线还差的是服务端形态，不是专家包。** 三件事按依赖排：
 
@@ -4462,3 +4462,206 @@ node .tmp-probe\turn-smoke.mjs
 （`scripts/materialize-expert.mjs:41`），测试按包 spawn 它、从它自己报的 `dest` 读回
 （`tests/market-compose.spec.ts:280-295`）。**现在这 22 例是真跑的**：同样 54 例，耗时
 237 ms → 10.3 s，且不再依赖"有人先手工物化过"这个前提。
+
+## 管理端补齐：制品说真话 + 归档预览，外加一个一直坏着的详情接口（2026-08-20）
+
+**三条口径先定下来（用户口径，本节按它落地）：**
+
+| 问题 | 口径 |
+|---|---|
+| 生产谁供 `/api/desktop-market/*` | **就按本地这套，admin-server 直接供**。前提已核实：`ADMIN_CLOUD_ONLY` 的封禁名单里没有这个前缀（`middleware/admin_cloud_only.go` 的 `blockedSelfServiceExact` / `blockedSelfServicePrefixes` 都不含它），所以它在纯管理端形态下照样对外。剩下的只是入口怎么摆——同域反代一条 `location`（上一节的四条先例）还是让客户端直连 admin-server 的地址，属于运维选择，代码两边都不用改 |
+| 后台要不要「重跑导入」入口 | **不要**。导入是一次性命令，上线跑一遍就行 |
+| 6 万 token 人设要不要体积闸门 | **不要闸门，包是怎么样就是怎么样**。所以这一轮既不在导入时拒收大包，也不在装机时截断，预览里也不设阈值、不标红「太大」——只把字节数与字数照原样报出来 |
+
+**这一轮真正的收获是一个没人报过的缺陷。** 制品拆表那一版（`admin-server` 的 `d35d86c`，
+8-18）把详情接口的返回体从「条目」改成了 `{item, artifacts}`，而 admin-cloud 侧
+`src/api/desktop-market.ts` 从那天到今天只改过一次（补 `format`），**始终把整个 `data` 当条目
+返回**。后果不是报错而是静默错位：编辑抽屉里 `detail.name`、`detail.manifest` 全是
+`undefined`，专家页与连接器页两处都中；而 `manifest` 是整条覆盖写回的，**运营重新填一遍名字
+保存，就把导入写进去的清单抹平了**——按客户端今天真正读的那两样算，代价是随包技能不再安装、
+召唤不再预填开场白（`market/console.ts:129-143` 只取 `bundledSkills` 与
+`defaultInitPrompt`/`quickPrompts`；成员是从归档的 `members/*.md` 读的，不受这条影响）。
+判据不是读代码猜出来的，是真机上看到的：修好之后同一个抽屉里 `#name` 的值是「科研专家团」，
+修之前是空。
+
+**这一轮改了什么**
+
+| 改动 | 位置 | 为什么这么改 |
+|---|---|---|
+| 详情返回体解包 | `api/desktop-market.ts`、专家页、连接器页 | 见上。类型上钉成 `DesktopMarketItemDetail = { item, artifacts }`，让编译器替我们看住第二次漂移 |
+| 列表带制品摘要 | `model.ListDesktopMarketArtifactsByItems` + `GetAdminDesktopMarketItems` | 一次 `IN` 查完一页，挂成与 `items` 同级的 map。不塞进条目结构：那个结构直接映射数据库表，多一个非列字段会让写路径也长出一个不存在的列 |
+| 已删三列清零 | `types/admin/desktop-market.ts` + 两页 | `artifact_key` / `_sha256` / `_size` 从类型和渲染里一起删掉，列表列改读上面那份 map |
+| 制品清单 + 逐份下掉 | 新增 `pages/desktop-market/_artifacts.tsx`（专家页与技能页共用） | 一个条目可以同时有多份投放目标（格式 × 内核版本），"已上传/未上传"这种单值展示表达不了。空态写成「还没有制品，客户端装不了这条」而不是留白 |
+| 上传口改收 `tar.gz` | 两页的 `Upload` | 服务端只认 tar.gz（`validateTarGzArchive`），而界面写着「persona 包(zip)」、`accept=".zip"`——运营照界面选出来的文件必然被拒 |
+| 归档预览 | `service/desktop_market/preview.go` + `GET /items/:id/artifact/preview` + 前端弹窗 | 条目字段答不了「成员少一位」「随包技能一个都没进去」。服务端解开归档现算，不落盘、不落库 |
+
+**预览只报事实**：主文件（内容型归档是根 `SKILL.md`，预设归档是 `agent.cordis.yml`）的字节数、
+字符数与开头一段；成员逐位的字数与开头；随包技能逐个的文件数、体积、**有没有 `SKILL.md`**（没有
+就是客户端的技能层根本发现不了它，这个标红）；其余文件按体积从大到小（运营问的是"谁把包撑起来
+的"，字母序答不了）。字符数与字节数两个都给：CJK 人设两者差三倍，运营看的是前者。
+
+**真机验了什么（本地 admin-server:3000 + 测试库 `jishu_test` + admin-cloud dev:5188）**
+
+| 验的事 | 结果 |
+|---|---|
+| 列表带制品、条目行上没有残留列 | `顶层字段: artifacts, items, limit, page, total`；420 条专家里首页 5 条各自 `expert-content.tar.gz@* 320KB…4KB`；`条目行上残留的已删列: 无` |
+| 详情形状 | `data 的字段: artifacts, item`；`item.name=腾讯HR数智专家 manifest 639 字 制品 1 份` |
+| 专家团预览 | `empirical-research-team` 归档 29 KB → 解开 75 KB / 13 文件，负责人 6398 字，成员 7 位逐位带字数与开头（`academic-writer.md 4160字` …） |
+| 大包不设闸门也给得出结构 | 全库最大三份：`indonesia-digital-law-expert` 3130 KB（2.5 s）、`malaysia-hr-admin` 2167 KB / 44 文件、`south-africa-hr-admin` 1529 KB / 146 文件，都正常返回 |
+| 技能归档（另一种格式） | `net-new-video-editor` 6 文件 / 主文件 `SKILL.md` 4184 字，抽屉与弹窗都正常 |
+| 坏参数 | `format=nonsense` → `format 非法`；`preset-dir.tar.gz@0.0.0-nope` → `该投放目标下没有制品` |
+| 界面上真点一遍 | 建一条草稿条目 → 上传一份最小归档（`format` 由页面推出来，服务端收下）→ 列表列显示 `专家内容 534 B` → 「看内容」读出 2 位成员 + 2 个技能（故意缺 `SKILL.md` 的那个标红）→ 「下掉」后 toast「已下掉该制品」、抽屉变空态、列表列变「无制品」→ 删掉该条目。控制台无新增报错 |
+| 静态检查 | `go build ./...` + `go test ./service/desktop_market/`（新增 3 例预览测试，含专家团形状、预设主文件、坏字节/空归档）；admin-cloud `tsc -b` 与改动文件 `eslint --max-warnings 0` 都干净 |
+
+**顺手记两件真机上才看见的小事**：成员开头原先挂了 tooltip，1600 字节的气泡会糊满整屏，去掉——
+两行摘要已经够判断这一位是不是空壳；antd 的 `destroyOnClose` 在当前版本已废弃，改 `destroyOnHidden`。
+
+## 编辑抽屉里的老字段：六个填了不生效的，删（2026-08-20）
+
+上一节修完详情解包，抽屉这才第一次真的回显出内容——于是看见了另一半问题：**抽屉里一多半的字段，
+新客户端根本不看**。
+
+判据是客户端读清单的入口只有一处，`openlux-plugin-account/src/market/console.ts` 的
+`readExpertManifest`，它只取 `bundledSkills` 与 `defaultInitPrompt`/`quickPrompts`；卡片渲染
+用的是条目自己的列（名称、`icon`、`is_team`、标签、简介），身份、成员、工具一律来自归档
+（`compose.ts` 的 `readExpertContent` 只吃根 `SKILL.md` + `members/*.md`）。老客户端不是这样：
+它把人设当技能装到 `~/.openclaw/skills/<personaSkillSlug>`，再按 `model` / `tools` /
+`displayName` 写一份 `AgentConfig`（老仓 `src/shared/types.ts:1075-1102`）。那套播种方式随内核
+一起没了。
+
+| 字段 | 处置 | 依据 |
+|---|---|---|
+| 职业/头衔 `profession`、展示名 `displayName`、专属模型 `model`、工具白名单 `tools`、persona 技能 slug `personaSkillSlug`、`agentId` | **删**（表单、类型、导入器写入三处一起） | 客户端已无读取方。留着不是中性的：运营在「专属模型」里填一个值，界面看着生效，客户端根本不看 |
+| 团队成员 `memberSlugs`（多选器） | **删** | 成员来自归档的 `members/*.md`，选择器选的是"市场里另一条专家"，两套名单对不上；`compose.ts` 也不读它 |
+| 头像 `avatar` | **留，继续双写** `manifest.avatar` + 条目列 `icon`（用户口径） | 客户端读的是 `icon` 列 |
+| 专家团开关 `isTeam` | **必须留** | `is_team` 列是从它推导的（`model.DeriveIsTeam` 是那一列唯一真值来源），而客户端「专家团」那一页读的是那一列。差点跟着一起删——这也解释了上一节里手工建的临时条目为什么没成团：`is_team` 不是接口字段，传了也没用 |
+| 随包成员 `members` | 留，只读展示 | 客户端不读，但它是后台唯一能看出"这个团有几位成员"的地方 |
+
+**还揪出一个同类的静默写坏。** 抽屉原先是**重拼**一份 manifest 再整条覆盖，只手工把
+`members` 带回来。导入器写进去的键比表单多：`lead`（负责人展示行）、`source`（来源标记）
+——这两个从来没被带回来过，**运营保存一次就没了**。现在改成"在存量上覆盖表单拥有的那几项"
+（`{ ...parseManifest(editing?.manifest), ...表单项 }`），表单不认识的键原样留着，这一类事故
+整类消失。`parseManifest` 的返回类型也跟着写成 `Partial<ExpertManifest> & Record<string, unknown>`，
+把"可能还有别的键"这件事说给编译器听。
+
+**顺带**：列表「专家」列的副标题原先写 `m.profession || row.slug`、头像写 `row.icon || m.avatar`
+——列表接口 Omit 掉了 longtext manifest，所以那两个 `m.*` 一直取的是空值。改成只读条目列。
+
+**真机验的（本地 admin-server:3000 + `jishu_test` + admin-cloud dev:3002）**
+
+| 验的事 | 结果 |
+|---|---|
+| 抽屉里还剩哪些字段 | 名称 / slug / 简介 / 分类 / 头像 URL / 自带技能 / 快捷提示词 / 开场白 / 专家团 / 随包成员（只读）/ 版本 / 标签 / 状态 / 推荐 / 排序值 / 归档上传。六个死字段不再出现 |
+| 专家团存一次不掉东西 | `#620 ai-content-creator-team` 保存前后 manifest 键完全一致（含 `lead`、`source`），`members` 6 位、`quickPrompts` 3 条、开场白都在，`is_team` 仍为 `true` |
+| 客户端真读的那个键不掉 | `#806 investment-banking` 保存前后 `bundledSkills` 都是 22 个 |
+| 静态检查 | `go build ./...`、`go test ./service/desktop_market/`、`tsc -b`、改动文件 `eslint --max-warnings 0` 全干净 |
+
+**存量里的死键怎么清**：合并写入会把它们原样留着（它们此刻是惰性的，没有读取方）。清理靠下一次
+导入——`upsertItem` 走的是整条覆盖（`seed.go:315` 的 `UpdateDesktopMarketItem`），而导入器这一轮
+已经不再写那四个键，所以上线时跑的那遍全量导入会顺手把存量抹干净。
+
+**另外看到一件不属于本轮、但记下来**：连接器页要求填一份合法的 MCP 清单（校验 `mcpName` /
+`server`），而新客户端全仓搜不到任何读取方——`catalog.ts` 只把连接器标成"没有归档也算可用"，
+没有安装路径。也就是说连接器今天在客户端还落不了地，那份清单是给将来的安装器留的契约。
+
+## 真机环境地图：三个家目录、两个应用、两套配置（2026-08-20）
+
+写这一节的直接起因：客户端侧栏里只剩 9 条会话，而记忆里有九十多条；找不到之前真机测出图的那些
+对话，也找不到市场装下来的预设。三个问题的答案都是同一件事——**东西在别的家目录里**。下次再"东西
+不见了"，从这张表开始查，不要从代码查。
+
+### 三个家目录，各存各的
+
+| 家目录 | 谁在用 | 里面有什么（2026-08-20 实测） |
+|---|---|---|
+| `~/.dsh` | 日常那份客户端 | 1 个工作区 `C:\Users\000\Desktop`，9 条会话；凭据 `.credentials.yaml`；`.agent-presets/` 只有 `kumo-team`、`kumo-test` |
+| `%TEMP%\yw-dsh-live` | **所有真机验证**（`DSH_HOME` 指过去） | 194 条会话，其中 174 条在工作区 `D:\work\yunwu-jihe\yunwu-desktop\dsh\dsh-plugin-desktop`；`media/` 下 5 张图 + 5 段视频（含 UI 测试那张黑金封面 `一张高端电影感的横版视频封面图…-3ffe7c53dae8.jpg`，1.4 MB，8/19 22:49）；12 个预设，含市场装的 `video-dissection` |
+| `~/.openclaw` | 换内核前那个产品 | `agents/main/sessions` 67 条在册对话（另有 202 个 `.deleted.*` 墓碑），最后一条写于 **8/17 15:27**——正是切内核那一刻。全盘 70 条 |
+
+三件要点：
+
+1. **测试一律用隔离家**，这是有意的：真机验证会装几十个预设、写几百条会话、落几十 MB 图片视频，
+   不该进你日常那份 profile。代价就是"测过的东西在日常客户端里看不见"。
+2. **`yw-dsh-live` 在 `%TEMP%` 下**，Windows 磁盘清理会动它。里面的会话和图要留就得挪到稳定位置。
+3. **会话按工作区分目录**（`sessions/--<转义后的路径>--/`），侧栏只列当前工作区那一批。所以即使
+   家目录对了，换个工作区照样"少了一半"。
+4. 新客户端**没有**读 `~/.openclaw` 的代码（`dsh/` 全仓搜 `.openclaw` 零命中），所以旧对话不会自己
+   出现。搬迁需要写一个转换脚本：旧的是 `agents/<agent>/sessions/<id>.jsonl` 明文，新的是
+   `sessions/<工作区>/<id>/session.jsonl.zstd`，schema 也不同。
+
+### 两个应用别搞混
+
+| | 本机安装的 | 我们从源码起的 |
+|---|---|---|
+| 可执行文件 | `%LOCALAPPDATA%\Programs\DSH Desktop\DSH Desktop.exe` | `dsh/dsh-plugin-desktop` 里 `node lib/bin.js` |
+| 窗口标题 | `DeepSeek Harness Desktop` | `OpenLux` |
+| `PRODUCT_NAME` / userData | `DSH Desktop` → `%APPDATA%\DSH Desktop` | `OpenLux Desktop` → `%APPDATA%\OpenLux Desktop` |
+
+两者 userData 分开，但默认都用 `~/.dsh` 当 DSH_HOME，所以**别同时开**——会抢同一份会话与凭据。
+
+从源码起之前先重建两个包，否则你看到的是上一次构建的代码（8/19 那次就是这么差点看错的）：
+
+```powershell
+cd d:\work\yunwu-jihe\yunwu-desktop\dsh\openlux-plugin-account; npm run build
+cd ..\dsh-plugin-desktop; npm run build; node lib/bin.js
+```
+
+要看隔离家里那批测试会话，加一个环境变量即可，日常那份 `~/.dsh` 不受影响：
+
+```powershell
+$env:DSH_HOME="$env:LOCALAPPDATA\Temp\yw-dsh-live"; node lib/bin.js
+```
+
+### 两套配置：生产 / 本地市场，二选一
+
+根子在于**客户端整个账号插件只有一个 `baseUrl`**，登录、余额、模型、市场共用它。所以这不是
+"要不要看市场"，是二选一：
+
+| | 生产（默认） | 本地市场 |
+|---|---|---|
+| `baseUrl` | `https://api.openlux.ai`（网关站） | `http://127.0.0.1:3000`（admin-server） |
+| 能用的 | 登录、余额、模型全正常 | 市场能逛（测试库 420 个专家 / 专家团） |
+| 不能用的 | **市场页 404**——线上还没有任何一台在供 `/api/desktop-market/*` | 余额、模型全打到 admin-server，那台不供这些 |
+| 凭据 | 生产令牌 | **测试站令牌**（jishu_test 的 `tokens` 表里取一条 `status=1` 的） |
+
+切到本地市场：写机器级补丁 `~/.dsh/cordis.patch.yml`（**用户级补丁的正确位置是这里，不是
+`~/.dsh/profiles/desktop/cordis.patch.yml`**，后者试过不生效），
+
+```yaml
+- id: openlux-account
+  config:
+    baseUrl: http://127.0.0.1:3000
+```
+
+再把 `~/.dsh/.credentials.yaml` 里的 `OPENLUX_API_KEY` 换成测试站令牌，重启客户端。切回生产就是
+删掉这个文件、把凭据换回来。
+
+补丁到没到，别靠猜，跑一次只读探针 `dsh-plugin-desktop/.tmp-probe/patch-reach.mjs`：它按启动器同样
+的方式组装 profile，打印所有跟账号插件有关的条目。判据是有补丁时 48 条、`#38 id=openlux-account
+config={"baseUrl":"http://127.0.0.1:3000"}` 排在插件插入项（#30）之后；删掉补丁回到 47 条、
+那一条消失。
+
+### 踩过一次的坑：换了凭据没换回来，而"还原"还原错了源
+
+8/20 04:24 为 UI 测试把 `~/.dsh/.credentials.yaml` 换成测试站令牌，当时以为还原了，其实没有——
+直到 05:55 起客户端才发现，那个文件的修改时间**正好停在 04:24:56**。
+
+判据不用猜，两条对打就行：拿现用的 key 打本地 admin-server（测试库）——`200 success=true` 说明它是
+测试站那把；拿另一把打同一个口——`401` 说明它是生产那把。
+
+**但这次的"还原"本身也是错的，记下来比记那个坑更要紧。** 我从
+`.tmp-e2e/backup/live.credentials.yaml` 拷回日常家，标签写的是"日常家的生产备份"，实际上它与
+`%TEMP%\yw-dsh-live\.credentials.yaml` **逐字节相同**（743 B，`sha256:B2819B006F…`）——是隔离测试家
+那份的副本。日常家真正的原始快照是 `backup/.credentials.yaml`（70 B，8/17 15:27），里面**只有
+`DEEPSEEK_API_KEY`，没有任何 OPENLUX 键**。
+
+所以事实是：`~/.dsh` 历史上从没有过自己的 OPENLUX 凭据，今天它里面那份（生产令牌 +
+`OPENLUX_SESSION`）是从隔离测试家搬过去的。功能上是通的（客户端能读出真实余额），但两个家从此共用
+同一个登录会话，这不是设计，是我搬的。要回到干净状态，就把 `~/.dsh/.credentials.yaml` 恢复成 70 字节
+那份，然后在客户端界面上正常登录一次，让应用自己写它自己的会话。
+
+**所以规矩是**：换凭据必须留一份带时间戳的备份，用完立刻还原、并用上面那条对打确认；备份文件名要写清
+**从哪个 home 拷的**，不要只写"生产/测试"——这次栽的就是这一点。本机备份放在 gitignore 掉的
+`yunwu-desktop/.tmp-e2e/backup/`：`.credentials.yaml`(70 B) 是日常家 8/17 的原样，
+`live.credentials.yaml`(743 B) 是隔离测试家的，`test-station.credentials.yaml`(139 B) 是测试站令牌那版。
+**令牌不入库**，换机器就按上表重新取一条。
