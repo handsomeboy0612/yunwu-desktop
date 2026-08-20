@@ -4641,27 +4641,153 @@ $env:DSH_HOME="$env:LOCALAPPDATA\Temp\yw-dsh-live"; node lib/bin.js
 config={"baseUrl":"http://127.0.0.1:3000"}` 排在插件插入项（#30）之后；删掉补丁回到 47 条、
 那一条消失。
 
-### 踩过一次的坑：换了凭据没换回来，而"还原"还原错了源
+### 踩过一次的坑：换了凭据没换回来，四个半小时没发现
 
 8/20 04:24 为 UI 测试把 `~/.dsh/.credentials.yaml` 换成测试站令牌，当时以为还原了，其实没有——
-直到 05:55 起客户端才发现，那个文件的修改时间**正好停在 04:24:56**。
+直到 05:55 起客户端才发现。留下的证据很直白：那个文件的修改时间**正好是 04:24:56**，长度从 743
+字节缩到 139，`OPENLUX_SESSION` 整段丢失。
 
 判据不用猜，两条对打就行：拿现用的 key 打本地 admin-server（测试库）——`200 success=true` 说明它是
-测试站那把；拿另一把打同一个口——`401` 说明它是生产那把。
+测试站的；拿备份里那把打同一个口——`401` 说明它是生产的。还原后客户端余额正常显示，这才算真的回来。
 
-**但这次的"还原"本身也是错的，记下来比记那个坑更要紧。** 我从
-`.tmp-e2e/backup/live.credentials.yaml` 拷回日常家，标签写的是"日常家的生产备份"，实际上它与
-`%TEMP%\yw-dsh-live\.credentials.yaml` **逐字节相同**（743 B，`sha256:B2819B006F…`）——是隔离测试家
-那份的副本。日常家真正的原始快照是 `backup/.credentials.yaml`（70 B，8/17 15:27），里面**只有
-`DEEPSEEK_API_KEY`，没有任何 OPENLUX 键**。
+**所以规矩是**：换凭据必须同时留一份带时间戳的备份，用完立刻还原并用上面那条对打确认，不要靠"我记得
+还原过"。本机两份备份放在 gitignore 掉的 `yunwu-desktop/.tmp-e2e/backup/`（`live.credentials.yaml`
+是生产那份、`test-station.credentials.yaml` 是测试站那份）——**令牌不入库**，换机器就按上表重新取一条。
 
-所以事实是：`~/.dsh` 历史上从没有过自己的 OPENLUX 凭据，今天它里面那份（生产令牌 +
-`OPENLUX_SESSION`）是从隔离测试家搬过去的。功能上是通的（客户端能读出真实余额），但两个家从此共用
-同一个登录会话，这不是设计，是我搬的。要回到干净状态，就把 `~/.dsh/.credentials.yaml` 恢复成 70 字节
-那份，然后在客户端界面上正常登录一次，让应用自己写它自己的会话。
+## 模型列表改成两层：服务端下发 + 用户自留（2026-08-20）
 
-**所以规矩是**：换凭据必须留一份带时间戳的备份，用完立刻还原、并用上面那条对打确认；备份文件名要写清
-**从哪个 home 拷的**，不要只写"生产/测试"——这次栽的就是这一点。本机备份放在 gitignore 掉的
-`yunwu-desktop/.tmp-e2e/backup/`：`.credentials.yaml`(70 B) 是日常家 8/17 的原样，
-`live.credentials.yaml`(743 B) 是隔离测试家的，`test-station.credentials.yaml`(139 B) 是测试站令牌那版。
-**令牌不入库**，换机器就按上表重新取一条。
+**要复现的结果**（先写清结果，再挑能到达它的能力）：运营在服务端改下发清单，增的删的在用户
+**下次启动**都跟着变；用户自己添加的模型一个字都不动；下发的那几条用户**删不掉也改不了**。
+第三条是用户明确要的（"不让删、不让改名"），等于把 Chrome 的 `recommended` 换成 `mandatory`。
+
+**光把那个常量换成服务端下发是不够的。** `STARTER_MODELS` 只在"从未决定过成员"的机器上种一次，
+种完写进 settings 的 user 层，`membershipDecided` 从此为真（`models/sync.ts:186-198` 改前），之后永不增删。
+所以改数据源只对新装机器有效，存量装机一辈子收不到下发变更——这正是要动合并逻辑的原因。
+
+### 参考实现（2026-08-20 联网查的）
+
+三个不相干的领域给出同一个答案：**基线 + 用户增量，靠溯源标记区分每条归谁**。
+
+| 参考 | 它怎么做 | 我们取哪一点 |
+|---|---|---|
+| **Cherry Studio**（同类 Electron AI 客户端，与我们形状最像）| `user_model` 表每行带 `presetModelId` 做溯源；读取时**以当前注册表为基线、只叠加用户存下的 delta**，预设行只物理存用户改过的列（PR #17442：*registry updates now apply to existing providers and models while preserving user overrides*）| 溯源标记这个位置，以及"基线可变、增量持久"的读取模型 |
+| **K8s server-side apply** | `managedFields` 记录字段归属，apply 时删掉"我上次拥有、这次不再声明"的，**前提是没有别的 manager 认领过** | 删除的判据。没有标记就只能比对数组按值猜意图，那正是 `sync.ts` 原来不敢删的原因 |
+| **Chrome 企业策略** | `managed`（用户不可改）与 `recommended`（管理员给默认值、用户可覆盖）两级，物理上分目录 | 语义分级。我们这次选 mandatory |
+| LobeChat | `OPENAI_MODEL_LIST="-gpt-4,+my-model"` 用 `+/-/=` 表达对默认清单的增删改名 | 只作佐证：它是**部署方**改配置，不是运营对终端用户下发，形状不同 |
+
+### 我们这边的三条约束，都是查出来的
+
+1. **内核 settings 本来就分层**（schema 默认 → 注册方的组合 `base` → 用户文档，
+   `dsh-settings/README.zh.md:5`），看着正是 Chrome 那套。**但 `mergeLayers` 对数组是整体替换**
+   （"plain objects merge recursively, every other value (arrays included) replaces the lower layer
+   wholesale"，`dsh-settings/lib/index.js:228-241`）。所以"base 放下发清单、user 放用户自选"在同一个
+   `models[]` 上走不通——用户一加东西就把下发层整个遮住。`providers` 是普通对象、递归合并，双路由
+   那条路存在，但会在下拉里多出一个分组标题，且要动 cordis 配置。
+2. **schemastery 保留未声明的字段**，嵌在数组和 dict 里同样保留（真机验证：把带额外键的条目过一遍
+   settings 文档用的同一套 object/array/dict 形状，键原样出来）。所以溯源标记直接写在条目上就行
+   ——不需要外部快照、不需要碰 cordis 配置、不需要打上游补丁。这是本轮最省的一步，也是 Cherry
+   Studio 那个 `presetModelId` 的同一个位置。
+3. **服务端数据早就齐了，不用新增接口**：`/api/pricing_new` 每条带 `tags` / `model_ratio` /
+   `sort_order` / `usage_count` / `enable_groups` / `icon` / `translations`（`model/pricing.go:30-60`），
+   而客户端 `models/pool.ts` **本来就在调它**（为了"在售 + 这把 key 能调"的交集），连 `tags` 都已经
+   带回来了。而 `tags` **已经在承载运营语义**——线上模型广场把 `new`/`新` 渲染成 NEW 角标、
+   `hot`/`热门` 成 HOT（`web/src/components/table/model-pricing/view/card/PricingCardView.js:205-222`），
+   所以借它做下发开关是走既有做法，不是发明。注意它是共享字段：`PricingTags.js` 会把所有 tag
+   自动收进网页版筛选器。
+
+### 方案
+
+标记字段 **`openluxManaged: true`**，带产品前缀是为了永不与上游 `models[]` 字段撞名。
+
+每次 `syncModels` 做四步，与首启无关、每次都跑：
+
+1. 拉服务端下发清单 `desired`（从既有的 pool 里按约定 tag 筛）；
+2. 读 **user 层**的 `models[]`（不是解析值——解析值含 base 层的出厂条目，会被误当成用户的），
+   按标记分两堆：带标记的是我们上次下发的，不带的是**用户自己加的**；
+3. `next` = `desired`（每条打上标记、字段全部重建）+ 用户那堆（原样，一个字段不动）；
+4. 写回。
+
+于是：服务端增一条，用户重启多一条；删一条，那条自动消失；用户自己加的完全不参与这套计算。
+id 撞车时托管那条胜出——不是偏好，是因为适配器拒绝同一路由列出两次同一个 id
+（`dsh-llm-pi-ai/lib/index.js:1113-1115`），而且它废掉整个 section 而不是那一行。
+
+**数据源与回落。** 第一版从 `pricing_new` 按约定 tag（`桌面推荐`）筛，**一条都没筛到就回落到现有那 5 个**。
+这条回落让改动可以先上线、后配置：线上还没打标签时行为与今天逐字一致，运营打上标签后自动接管。
+它也与这个模块既有的谨慎一致（"一个 starter 都调不了就别动出厂列表"）。
+
+**拿不到答案就什么都不改。** 控制台不可达意味着下发清单"未知"，不是"空"——按空处理会在网络第一次
+抖动时删掉全部下发条目。所以只有真的拿到 pool 才走合并，否则只刷 catalog 字段。这与 `pool.ts`
+既有的纪律同口径：没有快照就不对账。
+
+**mandatory 要在界面上闭合，而且 `id` 必须一起锁。** 托管行整行只读（id / 名称 / 容量 / 删除）。
+锁 `id` 不是顺手为之：留着它就等于留了一条绕过删除禁用的路——用户把 id 改一个字，那条不再匹配下发
+清单，下次合并会把它当成"上次下发、这次不再下发"清掉，改 id 就是删除。
+
+**配置文件手改这个洞不用堵。** `settings.yaml` 是用户可编辑的文本文件、设置页自带打开入口，界面拦不住；
+但下次启动照下发清单重写就回来了，"改了也白改、重启复原"正是 mandatory 该有的行为，不用额外写代码。
+
+**代价说清楚，这是取舍不是缺陷。** 下拉列表的长度从此完全由运营决定，用户没有清理视野的余地——
+下发 8 条他就得看 8 条，哪怕只用其中 2 条。WorkBuddy 也是这样（完全服务端下发 + 底部"配置自定义模型"），
+所以不算跑偏，但下发数量要当成产品决策来控制。真要给收纳自由，Cherry Studio 的 `isEnabled`
+（条目仍归我们、删不掉，但用户能关掉不在下拉里显示）是条中间路，这一版不做。
+
+### 这一版**不做**：倍率与「限时免费」的显示
+
+它和上面那套机制是两件事，卡在一个具体的地方：下拉每行渲染的是 `name` + `description`
+（`dsh-client-ui-model-selection/lib/client.js:566-572`），而 pi-ai 的 `modelFields` 不含 `description`
+（`dsh-llm-pi-ai/lib/index.js:1349-1356`）、它的 `resolveModel` 也不产出（`:797-805`）——尽管
+`dsh-llm` 这一层是支持透传的（`dsh-llm/lib/index.js:1165`、`:1195`）。所以**存得进去、显示不出来**，
+中间那一段要给 pi-ai 打个小补丁（`modelFields` 加一个 `description`，`resolveModel` 的返回带上它）。
+
+退一步把倍率拼进 `name` 是不行的：`name` 是用户可编辑字段（模型设置页就在改它），我们每次刷倍率会
+覆盖用户改的名字，不刷就永远不更新。`description` 反过来——全 shell 没有任何编辑器能写它，处境与
+`reasoningEfforts`、`compat` 完全一样，归我们所有、每次重写，不会和用户的编辑打架。
+
+顺带记一个已经查清的事实，做「限时免费」时会用到：WorkBuddy 截图里 Hy3 那行是 `0.00x` 加「限时免费」，
+两者是同一件事——**倍率设 0 就是免费**，管理端本来就能改倍率。所以"免费"这件事服务端零代码改动、
+纯运营配置；真正缺的只有"限时"的自动到期（现在改倍率是手动的，没有起止时间）。
+
+### 落地与真机验证
+
+代码分两处：`models/delivery.ts` 是纯策略（标记名、标签、回落清单、`deliveredIds`、`merge`，零
+import），`models/sync.ts` 是那一轮的执行（读 user 层、合并、填 catalog 字段、写回）。拆开不是
+洁癖——测试要跨包 import 这些函数，而 `sync.ts` 会把 pi-ai 的类型图一起拉进来，桌面包的
+`tsconfig.tests.json` 在 `NodeNext` 下当场报出 pi-ai 自己 `.d.ts` 里几十条 TS1543。**判据**：把测试
+文件挪走再跑 `tsc -p tsconfig.tests.json` 是 exit 0，所以那些错误是这个 import 引进来的，不是既有的。
+界面那半边在 `dsh-client-ui-settings-models` 的补丁里（`ModelListEditor` 逐行判 `openluxManaged`）。
+
+**只读用 `readOnly` 而不是 `disabled`。** 上游 `.zGbnIq_input:disabled` 是 `opacity:.6`，整行压到
+六成会让**最该用的**那几个模型看着像失效；`readOnly` 不发灰、还能选中复制模型 id，语义正好是
+"这是定的，不是坏的"。删除按钮没法 readOnly，所以托管行**不渲染**它，那一格换成「官方」标签
+（行是四列网格 `1.4fr / 1fr / auto / auto`，换掉不塌）。
+
+**前置事实（只读探针 `.tmp-probe/delivery-preflight.mjs`）**：线上 409 条、其中 248 条是这把 key
+可调的对话模型，**没有任何一条带 `桌面推荐`**——所以真机跑的就是回落路径；回落那 5 个在 pool 里全在。
+
+| 验的事 | 结果 |
+|---|---|
+| 下发生效 | 隔离家启动一次，user 层 2 条（自定义名 `OpenLux V4-Pro`）→ **5 条全带 `openluxManaged: true`**，name/容量/思考声明由本地 catalog 填齐。那 2 条与下发撞 id，托管版本胜出（名字回到 `DeepSeek V4 Pro`）——**老用户改过的名字第一次同步时会被官方名覆盖**，这是 mandatory 的必然结果 |
+| 托管行整行只读 | 5 行全部 `readOnly=true`（id、名称、展开后的两个容量字段），「官方」标签带说明 tooltip，**删除按钮不存在**。没只看类名：量了计算样式（灰底 `rgb(245,246,247)`，用户行是白底 `rgb(255,255,255)`），并确认 `[readonly]` 与 `managedTag` 两条规则在活着的样式表里 |
+| 改不动是真的改不动 | 往第一行 id 里真打 `XXX`，值仍是 `deepseek-v4-flash` |
+| 运营改清单 → 重启跟着变 | 把标签换成线上真实存在的 `联网`（只覆盖 6 个 gpt-search 模型）重启：托管条目变成那 6 条，原来 5 条**全部消失** |
+| 用户自留不动 | 手工加一条不带标记的 `glm-5.3` /「我自己加的 GLM」，两次换标签重启后都在、名字一字未改；界面上它白底可编辑、有删除按钮、无「官方」标签 |
+| 回落 | 标签改回 `桌面推荐`（线上无此标签）重启 → 回到 5 条，用户那条仍在 |
+| 掉线不动成员 | 日常家那把 key 已 401，于是 `pool === undefined`、成员一条不动（只刷 catalog 字段）。这条不是构造出来的，是真机现状 |
+| 静态检查 | 桌面包四份 tsconfig 的 `typecheck` + 新增 `tests/model-delivery.spec.ts` 11 例全过；account 包 build + typecheck 干净；补丁重生成后 `yarn install` 还原出的 `client.js` 与工作副本 **sha256 完全一致** |
+
+**两件真机才看见的事，都会影响运营怎么用它**：
+
+1. **下发一个本地 catalog 不认识的模型，条目就只有 id 和标记**——那 6 个 gpt-search 就是这样，
+   下拉里显示的是模型 id、没有 name、也没有思考声明（`reasoningEfforts` 靠 catalog 填）。所以
+   下发清单要优先选 catalog 认识的模型，否则用户看到的是裸 id。
+2. 日常家 `~/.dsh` 的默认模型现在是 **`kling-effects`**（一个视频模型），models 列表里也躺着它
+   ——是「获取模型弹窗默认全选」那个 bug 期间误加的。新逻辑不会替用户删（它不带标记，归用户），
+   要手动清；`agent-default-model` 也得改回一个对话模型，否则默认模型发不出话。
+
+**重新生成补丁的办法**（改完 `node_modules` 里的 `client.js` 之后）：`node .tmp-probe/regen-patch.mjs`。
+它用 node 驱动 `yarn patch` / `patch-commit` 并自己写字节——现有补丁是**无 BOM 纯 LF**，而
+PowerShell 5.1 的 `>` 重定向写的是 UTF-16，直接重定向会把补丁写坏。复验用 sha256：`yarn install`
+之后工作副本应当逐字节不变。
+
+> **这一节被并发编辑冲掉过一次**：写进去之后另一处按自己读到的快照整文件写回文档，这 100 多行
+> 无声消失。判据是 `grep` 自己刚写的标题——**写完文档要回头搜一遍确认还在**，和 CSS 那次同一个坑。
