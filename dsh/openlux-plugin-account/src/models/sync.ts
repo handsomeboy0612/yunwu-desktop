@@ -1,29 +1,18 @@
 /**
- * Keeping our provider route's model list honest, without owning what the user
- * chose.
+ * Writing the two-layer model list into the adapter's settings section.
  *
- * The kernel splits this cleanly, and the split is worth naming because it is
- * what lets an automatic writer coexist with a settings page:
+ * Which entries belong to which layer is {@link ./delivery.ts}'s subject; this
+ * module is the round that applies it — read the console, merge, and fill in
+ * the fields only the installed catalog knows. The one thing it owns outright
+ * is the thinking declaration (`reasoningEfforts` / `compat`): nothing else in
+ * the shell can write those, and without them a hand-declared model simply
+ * does not reason, so they are refreshed for the user's own entries too.
  *
- * - **The user owns membership and labels.** The models page edits exactly
- *   `id`, `name`, `contextWindow` and `maxTokens`
- *   (`ui-settings-models/src/client/ModelListEditor.tsx`), and its save path
- *   spreads the existing entry first so a field it does not edit survives.
- * - **We own the thinking declaration.** `reasoningEfforts` and `compat` have
- *   no editor anywhere in the shell, so nothing else can write them — and
- *   without them a hand-declared model simply does not reason, which is how
- *   every model on this route would behave if we wrote nothing.
- *
- * So this module never removes a model and never renames one. It seeds the
- * list on a machine that is still at the factory two, and it keeps the
- * thinking declaration current for whatever is in the list — including a model
- * the user just adopted through the models page's own "fetch models" button.
- *
- * **It does not prune.** A model that left the square, or that this key can no
- * longer call, stays in the list. Deleting it would be acting on a snapshot
- * taken at exactly the wrong moment — the square hiccups, and a user's curated
- * list is silently gone. A stale entry fails loudly when used and can be
- * removed by hand; silent deletion cannot be undone.
+ * **A round that cannot read the console changes nothing about membership.** An
+ * unreachable console means the delivered list is *unknown*, not empty, and
+ * acting on the empty case would delete every delivered entry the first time
+ * the network blinks. Same discipline the pool already follows (`pool.ts`): no
+ * snapshot, no reconcile.
  *
  * @module openlux-plugin-account/models/sync
  */
@@ -31,6 +20,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { catalogFacts } from './capabilities.ts'
+import { deliveredIds, isManaged, merge, type ModelEntry } from './delivery.ts'
 import { fetchChatPool } from './pool.ts'
 
 /**
@@ -48,31 +38,6 @@ const PI_AI_NS = settingsNamespace('llm-pi-ai')
  */
 export const ROUTE = 'openlux'
 
-/**
- * What a machine that has never chosen anything starts with.
- *
- * Every id here is one the installed catalog describes, so the starter set
- * arrives with real thinking declarations rather than as bare names, and each
- * is filtered against the live pool before being written — seeding a model
- * this key cannot call would make the very first message fail.
- *
- * This is a starting point, not a recommendation: changing it moves nothing
- * for anyone who has already curated a list.
- */
-const STARTER_MODELS: readonly string[] = [
-  'deepseek-v4-flash',
-  'deepseek-v4-pro',
-  'claude-opus-4-8',
-  'gemini-3.1-pro-preview',
-  'gpt-5.4',
-]
-
-/** One entry of the route's `models` list, as the settings document holds it. */
-interface ModelEntry {
-  readonly id: string
-  readonly [field: string]: unknown
-}
-
 /** The slice of the adapter's section this module reads. */
 interface PiAiSection {
   readonly providers?: Record<string, { readonly models?: readonly ModelEntry[] } | undefined>
@@ -84,6 +49,10 @@ export interface SyncOutcome {
   /** Why nothing happened, when nothing did. */
   readonly skipped?: 'no-settings' | 'no-key' | 'no-pool' | 'unchanged'
   readonly models?: number
+  /** Of those, the ones the console delivered. */
+  readonly managed?: number
+  /** Of those, the ones the user added themselves and this round left alone. */
+  readonly kept?: number
   /** Models whose thinking declaration the installed catalog supplied. */
   readonly described?: number
 }
@@ -106,18 +75,22 @@ function currentModels(settings: SettingsLike): readonly ModelEntry[] {
 }
 
 /**
- * Whether anyone has ever decided this route's membership.
+ * The entries this machine's settings document actually holds, as opposed to
+ * the resolved value.
  *
- * Asked of the raw user section rather than compared against a copy of the
- * factory list: the descriptor's `user` layer is the kernel's own answer to
- * "was this overridden", so there is no second copy of the shipped list to
- * drift. Our own seed writes into that layer, which is what freezes membership
- * afterwards — the list stops being ours the moment it exists.
+ * The difference is who owns what. Factory entries arrive from the composition
+ * `base` layer and belong to nobody; reading the resolved value would make
+ * them look like the user's own picks and preserve them forever, next to a
+ * delivered list that already covers the same ground. The descriptor's `user`
+ * layer is the kernel's own answer to "was this written here", and both the
+ * models page and this module write into it — so it is exactly the set of
+ * entries somebody chose on purpose.
  * @param settings - the settings service.
+ * @returns the user layer's entries; empty when nothing was ever written.
  */
-function membershipDecided(settings: SettingsLike): boolean {
+function writtenModels(settings: SettingsLike): readonly ModelEntry[] {
   const descriptor = settings.describe().find(entry => entry.ns === PI_AI_NS)
-  return modelsOf(descriptor?.user) !== undefined
+  return modelsOf(descriptor?.user) ?? []
 }
 
 /**
@@ -162,13 +135,17 @@ function same(a: readonly ModelEntry[], b: readonly ModelEntry[]): boolean {
 }
 
 /**
- * Bring the route's model list up to date.
+ * Reconcile the route's model list: deliver what the console lists, keep what
+ * the user added, refresh what the installed catalog owns.
  *
- * Network is needed only to seed: an installation that already has a list is
- * reconciled from the in-process catalog alone, so a launch with no
- * connectivity still lands correct thinking declarations.
+ * Every round wants the network now — the delivered list is the console's to
+ * state, and nothing local mirrors it beyond the fallback. A round that cannot
+ * reach it still refreshes the thinking declarations of whatever is already
+ * written, so launching offline lands correct capabilities on an existing list;
+ * only a machine with nothing written yet comes away untouched, which is the
+ * one case where guessing would put rows in the picker nobody asked for.
  * @param ctx - host context.
- * @param options - console origin, factory list, and how to read the key.
+ * @param options - console origin and how to read the key.
  * @param signal - caller cancellation.
  * @returns what the sync did.
  */
@@ -184,18 +161,20 @@ export async function syncModels(
   if (settings === undefined) return { changed: false, skipped: 'no-settings' }
 
   const current = currentModels(settings)
-  let membership = current
-  if (!membershipDecided(settings)) {
-    const apiKey = await options.apiKey()
-    if (apiKey === undefined || apiKey === '') return { changed: false, skipped: 'no-key' }
-    const pool = await fetchChatPool(ctx, options.baseUrl, apiKey, signal)
-    if (pool === undefined) return { changed: false, skipped: 'no-pool' }
-    const available = new Set(pool.map(model => model.id))
-    const seeded = STARTER_MODELS.filter(id => available.has(id)).map(id => ({ id }))
-    // Not one starter is callable with this key: leave the factory list alone
-    // rather than empty the picker. The user still has the models page.
-    if (seeded.length > 0) membership = seeded
+  const written = writtenModels(settings)
+
+  const apiKey = await options.apiKey()
+  const pool = apiKey === undefined || apiKey === ''
+    ? undefined
+    : await fetchChatPool(ctx, options.baseUrl, apiKey, signal)
+
+  if (pool === undefined && written.length === 0) {
+    return { changed: false, skipped: apiKey === undefined || apiKey === '' ? 'no-key' : 'no-pool' }
   }
+
+  const membership = pool === undefined
+    ? current
+    : merge(deliveredIds(pool), written.filter(entry => !isManaged(entry)))
 
   const next = membership.map(described)
   if (same(current, next)) return { changed: false, skipped: 'unchanged', models: next.length }
@@ -203,6 +182,8 @@ export async function syncModels(
   return {
     changed: true,
     models: next.length,
+    managed: next.filter(isManaged).length,
+    kept: next.filter(entry => !isManaged(entry)).length,
     described: next.filter(entry => entry['reasoningEfforts'] !== undefined).length,
   }
 }

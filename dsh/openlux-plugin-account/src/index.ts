@@ -550,7 +550,8 @@ async function syncCatalog(ctx: Context, baseUrl: string, reason: string, signal
   try {
     const outcome = await syncModels(ctx, { baseUrl, apiKey: () => apiKey(ctx) }, signal)
     if (outcome.changed) {
-      ctx.logger.info(`openlux: model list synced (${reason}): ${outcome.models} models, `
+      ctx.logger.info(`openlux: model list synced (${reason}): ${outcome.models} models `
+        + `(${outcome.managed ?? 0} delivered, ${outcome.kept ?? 0} the user's own), `
         + `${outcome.described ?? 0} with a thinking declaration`)
     } else {
       ctx.logger.debug(`openlux: model sync (${reason}) changed nothing: ${outcome.skipped}`)
