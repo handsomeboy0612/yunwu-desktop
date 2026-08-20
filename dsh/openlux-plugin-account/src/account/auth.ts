@@ -40,14 +40,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { ACCOUNT_TIMEOUT_MS, asEnvelope, normalizeBase, requestJson } from './http.ts'
 import { saveSession } from './session.ts'
 
-/**
- * Token name created on the user's behalf, visible in their console.
- *
- * Sign-in also accepts the previous shell's name so a migrating user keeps one
- * key instead of accumulating one per product rename.
- */
+/** Token name created on the user's behalf, visible in their console. */
 const TOKEN_NAME = 'OpenLux 桌面客户端'
-const LEGACY_TOKEN_NAMES = ['云雾桌面客户端']
 
 /**
  * Smart routing mode stamped on a created token.
@@ -253,9 +247,8 @@ async function findReusableKey(
   const envelope = asEnvelope<unknown>(body)
   if (!response.ok || envelope.success !== true) return undefined
 
-  const names = new Set([TOKEN_NAME, ...LEGACY_TOKEN_NAMES])
   const found = itemsOf(envelope.data).find(item =>
-    item.name !== undefined && names.has(item.name)
+    item.name === TOKEN_NAME
     && item.status === 1
     && typeof item.key === 'string' && item.key !== ''
     && typeof item.routing_priority === 'string' && item.routing_priority !== '',
