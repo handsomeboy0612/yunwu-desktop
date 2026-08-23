@@ -5875,9 +5875,35 @@ provider 也只认 cwd 那棵树），而「模型读不了文档时换一个能
 **没有 openlux 这一路**，所以对我们那 476 条模型它返回 `undefined`（那行判断写的是
 `!== undefined && !includes('image')`，未知一律放行）。结论不变：这条事实得我们自己的宿主端点递。
 
+### 拿到 preload 桥之后：附件不再拷贝一份（2026-08-23 落地并双臂验通）
+
+上面查到桥在之后就把它接上了。`client/file-path-bridge.ts` 读
+`__DSH_DESKTOP_FILE_PATH__`，`AttachFileButton` 的 intake 先问它一次：
+拿到路径就直接进草稿，拿不到才走原来的「字节上传 + 落 `~/.dsh/media/incoming`」。
+**空串就是「没有路径」而不是错误**——这是上游自己的读法（`workspace-folder-drop.ts` 里
+`.trim()` 为空即失败），实测合成的 File 正是返回空串且不抛。
+顺带把体积上限挪到只管上传那条臂：那个限制是因为字节要过河才存在，引用原地文件不过河。
+
+动手前先验的那一下（改代码之前）：用 `DOM.setFileInputFiles` 把真文件塞进一个探针 input，
+桥返回 `d:\work\...\bridge-test.txt`；`new File([...])` 造的返回 `""`。两种答案都拿到了才开始写。
+
+改完复验，两条臂都从真机读数确认：
+
+| 入口 | 草稿里落的 |
+|---|---|
+| 选择器选真文件 | `` `d:\work\yunwu-jihe\yunwu-desktop\.tmp-e2e\bridge-test.txt` `` —— 原始路径，`media/incoming` 里没有新增 |
+| 拖一个合成 File（等同剪贴板粘贴） | `` `C:\Users\000\.dsh\media\incoming\pasted-note-0b74faa912fb.txt` `` —— 仍然是暂存拷贝 |
+
+**顺手核对了一条会被这个改动踩到的事**：`media/ask-tool.ts:122-125` 与 `doc-tool.ts:126-129`
+对绝对路径一律接受（相对路径才按 cwd 解析），没有家目录围栏，所以引用工作区外的原地文件
+对我们自己的 `image_ask` / `document_ask` 同样成立。
+
+外壳档位按用户决定改回 `compatibility`：删掉 `~/.dsh/settings.yaml` 里那两行
+（默认就是 compatibility，不写值比写值更诚实），重启后 URL 变成
+`?dsh-desktop-mode=compatibility`、`advanced-shell` 那份 CSS 不再注入，品牌层与登录态照旧。
+
 ### 还没做完的
 
-1. **`files/stage.ts` 按新的 preload 桥重估**：桌面部署能省掉暂存拷贝那一跳，
-   模块开头那段「拿不到路径」的理由已经过期。
-2. **外壳档位**：本机 `~/.dsh/settings.yaml` 存着 `dsh-desktop: mode: advanced`，
-   而源码默认与 8/18 的决定都是 compatibility（原生标题栏）。要不要改回是产品决定，没动。
+暂时没有挂着的项。下一轮要动附件这块时，注意「引用原地文件」与「暂存拷贝」的一个语义差别：
+引用跟着用户后来的编辑一起变、文件被删就失效，拷贝不会——WorkBuddy 与上游 `@file` 都是引用语义，
+所以这是对齐，不是缺陷。

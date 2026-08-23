@@ -1,17 +1,19 @@
 /**
  * Where a file the user attached lands, so that a path can stand for it.
  *
- * ## Why the bytes travel, when the file is already on this machine
+ * ## When the bytes travel, and when they no longer have to
  *
- * The obvious route is to send the path instead of the content: the renderer
- * holds a `File`, and Electron can turn one into an absolute path with
- * `webUtils.getPathForFile`. That call needs a preload script, and the DSH
- * windows are created without one (`dsh-plugin-desktop/src/window-options.ts`
- * — `sandbox: true`, no `preload`). That package is upstream
- * (anywhere-labs/deepseek-harness-desktop), so reaching the path would mean
- * forking it. Moving the bytes through the channel this plugin already owns
- * costs one request and forks nothing — and it keeps working in a browser
- * deployment, where no path exists to hand over at all.
+ * The cheaper route is to send the path instead of the content, and since
+ * 0.1.1-rc.2 the desktop can: the shell builds its windows with a preload that
+ * exposes `webUtils.getPathForFile` (`dsh-plugin-desktop/src/preload.ts`), so
+ * the button resolves a picked or dropped file in place
+ * (`client/file-path-bridge.ts`) and never reaches this endpoint. Until that
+ * version the windows had no preload at all, which is why this module was
+ * written first and why moving bytes was the only shape available.
+ *
+ * What remains for this endpoint is everything that has no path to give: a
+ * browser deployment, and a clipboard image that was never a file on disk.
+ * Those still arrive as bytes, so they still need somewhere to land.
  *
  * ## Why a path is worth producing
  *

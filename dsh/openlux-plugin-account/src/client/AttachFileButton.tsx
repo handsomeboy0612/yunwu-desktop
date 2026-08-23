@@ -12,11 +12,20 @@
  *
  * ## Why a path rather than an upload
  *
- * The file goes to the host, which writes it under the harness home and answers
- * with its absolute path (`files/stage.ts`); the path is what lands in the
- * draft. That is WorkBuddy's shape — the file stays a file and the model opens
- * it with its own tools — and it is the only shape that works for a pptx, a
- * csv, or an mp4 without us parsing documents in-process.
+ * What lands in the draft is an absolute path. That is WorkBuddy's shape — the
+ * file stays a file and the model opens it with its own tools — and it is the
+ * only shape that works for a pptx, a csv, or an mp4 without us parsing
+ * documents in-process.
+ *
+ * There are two ways to get one, and the cheap one is preferred: on the desktop
+ * the shell's preload hands over the file's real path
+ * (`client/file-path-bridge.ts`), so nothing is copied and the model reads the
+ * file the user is actually looking at. Where there is no path to have — a
+ * browser deployment, or a clipboard image that never came from disk — the
+ * bytes go to the host, which writes them under the harness home and answers
+ * with that copy's path (`files/stage.ts`). The size ceiling belongs to that
+ * second arm only: it exists because the bytes travel, and a referenced file
+ * does not travel.
  *
  * The path goes in as inline code because that is how a path reads in prose,
  * and because the persona already tells the model that a path in the user's
@@ -90,6 +99,7 @@ import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-cli
 // them structurally would only buy a cast at the one call that matters.
 import type { ComposerAttachment, DraftAttachmentId } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { FILE_STAGE_ENDPOINT, FILE_VISION_ENDPOINT, MAX_STAGED_BYTES } from '../files/name.ts'
+import { diskPathOf } from './file-path-bridge.ts'
 import type { AccountHostCaller } from './types.ts'
 
 /** Slot id; also the DOM marker. */
@@ -281,6 +291,13 @@ export function AttachFileButton(
     let draft = draftAt.current
     const staged: File[] = []
     for (const file of files) {
+      const onDisk = diskPathOf(file)
+      if (onDisk !== undefined) {
+        draft = withPath(draft, onDisk)
+        inputActions.setDraft(draft)
+        staged.push(file)
+        continue
+      }
       if (file.size > MAX_STAGED_BYTES) {
         refuse(t('tooLarge', { size: sizeText(MAX_STAGED_BYTES) }))
         continue
