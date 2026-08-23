@@ -13,7 +13,7 @@
  * when the scope that created it goes away.
  */
 
-import type { ImageLoader } from '@deepseek-ai/dsh-client-ui-attachment'
+import type { ImageLoader } from './MessageImage.tsx'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { callAccountHost } from './host.ts'

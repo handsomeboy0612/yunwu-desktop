@@ -44,6 +44,7 @@ async function createHarness(options: {
   readonly showManualCheckResult?: (result: UpdateCheckResult | null) => Promise<void>
   readonly downloadAndOpen?: (version: string, signal: AbortSignal) => Promise<void>
   readonly notify?: (notification: DesktopNotification) => void
+  readonly locale?: DesktopRuntime['locale']
   readonly state?: string
 } = {}): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-updates-'))
@@ -62,6 +63,7 @@ async function createHarness(options: {
   let tray: DesktopTrayItem | undefined
   let disposer: (() => void | Promise<void>) | undefined
   const runtime = {
+    locale: options.locale ?? 'en',
     updates: {
       isPackaged: options.packaged ?? true,
       currentVersion: '2.0.0',
@@ -118,6 +120,14 @@ describe('desktop update Host plugin', () => {
     })
     expect(() => Config({ intervalMs: 0 } as UpdateConfig)).toThrow()
     expect(() => Config({ requestTimeoutMs: 0 } as UpdateConfig)).toThrow()
+  })
+
+  it('renders the update tray command in the active native locale', async () => {
+    const harness = await createHarness({ packaged: false, locale: 'zh' })
+
+    expect(harness.tray.label()).toBe('检查更新…')
+
+    await harness.dispose()
   })
 
   it.each([
@@ -389,6 +399,19 @@ describe('desktop update Host plugin', () => {
     expect(downloading.registrationDispose).toHaveBeenCalledOnce()
     expect(downloading.notifications).toEqual([])
     expect(downloading.warnings).toEqual([])
+  })
+
+  it('releases one update generation once and does not restart background polling', async () => {
+    vi.useFakeTimers()
+    const request = vi.fn(async () => versionResponse('2.0.0'))
+    const harness = await createHarness({ request })
+
+    await harness.dispose()
+    await harness.dispose()
+    await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs + testConfig.intervalMs)
+
+    expect(request).not.toHaveBeenCalled()
+    expect(harness.registrationDispose).toHaveBeenCalledOnce()
   })
 
   it('does not wait for an open manual result dialog during disposal', async () => {

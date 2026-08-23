@@ -21,7 +21,10 @@
 import { useMemo } from 'react'
 import type { CSSProperties } from 'react'
 import { IconSparkle16 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { ImageGallery, type ImageLoader, type MessageImageLabels } from '@deepseek-ai/dsh-client-ui-attachment'
+// Ours rather than the kernel's: rc.2 stopped exporting these three from
+// `dsh-client-ui-attachment`, so the gallery and its labels live beside us now
+// (see MessageImage.tsx for what was copied and why).
+import { ImageGallery, type ImageLoader, type MessageImageLabels } from './MessageImage.tsx'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ToolCallBlock, ToolResultNode } from '@deepseek-ai/dsh-client-runtime/client'

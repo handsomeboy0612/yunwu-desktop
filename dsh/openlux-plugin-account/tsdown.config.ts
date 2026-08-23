@@ -34,10 +34,12 @@ export default defineConfig([
     // Shared with every other client bundle through the module loader; bundling
     // a second React or a second slots registry would split the app's state.
     // Every entry here is one the shell shares into the browser's frozen module
-    // table (`client/web/src/platform.ts` PLATFORM_MODULES, plus the runtime
-    // store exemption). That list is also the limit: a require the table cannot
-    // answer throws at load, and bundling one of these instead would split the
-    // app's state across two copies.
+    // table (`client/web/src/platform.ts`: PLATFORM_MODULES plus the preloaded
+    // runtime client). That list is also the limit: a require the table cannot
+    // answer throws at load, bundling one of these instead would split the app's
+    // state across two copies, and any other @deepseek-ai value import is a
+    // cross-plugin import the kernel's own build gate rejects — collaboration
+    // goes through cordis services or slots.
     external: [
       'react',
       'react/jsx-runtime',
@@ -46,9 +48,7 @@ export default defineConfig([
       '@deepseek-ai/cordis',
       '@deepseek-ai/dsh-client-runtime/client',
       '@deepseek-ai/dsh-client-ui-slots',
-      '@deepseek-ai/dsh-client-web-react',
       '@deepseek-ai/dsh-client-ui-primitives',
-      '@deepseek-ai/dsh-client-ui-attachment',
     ],
     noExternal: (id: string) => id.startsWith('@deepseek-ai/') ? undefined : true,
     outputOptions: {

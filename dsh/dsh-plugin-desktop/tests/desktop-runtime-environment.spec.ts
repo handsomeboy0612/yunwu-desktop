@@ -12,7 +12,7 @@ import {
 import { tmpdir } from 'node:os'
 import { delimiter as pathDelimiter, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   installDesktopDshRuntime,
   installDesktopPnpmRuntime,
@@ -47,6 +47,7 @@ function options(
 }
 
 afterEach(() => {
+  vi.restoreAllMocks()
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true })
   }
@@ -102,6 +103,23 @@ describe('desktop Host pnpm runtime', () => {
       expect(spawnSync('/bin/sh', ['-n', installation.nodeShimPath]).status).toBe(0)
     }
 
+    installation.dispose()
+    installation.dispose()
+    expect(environment).toEqual(original)
+  })
+
+  it('keeps recovered login-shell PATH beneath the Desktop runtime PATH', () => {
+    const stateDir = join(temporaryDirectory(), 'runtime')
+    const recoveredPath = '/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin'
+    const environment: NodeJS.ProcessEnv = {
+      PATH: recoveredPath,
+      KEEP: 'value',
+    }
+    const original = { ...environment }
+
+    const installation = installDesktopPnpmRuntime(options(stateDir, 'linux', environment))
+
+    expect(environment.PATH).toBe(`${installation.pathDir}:${recoveredPath}`)
     installation.dispose()
     installation.dispose()
     expect(environment).toEqual(original)
@@ -282,16 +300,54 @@ describe('desktop Host pnpm runtime', () => {
     expect(environment).toEqual({ PATH: '/usr/bin' })
   })
 
-  it('rejects unexpected public commands before changing PATH', () => {
+  it('recovers from stray command files instead of failing startup', () => {
+    const root = temporaryDirectory()
+    const stateDir = join(root, 'runtime')
+    const pathDir = join(stateDir, 'bin')
+    const nodeBinDir = join(stateDir, 'private', 'node-bin')
+    mkdirSync(pathDir, { recursive: true })
+    mkdirSync(nodeBinDir, { recursive: true })
+    writeFileSync(join(pathDir, 'dsh'), 'stray')
+    writeFileSync(join(nodeBinDir, 'dsh'), 'stray')
+    const environment: NodeJS.ProcessEnv = { PATH: '/usr/bin' }
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    const installation = installDesktopPnpmRuntime(options(stateDir, 'linux', environment))
+
+    expect(readdirSync(pathDir)).toEqual(['pnpm'])
+    expect(readdirSync(nodeBinDir)).toEqual(['node'])
+    expect(environment.PATH).toBe(`${pathDir}:/usr/bin`)
+    expect(stderr).toHaveBeenCalledTimes(2)
+    installation.dispose()
+  })
+
+  it('removes stray symlinks without touching their targets', () => {
     const root = temporaryDirectory()
     const stateDir = join(root, 'runtime')
     const pathDir = join(stateDir, 'bin')
     mkdirSync(pathDir, { recursive: true })
-    writeFileSync(join(pathDir, 'node'), 'unexpected')
+    const target = join(root, 'outside')
+    writeFileSync(target, 'outside')
+    symlinkSync(target, join(pathDir, 'dsh'))
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    const installation = installDesktopPnpmRuntime(options(stateDir, 'linux', { PATH: '/usr/bin' }))
+
+    expect(readdirSync(pathDir)).toEqual(['pnpm'])
+    expect(readFileSync(target, 'utf8')).toBe('outside')
+    expect(stderr).toHaveBeenCalledOnce()
+    installation.dispose()
+  })
+
+  it('refuses an unexpected directory in the public command directory', () => {
+    const root = temporaryDirectory()
+    const stateDir = join(root, 'runtime')
+    const pathDir = join(stateDir, 'bin')
+    mkdirSync(join(pathDir, 'dsh'), { recursive: true })
     const environment: NodeJS.ProcessEnv = { PATH: '/usr/bin' }
 
     expect(() => installDesktopPnpmRuntime(options(stateDir, 'linux', environment)))
-      .toThrow('directory contains unexpected entries: node')
+      .toThrow('contains an unexpected directory: dsh')
     expect(environment).toEqual({ PATH: '/usr/bin' })
   })
 
@@ -334,6 +390,7 @@ describe('desktop Host dsh runtime', () => {
       '  args: process.argv.slice(3),',
       '  defaultProfile: process.env.DSH_DESKTOP_DEFAULT_PROFILE,',
       '  home: process.env.DSH_HOME,',
+      '  installRecoveryStatePath: process.env.DSH_DESKTOP_INSTALL_RECOVERY_STATE_PATH,',
       '}))',
       '',
     ].join('\n'))
@@ -346,6 +403,7 @@ describe('desktop Host dsh runtime', () => {
       dshBootstrapPath: captureEntry,
       profileName: 'web',
       homeDir,
+      installRecoveryStatePath: join(root, 'plugin-install-recovery', 'state.json'),
       stateDir,
       environment,
     })
@@ -368,6 +426,7 @@ describe('desktop Host dsh runtime', () => {
       args: ['--probe'],
       defaultProfile: 'web',
       home: homeDir,
+      installRecoveryStatePath: join(root, 'plugin-install-recovery', 'state.json'),
     })
     expect(environment.Path).toBe(`${installation.pathDir};${original.Path ?? ''}`)
 

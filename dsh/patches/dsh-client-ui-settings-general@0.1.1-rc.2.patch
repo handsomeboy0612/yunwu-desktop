@@ -1,0 +1,19 @@
+diff --git a/lib/client.js b/lib/client.js
+index 59d01801f9f410d30c76af000710aa51ea98bfda..8549ac2f87b4afd0120115505a71df97c8d9981e 100644
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -71,6 +71,14 @@ window.__ModuleLoader__.load({
+ 		*/
+ 		/** Nav glyph by section id; unknown ids fall back to the settings gear. */
+ 		function navIcon(id) {
++			// 内核这条链是按 id 硬编码的，settings.section 的选项里只有 id/order/label，
++			// 没有 icon 口子，所以外部注册的页面一律落到齿轮。我们的账户页就排在
++			// 「通用设置」上面，两行同一个齿轮时图标这一列就成了噪声——加一条分支比
++			// 让用户看两个一样的标记划算。升级时这里是一行的重排。
++			if (id === "openlux-account-section") return (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconUserOutline16, {
++				className: SettingsRoot_module_css_default.navIcon,
++				size: 16
++			});
+ 			if (id === "models") return (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconDataOutline16, {
+ 				className: SettingsRoot_module_css_default.navIcon,
+ 				size: 16

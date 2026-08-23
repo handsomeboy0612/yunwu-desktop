@@ -49,13 +49,13 @@ import {
   Button, IconChevronRightOutline14, IconRefreshOutline14, IconRightUpOutline14,
   IconUserOutline16, IconWarningOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsRuntime, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: merges the settings shell's slot rows, including
 // 'settings.section', into the SlotMap this file is typed against.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { SignInForm } from './SignInForm.tsx'
 import type { AccountKey } from './locales.ts'
-import type { AccountStore, AccountView } from './store.ts'
+import type { AccountStore } from './store.ts'
 import type { AccountHostCaller } from './types.ts'
 
 /** Slot id; also the DOM marker the live checks look for. */
@@ -75,8 +75,10 @@ export interface AccountSectionInjected {
   readonly callHost: AccountHostCaller
   readonly t: (key: AccountKey) => string
   readonly store: AccountStore
-  /** uSES hook bound to {@link AccountStore}. */
-  readonly useAccount: SnapshotSelectorHook<AccountView>
+  readonly hooks: {
+    /** Account snapshot source; the renderer binds it as useAccount. */
+    readonly account: AccountStore
+  }
 }
 
 const styles = {
@@ -174,7 +176,7 @@ const styles = {
  * @returns the page content.
  */
 export function AccountSection(
-  props: PropsRuntime<'settings.section'> & AccountSectionInjected,
+  props: PropsRuntime<'settings.section'> & InjectFace<AccountSectionInjected>,
 ): ReactNode {
   const { callHost, close, t, store, useAccount } = props
   const view = useAccount(snapshot => snapshot)

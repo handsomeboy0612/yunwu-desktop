@@ -20,7 +20,10 @@
 
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
-import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
+// No `bindSnapshotSelector` import: rc.2 deleted `dsh-client-web-react` and the
+// binder moved inside the renderer without an export. A plugin now hands the
+// bare store over in a `hooks` compartment and the renderer binds it into a
+// `use<Name>` selector before the component sees it.
 // Type-only: merges the settings shell's slot rows, including
 // 'settings.onboarding', into the SlotMap this file registers against.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -131,7 +134,6 @@ export function apply(ctx: ClientContext): void {
   const callHost: AccountSectionInjected['callHost'] =
     (method, args, signal) => callAccountHost(connection, method, args, signal)
   const store = new AccountStore(callHost)
-  const useAccount = bindSnapshotSelector(store) as AccountSectionInjected['useAccount']
   // One bound translate for every face; copy freshness rides the locale
   // revision rather than a re-registration.
   const t = ctx.locale.bind(NS) as SignInStepInjected['t']
@@ -151,7 +153,7 @@ export function apply(ctx: ClientContext): void {
     name: 'settings.trigger',
     priority: ACCOUNT_TRIGGER_PRIORITY,
     locale: NS,
-    inject: (): AccountTriggerInjected => ({ t, store, useAccount }),
+    inject: (): AccountTriggerInjected => ({ t, store, hooks: { account: store } }),
   }, AccountTrigger))
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
@@ -162,7 +164,7 @@ export function apply(ctx: ClientContext): void {
     // change instead of subscribing to it (`ui-settings-general`).
     label: () => t('nav'),
     locale: NS,
-    inject: (): AccountSectionInjected => ({ callHost, t, store, useAccount }),
+    inject: (): AccountSectionInjected => ({ callHost, t, store, hooks: { account: store } }),
   }, AccountSection))
 
   // Summoning needs the session and workspace services: the binding is filled

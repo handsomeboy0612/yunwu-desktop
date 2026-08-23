@@ -39,12 +39,12 @@
 import { useEffect } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { IconUserOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsRuntime, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: merges the settings shell's slot rows, including
 // 'settings.trigger', into the SlotMap this file is typed against.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { AccountKey } from './locales.ts'
-import type { AccountStore, AccountView } from './store.ts'
+import type { AccountStore } from './store.ts'
 
 /** DOM marker the live checks look for; also the old row's id. */
 export const ACCOUNT_TRIGGER_ID = 'openlux-account'
@@ -60,8 +60,10 @@ export const ACCOUNT_TRIGGER_PRIORITY = -1
 export interface AccountTriggerInjected {
   readonly t: (key: AccountKey) => string
   readonly store: AccountStore
-  /** uSES hook bound to {@link AccountStore}. */
-  readonly useAccount: SnapshotSelectorHook<AccountView>
+  readonly hooks: {
+    /** Account snapshot source; the renderer binds it as useAccount. */
+    readonly account: AccountStore
+  }
 }
 
 const styles = {
@@ -96,7 +98,7 @@ const styles = {
  * @returns the row content, inside the kernel's own button.
  */
 export function AccountTrigger(
-  props: PropsRuntime<'settings.trigger'> & AccountTriggerInjected,
+  props: PropsRuntime<'settings.trigger'> & InjectFace<AccountTriggerInjected>,
 ): ReactNode {
   const { wide, t, store, useAccount } = props
   const view = useAccount(snapshot => snapshot)
