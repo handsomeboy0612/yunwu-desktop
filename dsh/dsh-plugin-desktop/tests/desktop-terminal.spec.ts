@@ -58,6 +58,7 @@ function macOptions(stateDir: string, spawn: DesktopTerminalSpawn): DesktopTermi
     productVersion: '2.0.0',
     profileDir: "/Users/example/Library/Application Support/DSH O'Brien/profiles/desktop",
     homeDir: "/Users/example/Library/Application Support/DSH O'Brien",
+    installRecoveryStatePath: "/Users/example/Library/Application Support/DSH O'Brien Desktop/plugin-install-recovery/state.json",
     stateDir,
     spawn,
     environment: {
@@ -80,6 +81,7 @@ function windowsOptions(stateDir: string, spawn: DesktopTerminalSpawn): DesktopT
     productVersion: '2.0.0',
     profileDir: "C:\\Users\\Example\\DSH O'Brien\\profiles\\desktop",
     homeDir: "C:\\Users\\Example\\DSH O'Brien",
+    installRecoveryStatePath: "C:\\Users\\Example\\AppData\\Roaming\\DSH Desktop\\plugin-install-recovery\\state.json",
     stateDir,
     spawn,
     environment: {
@@ -201,6 +203,7 @@ describe('desktop terminal environment', () => {
           KEEP: 'value',
           PATH: `${launch.shimDir}:/usr/local/bin:/usr/bin:/bin`,
           DSH_HOME: options.homeDir,
+          DSH_DESKTOP_INSTALL_RECOVERY_STATE_PATH: options.installRecoveryStatePath,
         },
         shell: false,
         stdio: 'ignore',
@@ -271,6 +274,7 @@ describe('desktop terminal environment', () => {
           DSH_DESKTOP_DEFAULT_PROFILE: options.profileName,
           DSH_DESKTOP_APP_EXECUTABLE: options.appExecutable,
           DSH_DESKTOP_DSH_BOOTSTRAP: options.dshBootstrapPath,
+          DSH_DESKTOP_INSTALL_RECOVERY_STATE_PATH: options.installRecoveryStatePath,
           DSH_DESKTOP_ELECTRON_VERSION: options.electronVersion,
           DSH_DESKTOP_PNPM_ENTRY: options.pnpmBinPath,
           DSH_DESKTOP_PROFILE_DIRECTORY: options.profileDir,
@@ -292,10 +296,20 @@ describe('desktop terminal environment', () => {
     const stateDir = join(temporaryDirectory(), 'terminal-state')
     const harness = spawnHarness()
     const options = windowsOptions(stateDir, harness.spawn)
-    options.windowsExecutableResolver = (command) => {
-      if (command === 'pwsh.exe') return 'C:\\Program Files\\PowerShell\\7\\pwsh.exe'
-      if (command === 'wt.exe') return 'C:\\Users\\Example\\AppData\\Local\\Microsoft\\WindowsApps\\wt.exe'
-      return undefined
+    options.windowsExecutableResolver = command => command === 'pwsh.exe'
+      ? 'C:\\Program Files\\PowerShell\\7\\pwsh.exe'
+      : undefined
+    options.windowsTerminal = {
+      executable: 'C:\\Users\\Example\\AppData\\Local\\Microsoft\\WindowsApps\\wt.exe',
+      arguments: [
+        '--window',
+        'new',
+        'new-tab',
+        '--title',
+        'DSH Desktop',
+        '--startingDirectory',
+        options.profileDir,
+      ],
     }
 
     const launch = openDesktopTerminal(options)
@@ -370,7 +384,7 @@ describe('desktop terminal environment', () => {
     const cause = new Error('launcher unavailable')
     expect(() => { harness.emitError(cause) }).not.toThrow()
 
-    expect(commands).toEqual(['pwsh.exe', 'wt.exe', 'cmd.exe'])
+    expect(commands).toEqual(['pwsh.exe', 'cmd.exe'])
     expect(harness.calls[0]?.command).toBe('C:\\Windows\\System32\\cmd.exe')
     expect(onLaunchError).toHaveBeenCalledWith(cause)
 
@@ -391,7 +405,7 @@ describe('desktop terminal environment', () => {
     expect(exitReporter).toHaveBeenCalledOnce()
   })
 
-  it('discovers the Windows Terminal app execution alias through LocalAppData', () => {
+  it('does not trust the Windows Terminal app execution alias without an explicit adapter', () => {
     const stateDir = join(temporaryDirectory(), 'terminal-state')
     const harness = spawnHarness()
     const probes: string[] = []
@@ -404,15 +418,16 @@ describe('desktop terminal environment', () => {
     options.windowsExecutableExists = (filename) => {
       probes.push(filename)
       return filename === 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+        || filename === 'C:\\Windows\\System32\\cmd.exe'
         || filename === 'C:\\Users\\Example\\AppData\\Local\\Microsoft\\WindowsApps\\wt.exe'
     }
 
     openDesktopTerminal(options)
 
     expect(probes).toContain('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
-    expect(probes).toContain('C:\\Users\\Example\\AppData\\Local\\Microsoft\\WindowsApps\\wt.exe')
+    expect(probes).not.toContain('C:\\Users\\Example\\AppData\\Local\\Microsoft\\WindowsApps\\wt.exe')
     expect(harness.calls[0]?.command).toBe(
-      'C:\\Users\\Example\\AppData\\Local\\Microsoft\\WindowsApps\\wt.exe',
+      'C:\\Windows\\System32\\cmd.exe',
     )
     expect(harness.calls[0]?.options.shell).toBe(false)
   })
@@ -466,7 +481,7 @@ describe('desktop terminal environment', () => {
 
     const unsafe = macOptions(join(root, 'unsafe'), harness.spawn)
     unsafe.profileName = '../desktop'
-    expect(() => openDesktopTerminal(unsafe)).toThrow('invalid profile name')
+    expect(() => openDesktopTerminal(unsafe)).toThrow('invalid desktop profile name')
     expect(() => lstatSync(unsafe.stateDir)).toThrow()
 
     const localized = macOptions(join(root, 'localized'), harness.spawn)
