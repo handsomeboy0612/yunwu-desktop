@@ -24,7 +24,10 @@
     "@deepseek-ai/dsh-client-ui-settings-models@npm:0.1.0-rc.6": "patch:@deepseek-ai/dsh-client-ui-settings-models@npm%3A0.1.0-rc.6#./patches/dsh-client-ui-settings-models@0.1.0-rc.6.patch",
     "@deepseek-ai/dsh-client-ui-settings-models@npm:^0.1.0-rc.6": "patch:@deepseek-ai/dsh-client-ui-settings-models@npm%3A0.1.0-rc.6#./patches/dsh-client-ui-settings-models@0.1.0-rc.6.patch",
     "@deepseek-ai/dsh-client-ui-conversation@npm:0.1.0-rc.6": "patch:@deepseek-ai/dsh-client-ui-conversation@npm%3A0.1.0-rc.6#./patches/dsh-client-ui-conversation@0.1.0-rc.6.patch",
-    "@deepseek-ai/dsh-client-ui-conversation@npm:^0.1.0-rc.6": "patch:@deepseek-ai/dsh-client-ui-conversation@npm%3A0.1.0-rc.6#./patches/dsh-client-ui-conversation@0.1.0-rc.6.patch"
+    "@deepseek-ai/dsh-client-ui-conversation@npm:^0.1.0-rc.6": "patch:@deepseek-ai/dsh-client-ui-conversation@npm%3A0.1.0-rc.6#./patches/dsh-client-ui-conversation@0.1.0-rc.6.patch",
+    "@deepseek-ai/dsh-client-ui-settings-general@npm:0.1.0-rc.6": "patch:@deepseek-ai/dsh-client-ui-settings-general@npm%3A0.1.0-rc.6#./patches/dsh-client-ui-settings-general@0.1.0-rc.6.patch",
+    "@deepseek-ai/dsh-client-ui-settings-general@npm:^0.1.0-rc.6": "patch:@deepseek-ai/dsh-client-ui-settings-general@npm%3A0.1.0-rc.6#./patches/dsh-client-ui-settings-general@0.1.0-rc.6.patch",
+    "@deepseek-ai/dsh-web-search-deepseek@npm:^0.1.0-rc.6": "patch:@deepseek-ai/dsh-web-search-deepseek@npm%3A0.1.0-rc.6#~/.yarn/patches/@deepseek-ai-dsh-web-search-deepseek-npm-0.1.0-rc.6-0e017aff95.patch"
   },
   "dependenciesMeta": {
     "@deepseek-ai/dsh-subprocess-local": {

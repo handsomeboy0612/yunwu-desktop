@@ -52,8 +52,9 @@ export interface SummonRequest {
 /**
  * The composer face we need, named structurally.
  *
- * `IConversation` lives in `dsh-client-ui-conversation`, which this plugin does
- * not depend on — and the kernel itself types cross-package faces this way when
+ * The plugin does depend on `dsh-client-ui-conversation` for the composer slot's
+ * types, but only as types — and this is a *value* reached through the service
+ * registry, where the kernel itself types cross-package faces structurally when
  * the dependency direction forbids the import (`ui-conversation`'s own
  * `PopupDismissFace`: "typed structurally to avoid a value import").
  */
@@ -63,13 +64,37 @@ interface ConversationFace {
   }
 }
 
-/** The two composer verbs a summon needs: write the draft, and report a failure beside it. */
+/** The composer verbs reached from outside a slot component. */
 interface SessionComposer {
   /** The single draft write path (the machine mirrors it into the persisted chat store). */
   setDraft(text: string): void
-  /** Session-routed notice strip; a refused preset switch is reported here. */
-  notify(level: 'error', text: string): void
+  /**
+   * Session-routed notice strip; a refused preset switch is reported here, and
+   * so is the file button's "this model cannot see, so the picture came in as a
+   * path". The kernel's own notice carries either level (`InputNotice`).
+   */
+  notify(level: 'info' | 'error', text: string): void
   readonly state: { getSnapshot(): { draft: string } }
+}
+
+/**
+ * One session's composer, or `undefined` while no conversation view is mounted
+ * for it.
+ *
+ * Exported because `notify` is the only channel that puts a message where the
+ * user is looking, and it does not ride the session standard kit — the kernel's
+ * own dock entries take it through their inject face
+ * (`ui-conversation/client/queue/QueueDock.d.ts:7`), which is what the file
+ * button does with this.
+ * @param scope - the client root context.
+ * @param id - the session whose composer is wanted.
+ * @returns that composer's facade, when it exists.
+ */
+export function composerFor(scope: ClientContext, id: SessionId): SessionComposer | undefined {
+  const actx = scope.sessions.scope(id)
+  if (actx === undefined) return undefined
+  const conversation = actx.get('conversation') as ConversationFace | undefined
+  return conversation?.input.for(actx)
 }
 
 /** Stages one summon and applies it to the blank session it lands on. */
@@ -177,9 +202,6 @@ export class SummonController {
 
   /** The composer of one session, or undefined without a mounted conversation. */
   private inputFor(id: SessionId): SessionComposer | undefined {
-    const actx = this.scope.sessions.scope(id)
-    if (actx === undefined) return undefined
-    const conversation = actx.get('conversation') as ConversationFace | undefined
-    return conversation?.input.for(actx)
+    return composerFor(this.scope, id)
   }
 }

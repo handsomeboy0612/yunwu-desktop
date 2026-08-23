@@ -37,7 +37,8 @@ export const zh = {
   'captchaRetryAgain': '还是没过，换一张试试',
   'captchaAngle': '旋转角度',
 
-  'triggerAria': '账号与余额',
+  'nav': '账户',
+  'triggerAria': '账号与设置',
   'panelAria': '账号',
   'signedIn': '已登录',
   'signedOut': '未登录',
@@ -45,6 +46,7 @@ export const zh = {
   'signOut': '退出登录',
   'sessionExpired': '登录已过期，重新登录',
   'balance': '余额',
+  'availableBalance': '可用余额',
   'balanceLoading': '获取中…',
   'balanceStale': '缓存',
   'balanceStaleTitle': '这次没取到最新余额，显示的是上次的数',
@@ -52,6 +54,9 @@ export const zh = {
   'refresh': '刷新余额',
   'used': '累计已用',
   'group': '用户分组',
+  'requestCount': '请求次数',
+  'console': '前往管理中心',
+  'consoleTitle': '在浏览器里打开使用日志、充值与账单',
 } satisfies Record<string, string>
 
 /** Key union of this package's copy. */
@@ -86,7 +91,8 @@ export const en = {
   'captchaRetryAgain': 'Still not right; here is a new challenge',
   'captchaAngle': 'Rotation angle',
 
-  'triggerAria': 'Account and balance',
+  'nav': 'Account',
+  'triggerAria': 'Account and settings',
   'panelAria': 'Account',
   'signedIn': 'Signed in',
   'signedOut': 'Not signed in',
@@ -94,6 +100,7 @@ export const en = {
   'signOut': 'Sign out',
   'sessionExpired': 'Session expired — sign in again',
   'balance': 'Balance',
+  'availableBalance': 'Available balance',
   'balanceLoading': 'Loading…',
   'balanceStale': 'cached',
   'balanceStaleTitle': 'This refresh failed; showing the previous value',
@@ -101,4 +108,7 @@ export const en = {
   'refresh': 'Refresh balance',
   'used': 'Total used',
   'group': 'User group',
+  'requestCount': 'Requests',
+  'console': 'Open console',
+  'consoleTitle': 'Open the usage log, top-ups, and billing in your browser',
 } satisfies Record<AccountKey, string>

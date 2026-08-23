@@ -10,6 +10,7 @@
 export const zh = {
   'nav': '市场',
   'title': '市场',
+  'closeMarket': '关闭市场',
   'intro': '这里的专家与专家团安装后成为本机的 Agent 预设，新建会话时可以选用。安装、默认与删除都由「Agent 预设」页管理。',
 
   'searchPlaceholder': '搜索专家、职业或标签',
@@ -81,6 +82,7 @@ export type MarketKey = keyof typeof zh
 export const en = {
   'nav': 'Market',
   'title': 'Market',
+  'closeMarket': 'Close market',
   'intro': 'Experts and teams installed here become local agent presets you can pick when starting a session. Defaults and removal live on the Agent presets page.',
 
   'searchPlaceholder': 'Search experts, professions, tags',

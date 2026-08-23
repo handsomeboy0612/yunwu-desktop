@@ -1,80 +1,38 @@
 /**
- * Turning one prompt into image bytes on the OpenLux route.
+ * Turning one prompt into image bytes: the part every vendor shares.
  *
- * The console's `/v1/images/generations` is OpenAI-shaped, but three of its
- * behaviours are ours to absorb rather than assume away. All three are read off
- * the gateway's own source, not its documentation:
+ * The vendor-specific half — which path, which body, which completion literal,
+ * where the picture hides — lives one directory down in `image/`, one file per
+ * vendor; `image/provider.ts` says why it is shaped that way. What is left here
+ * is everything that must behave identically no matter who drew the picture:
  *
- * - **Both carriers arrive.** `response_format` normalization is best-effort:
- *   the gateway converts a returned URL to base64 (or the reverse) only for a
- *   short whitelist, and a conversion that fails passes the *other* carrier
- *   through with a warning rather than failing the call
- *   (`service/image_normalize.go`, "任何一条加工失败都降级为原样透传"). So a
- *   caller that asks for base64 can still be handed a URL. This module reads
- *   whichever arrived and therefore sends no `response_format` at all — for a
- *   model outside that whitelist the field is forwarded upstream verbatim,
- *   where an unknown parameter is a rejected request.
- * - **The endpoint is not universal.** A catalogued image model can still be
- *   unroutable here: `gemini-2.5-flash-image-preview` answers HTTP 503 with
- *   "无可用渠道（distributor）" and the list of every group that lacks a channel
- *   for it, in under a second. The refusal is legible, but it is the user's
- *   money's worth of round trip either way, so the default model is pinned to
- *   one this route genuinely serves (see `media/tool.ts`) and the model never
- *   gets to choose it.
- * - **The media type must be earned.** The attachment store fully decodes the
- *   bytes and refuses a declaration that disagrees with them
- *   (`attachment-local/src/store.ts`: `IMAGE_TYPE_MISMATCH`), so the type is
- *   sniffed from the bytes instead of taken from a header or a URL suffix.
- * - **It stalls sometimes, and that is the channel pool, not the request.** The
- *   default model answers in 10–15 seconds, until a window arrives where
- *   nothing comes back at all: two calls minutes apart each returned nothing
- *   for 200 seconds, and the next one was fast again. The gateway's own
- *   consumption log has **no row** for the stalled ones — it never finished them
- *   — while the same window is full of other tokens' rows reading
- *   「当前分组上游负载已饱和」 with `use_time` up to 1287 seconds. So a stall is
- *   the upstream group being saturated, and there is nothing here to fix: no
- *   retry of ours beats the gateway's own failover. This product's openclaw-era
- *   plugin waited 300 seconds on this endpoint
- *   (`resources/yunwu-video-plugin/index.mjs` `IMAGE_TIMEOUT_MS`); the budget
- *   below is shorter because a saturated group outlasts any wait worth holding a
- *   conversation turn for, so the useful move is to hand control back and say
- *   that trying again usually works — which it does.
+ * - **The bytes.** A provider answers with either base64 it already decoded or a
+ *   URL, and this module is what turns a URL into bytes. That keeps the
+ *   attachment store's own size ceiling in one place, which matters because it
+ *   is defeatable otherwise: MJ's four-up grid arrives at 8.5 MB.
+ * - **The media type.** Sniffed from the bytes, never taken from a declaration.
+ *   The attachment store fully decodes them and refuses a type that disagrees
+ *   (`attachment-local/src/store.ts`: `IMAGE_TYPE_MISMATCH`), and the format
+ *   genuinely varies within one family — the same prompt got PNG from
+ *   `gemini-2.5-flash-image` and JPEG from `gemini-3-pro-image`.
+ * - **Partial success is success.** A reply carrying four pictures of which
+ *   three are usable returns those three and reports the fourth. Only an empty
+ *   result is an error.
  *
  * @module openlux-plugin-account/media/images
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { ImageMediaType } from '@deepseek-ai/dsh-attachment'
-import type { HttpReply } from '../account/http.ts'
-import { AccountRequestError, normalizeBase, requestBytes, requestJson } from '../account/http.ts'
+import { AccountRequestError, normalizeBase, requestBytes } from '../account/http.ts'
 import type { ConsoleAccess } from '../market/console.ts'
+import type { ImageCarrier, ImageProvider, ImageRequest } from './image/provider.ts'
+import { ImageGenerationError } from './image/provider.ts'
 
-/**
- * Budget for one attempt, and why there are two of them.
- *
- * Successes measured on the default model land between 9 and 15 seconds, and a
- * stalled attempt does not recover inside any budget worth holding a turn for —
- * the gateway's own log carries `use_time` past 1200 seconds for the saturated
- * ones. So waiting longer buys nothing, while attempting again buys everything:
- * a stalled call followed immediately by the byte-identical one answered in 11
- * seconds, because each attempt is routed to a channel afresh.
- *
- * Two 90-second attempts therefore beat one 180-second wait at both ends — the
- * common stall recovers in about 100 seconds instead of failing at 180, and the
- * hopeless case gives up no later than it did.
- */
-const GENERATE_TIMEOUT_MS = 90_000
+export { ImageGenerationError } from './image/provider.ts'
 
-/** Budget for pulling one returned URL; the bytes are already generated. */
+/** Budget for pulling one produced picture; the bytes are already generated. */
 const TRANSFER_TIMEOUT_MS = 60_000
-
-/** Raised when no usable image came back; the message is model-facing. */
-export class ImageGenerationError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'ImageGenerationError'
-  }
-}
 
 /** One generated image, ready for the attachment store. */
 export interface GeneratedImageBytes {
@@ -85,15 +43,13 @@ export interface GeneratedImageBytes {
   readonly revisedPrompt?: string
 }
 
-/** What one generation asks for. */
-export interface GenerateImagesRequest {
-  readonly model: string
-  readonly prompt: string
-  readonly n: number
-  /** Forwarded only when present: every model family validates it differently. */
-  readonly size?: string
-  /** Per-image ceiling, taken from the attachment service's own limit. */
-  readonly maxBytes: number
+/** What one call produced, in the vocabulary the tool reports. */
+export interface GeneratedImages {
+  readonly images: readonly GeneratedImageBytes[]
+  /** One line per picture that arrived but could not be used. */
+  readonly failures: readonly string[]
+  /** One line per requested value this transport has no field for. */
+  readonly ignored: readonly string[]
 }
 
 /** File signatures of the four formats the attachment store accepts. */
@@ -120,168 +76,97 @@ export function sniffImageType(data: Uint8Array): ImageMediaType | undefined {
   return SIGNATURES.find(entry => entry.test(data))?.type
 }
 
-/** The response body, as far as this module reads it. */
-interface ImagesResponse {
-  readonly data?: readonly {
-    readonly url?: unknown
-    readonly b64_json?: unknown
-    readonly revised_prompt?: unknown
-  }[]
-  readonly error?: { readonly message?: unknown; readonly code?: unknown; readonly type?: unknown }
-  readonly message?: unknown
-}
-
 /**
- * Generate images and return their bytes.
- *
- * Partial success is success: a request for four images that yields three
- * usable ones returns those three, and the reasons for the fourth ride the
- * `failures` list so the model can decide whether to ask again. Only an empty
- * result is an error.
+ * Generate images with one vendor and return their bytes.
  * @param ctx - host context.
  * @param access - route origin and token reader.
+ * @param provider - the vendor adapter chosen for this model.
  * @param request - what to generate.
+ * @param maxBytes - per-image ceiling, from the attachment service's own limit.
  * @param signal - caller cancellation, forwarded to every request.
- * @returns the usable images and one line per image that was not usable.
+ * @returns the usable images, the reasons for any that were not, and what the
+ * transport had no field for.
  * @throws {ImageGenerationError} when the route refused, or nothing usable arrived.
  */
 export async function generateImages(
   ctx: Context,
   access: ConsoleAccess,
-  request: GenerateImagesRequest,
+  provider: ImageProvider,
+  request: ImageRequest,
+  maxBytes: number,
   signal?: AbortSignal,
-): Promise<{ readonly images: readonly GeneratedImageBytes[]; readonly failures: readonly string[] }> {
+): Promise<GeneratedImages> {
   const token = await access.apiKey()
   if (token === undefined || token === '') {
     throw new ImageGenerationError('当前没有可用的 OpenLux 密钥，请先在侧栏登录账号。')
   }
-  const url = `${normalizeBase(access.baseUrl)}/v1/images/generations`
-  const body: Record<string, unknown> = {
-    model: request.model,
-    prompt: request.prompt,
-    n: request.n,
-    ...request.size === undefined ? {} : { size: request.size },
-  }
-
-  const post = async (): Promise<HttpReply> => await requestJson(ctx, url, {
-    method: 'POST',
+  const root = normalizeBase(access.baseUrl)
+  const outcome = await provider.generate({
+    ctx,
+    root,
+    base: `${root}/v1`,
     headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  }, GENERATE_TIMEOUT_MS, signal)
-
-  let reply: HttpReply
-  try {
-    reply = await post()
-  } catch (error: unknown) {
-    // Only a stall is attempted again: a refusal is deterministic, and asking a
-    // second time would just spend the user's latency to be told the same thing.
-    if (!(error instanceof AccountRequestError) || error.kind !== 'timeout') {
-      throw new ImageGenerationError(error instanceof AccountRequestError
-        ? error.message
-        : `出图请求失败：${error instanceof Error ? error.message : String(error)}`)
-    }
-    ctx.logger.warn(`openlux: image generation stalled past ${String(GENERATE_TIMEOUT_MS)}ms; attempting once more`)
-    try {
-      reply = await post()
-    } catch (retryError: unknown) {
-      if (retryError instanceof AccountRequestError && retryError.kind === 'timeout') {
-        throw new ImageGenerationError(
-          `出图接口两次都没有在 ${String(Math.round(GENERATE_TIMEOUT_MS / 1000))} 秒内返回（正常 10~15 秒）。`
-          + '这是上游出图分组一时饱和，与提示词无关，隔一会儿再说一次就好。',
-        )
-      }
-      throw new ImageGenerationError(retryError instanceof AccountRequestError
-        ? retryError.message
-        : `出图请求失败：${retryError instanceof Error ? retryError.message : String(retryError)}`)
-    }
-  }
-
-  const answer = (reply.body ?? {}) as ImagesResponse
-  if (!reply.response.ok) {
-    // The gateway's refusals are the actionable half of this tool: an
-    // unsupported size, an `n` above the model's cap, and an exhausted balance
-    // all arrive here with text a user or a model can act on, so it is passed
-    // through instead of being replaced by a status line.
-    const detail = text(answer.error?.message) ?? text(answer.message) ?? ''
-    throw new ImageGenerationError(detail === ''
-      ? `出图接口返回 HTTP ${reply.response.status}。`
-      : `出图接口拒绝了请求（HTTP ${reply.response.status}）：${detail}`)
-  }
-
-  const entries = Array.isArray(answer.data) ? answer.data : []
-  if (entries.length === 0) {
-    const detail = text(answer.error?.message) ?? text(answer.message)
-    throw new ImageGenerationError(detail === undefined
-      ? '出图接口返回了空的图片列表。'
-      : `出图接口没有返回图片：${detail}`)
-  }
+    maxBytes,
+    ...signal === undefined ? {} : { signal },
+  }, request)
 
   const images: GeneratedImageBytes[] = []
   const failures: string[] = []
-  for (const [index, entry] of entries.entries()) {
+  for (const [index, carrier] of outcome.carriers.entries()) {
     const label = `第 ${String(index + 1)} 张`
     try {
-      const data = await carrierBytes(ctx, entry, request.maxBytes, signal)
+      const data = await bytesOf(ctx, carrier, maxBytes, signal)
       const mediaType = sniffImageType(data)
       if (mediaType === undefined) {
         failures.push(`${label}：返回的不是 PNG / JPEG / WebP / GIF（前 4 字节 ${hex(data)}），无法作为附件保存。`)
         continue
       }
-      const revisedPrompt = text(entry.revised_prompt)
-      images.push({ data, mediaType, ...revisedPrompt === undefined ? {} : { revisedPrompt } })
+      images.push({
+        data,
+        mediaType,
+        ...carrier.revisedPrompt === undefined ? {} : { revisedPrompt: carrier.revisedPrompt },
+      })
     } catch (error: unknown) {
+      if (error instanceof AccountRequestError && error.kind === 'cancelled') throw error
       failures.push(`${label}：${error instanceof Error ? error.message : String(error)}`)
     }
   }
   if (images.length === 0) {
-    throw new ImageGenerationError(`出图接口返回了 ${String(entries.length)} 条结果，但没有一条可用。`
+    throw new ImageGenerationError(`出图接口返回了 ${String(outcome.carriers.length)} 条结果，但没有一条可用。`
       + `\n${failures.join('\n')}`)
   }
-  return { images, failures }
+  return { images, failures, ignored: outcome.ignored }
 }
 
 /**
- * Read one response entry's bytes, from whichever carrier it used.
+ * Read one produced picture's bytes, from whichever carrier it used.
  * @param ctx - host context.
- * @param entry - one `data[]` element.
+ * @param carrier - what the provider answered with.
  * @param maxBytes - per-image ceiling.
  * @param signal - caller cancellation.
  * @returns the encoded image bytes.
- * @throws {Error} when the entry carries neither usable carrier, or is too large.
+ * @throws {Error} when the download failed or the picture is too large.
  */
-async function carrierBytes(
+async function bytesOf(
   ctx: Context,
-  entry: { readonly url?: unknown; readonly b64_json?: unknown },
+  carrier: ImageCarrier,
   maxBytes: number,
   signal?: AbortSignal,
 ): Promise<Uint8Array> {
-  const encoded = text(entry.b64_json)
-  if (encoded !== undefined) {
-    // Four base64 characters carry three bytes; refusing on the encoded length
-    // avoids materialising a body that was never going to be storable.
-    if (Math.floor(encoded.length / 4) * 3 > maxBytes) {
-      throw new Error(`返回的图片超过本机附件上限（约 ${size(Math.floor(encoded.length / 4) * 3)} > ${size(maxBytes)}），`
+  if (carrier.kind === 'bytes') {
+    if (carrier.data.byteLength > maxBytes) {
+      throw new Error(`返回的图片超过本机附件上限（${size(carrier.data.byteLength)} > ${size(maxBytes)}），`
         + '请用更小的 size 重试。')
     }
-    const data = Buffer.from(encoded, 'base64')
-    if (data.byteLength === 0) throw new Error('返回的 base64 图片解不出内容。')
-    return data
+    return carrier.data
   }
-  const link = text(entry.url)
-  if (link === undefined) throw new Error('这条结果既没有 b64_json 也没有 url。')
   try {
-    return await requestBytes(ctx, link, TRANSFER_TIMEOUT_MS, maxBytes, signal, '图片')
+    return await requestBytes(ctx, carrier.url, TRANSFER_TIMEOUT_MS, maxBytes, signal, '图片')
   } catch (error: unknown) {
+    if (error instanceof AccountRequestError && error.kind === 'cancelled') throw error
     if (error instanceof AccountRequestError) throw new Error(error.message)
     throw error
   }
-}
-
-/** Read a response field that must be a non-empty string. */
-function text(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined
-  const trimmed = value.trim()
-  return trimmed === '' ? undefined : trimmed
 }
 
 /** The first four bytes, for a message about bytes nobody can identify. */

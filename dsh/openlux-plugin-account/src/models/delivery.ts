@@ -44,7 +44,12 @@
 export const MANAGED_FLAG = 'openluxManaged'
 
 /**
- * The console tag that puts a model on the delivered list.
+ * The console tag that puts a model on the delivered list, when no list exists.
+ *
+ * Second source now, not the first: `delivered.ts` reads the console's own
+ * delivered table and `sync.ts` prefers it. This rule is what a station whose
+ * table nobody has filled in still runs on, and what a relay too old to serve
+ * that route falls back to — so it stays, and stays as it was.
  *
  * `tags` is free text the console's own model square already reads for
  * operational meaning — it renders `new` / `热门` as NEW / HOT corner badges

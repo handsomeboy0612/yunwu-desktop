@@ -1,19 +1,15 @@
 /**
- * Market settings section: browse the catalog, install one entry.
+ * Market catalog: browse and install one entry.
  *
- * ## Why a settings section and not a page of its own
+ * Lives inside the frame overlay (`MarketOverlay`), not a settings section.
+ * The kernel still has no page route — WorkBuddy's expert center is a full
+ * window we cannot claim — so the carrying surface is `shell.overlay`, the
+ * same seat DSH Desktop's community-market panel uses. This file is the
+ * catalog body; the launcher and chrome sit outside it.
  *
- * The kernel's shell has three regions (sidebar, conversation, details) and no
- * route concept, so a full-window page like WorkBuddy's expert center has no
- * carrying surface here. What it does have is the settings surface every feature
- * page uses: `settings.section` projects a nav entry and owns one content
- * column. That is where the kernel puts its own roster management (Agent presets,
- * order 20), so the market sits right after it at order 25 — browse next to
- * manage, rather than a second place that manages.
- *
- * The column is 564px wide with the shell's own scroller above it (measured, not
- * assumed), which is why the grid is two cards and not WorkBuddy's four, and why
- * category filters are a wrapping chip row rather than a tab bar.
+ * The overlay panel is 800px, so the grid is three cards rather than the two
+ * the old 564px settings column forced. Category filters stay a wrapping chip
+ * row.
  *
  * ## What this surface does not do
  *
@@ -25,9 +21,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { Button, Input, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsLocale, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-// Type-only: merges the settings shell's slot rows into the SlotMap.
-import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   Catalog, CatalogFailure, CatalogItem, InstallOutcome, InstallTarget, InstalledPreset,
 } from '../market/wire.ts'
@@ -36,13 +30,10 @@ import { MarketConfirm, MarketDetail, MarketOutcome } from './MarketDialogs.tsx'
 import type { SummonRequest } from './summon.ts'
 import type { AccountHostCaller } from './types.ts'
 
-/** Slot id; also the DOM marker the live checks look for. */
+/** DOM marker the live checks look for. */
 export const MARKET_SECTION_ID = 'openlux-market'
 
-/** Nav position: after the kernel's own Agent presets page (order 20). */
-export const MARKET_SECTION_ORDER = 25
-
-/** What the section needs from the plugin body. */
+/** What the catalog needs from the plugin body. */
 export interface MarketSectionInjected {
   readonly callHost: AccountHostCaller
   /** Active locale, read at render time so a switch needs no refetch. */
@@ -56,6 +47,17 @@ export interface MarketSectionInjected {
    * all that surface can act on.
    */
   readonly summon?: (request: SummonRequest) => void
+  /**
+   * Dismiss the overlay after a summon, so the new session is not sitting
+   * behind a dialog. Overlay chrome owns this; the catalog does not close
+   * itself on install-only (no session to land in).
+   */
+  readonly onDismiss?: () => void
+  /**
+   * When false, the overlay already printed the title and intro, so this
+   * body skips them. Default true for any standalone mount.
+   */
+  readonly showChrome?: boolean
 }
 
 /** Which half of the roster the user is looking at. */
@@ -76,8 +78,8 @@ const styles = {
   chips: { display: 'flex', flexWrap: 'wrap', gap: '6px' },
   grid: {
     display: 'grid',
-    // Two columns in the 564px content column, without hardcoding that width.
-    gridTemplateColumns: 'repeat(auto-fill, minmax(258px, 1fr))',
+    // Three columns in the 800px overlay panel, without hardcoding that width.
+    gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
     gap: '12px',
     alignItems: 'stretch',
   },
@@ -119,9 +121,9 @@ function failureText(failure: CatalogFailure, t: TranslateNS<'openlux.market'>):
  * @returns the section content.
  */
 export function MarketSection(
-  props: PropsRuntime<'settings.section'> & PropsLocale<'openlux.market'> & MarketSectionInjected,
+  props: PropsLocale<'openlux.market'> & MarketSectionInjected,
 ): ReactNode {
-  const { callHost, close, language, summon, t } = props
+  const { callHost, language, summon, onDismiss, showChrome = true, t } = props
   const active = language()
 
   // `null` is "not read yet" and `[]` is "read, and empty" — the two render
@@ -263,7 +265,7 @@ export function MarketSection(
   }, [callHost, prompts])
 
   /**
-   * Leave settings for a new session running this expert.
+   * Leave the overlay for a new session running this expert.
    *
    * Only ever called for a preset that is already on disk, which is why it asks
    * nothing: no bytes are written, so there is nothing to consent to.
@@ -285,10 +287,8 @@ export function MarketSection(
       ?? (await readPrompts(item.slug))[0]
     setDetail(undefined)
     summon({ preset: item.slug, prompt: opening ?? '' })
-    // The section's one shell affordance, for flows that leave settings —
-    // which is exactly what this is (`ui-settings`' own words).
-    close()
-  }, [summon, installedById, readPrompts, close])
+    onDismiss?.()
+  }, [summon, installedById, readPrompts, onDismiss])
 
   /**
    * The card's primary action.
@@ -345,8 +345,12 @@ export function MarketSection(
 
   return (
     <div style={styles.root} data-testid={MARKET_SECTION_ID}>
-      <span style={styles.title}>{t('title')}</span>
-      <span style={styles.intro}>{t('intro')}</span>
+      {showChrome && (
+        <>
+          <span style={styles.title}>{t('title')}</span>
+          <span style={styles.intro}>{t('intro')}</span>
+        </>
+      )}
 
       <div style={styles.filters}>
         <Input

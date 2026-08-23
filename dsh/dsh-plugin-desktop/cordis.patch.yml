@@ -58,6 +58,31 @@
     surfaceContext: true
     trustedHosts: []
 
+# The attachment store's per-image ceiling, raised from upstream's 5 MB default.
+#
+# That default is a coding harness's number, and we inherited it rather than
+# chose it. This product generates pictures, and one of the vendors it draws
+# with cannot fit under it at all: MJ `imagine` answers with a single 2×2 grid
+# image, measured at 8.5 MB on 2026-08-21, so every MJ call drew successfully,
+# was billed, and then failed to save — the picture existed and the user never
+# saw it.
+#
+# 32 MB is this product's own precedent, not a number picked to clear that one
+# case: the openclaw-era plugin capped media artifacts at exactly this
+# (`resources/yunwu-video-plugin/index.mjs`, `DEFAULT_MAX_BYTES = 32 * 1024 *
+# 1024`, tied to the kernel's `agents.defaults.mediaMaxMb`), so MJ's grid passed
+# comfortably in the shipped predecessor.
+#
+# What it costs, stated plainly: this ceiling also bounds `read_image` and
+# pasted images, which unlike generated ones *do* enter model requests and are
+# billed on every later request until compaction. So a user can now put a much
+# larger photo in front of the model than before. `maxImagePixels` (40 MP) is
+# left at its default and still guards the decode, and the provider applies its
+# own limits, so the exposure is cost rather than breakage.
+- id: attachment-local
+  config:
+    maxImageBytes: 33554432
+
 # Our relay route, supplied as the composition base for the `llm-pi-ai` adapter
 # the Web bundle mounts dormant. It belongs here rather than in the user's
 # settings document because none of it is a per-user fact: the endpoint is our
@@ -83,7 +108,12 @@
         displayName: OpenLux
         # A route pi-ai's installed catalog does not ship must name its protocol.
         api: openai-completions
-        baseURL: https://api.openlux.ai/v1
+        # Chat requests leave from here, while sign-in and the model pool leave
+        # from the account plugin — one station serves both, so both read the
+        # same variable and cannot drift apart. Unset means production. See the
+        # `DEFAULT_BASE_URL` note in `openlux-plugin-account/src/index.ts` for
+        # why a local relay must be spelled `localhost`.
+        baseURL: !!js "(process.env.OPENLUX_BASE_URL ?? 'https://api.openlux.ai') + '/v1'"
         # Must equal what the Models page derives from the route id
         # (`<ROUTE>_API_KEY`): that page only clears a credential on row delete
         # when the reference matches its own derived target, so a name chosen
@@ -168,7 +198,7 @@
 - id: web-search-deepseek
   config:
     apiKeyEnv: OPENLUX_API_KEY
-    baseURL: https://api.openlux.ai/v1
+    baseURL: !!js "(process.env.OPENLUX_BASE_URL ?? 'https://api.openlux.ai') + '/v1'"
     model: claude-haiku-4-5-20251001
 
 # Name the guarded provider explicitly. Selection would reach it anyway (it is

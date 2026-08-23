@@ -58,6 +58,14 @@ import { VIDEO_TOOL_NAME } from './name.ts'
 import type { SessionImage } from './session-images.ts'
 import { findLatestImage } from './session-images.ts'
 import { generateVideo, VideoGenerationError } from './video.ts'
+import type { VideoProvider } from './video/provider.ts'
+import {
+  defaultVideoModel,
+  readVideoCatalog,
+  resolveVideoModel,
+  videoDefaultRefusal,
+  videoModelRefusal,
+} from './video/registry.ts'
 
 declare module '@deepseek-ai/dsh-jobs' {
   interface JobKindMap {
@@ -67,77 +75,14 @@ declare module '@deepseek-ai/dsh-jobs' {
 }
 
 /**
- * The model this tool films with unless the composition names another.
+ * Frame shapes offered in the schema.
  *
- * Picked the way the image default was: from what this route actually serves
- * today, not from what the catalog lists. Two live runs landed in 100 and 118
- * seconds at 1280x720 for 2.3 and 3.5 MB, and a Chinese prompt came back as
- * exactly what it described, which is the one thing this product cannot do
- * without.
- *
- * The model never chooses this. Which vendors have a channel is a deployment
- * fact it cannot see, and a name without one is a refusal the user waits for.
+ * The union of what the vendors here accept, not the intersection: a vendor
+ * with no aspect field of its own (MiniMax) refuses the shape it cannot honour
+ * by name at call time, which tells the user their portrait clip is not
+ * happening instead of quietly handing them a landscape one.
  */
-export const DEFAULT_VIDEO_MODEL = 'veo_3_1-fast'
-
-/** What each servable model accepts. */
-interface VideoModelSpec {
-  /** Clip lengths the route accepts, in seconds. */
-  readonly durations: readonly number[]
-  /** Frame shapes the route accepts. */
-  readonly aspects: readonly string[]
-  /**
-   * Whether this model takes a reference image as the clip's first frame.
-   *
-   * Per-model, not per-route: the published support matrix splits this family
-   * into first-frame models (`veo_3_1`, `veo_3_1-fast`) and reference-image ones
-   * (the `-components` variants, 1–3 images). A model without it hides the
-   * argument rather than accepting one the route will ignore.
-   */
-  readonly firstFrame: boolean
-}
-
-/**
- * The models this tool knows how to ask for, and what each one takes.
- *
- * ## Why this stays a list, where the image tool's became a live lookup
- *
- * The image tool could drop its model list because its 22 servable models share
- * one URL and one parameter vocabulary, so the only question was whether a name
- * is servable — which the catalogue answers. Video has neither property. Each
- * vendor is a different path with a different body, different status literals
- * and a different notion of duration, and `duration` is the one media parameter
- * this route genuinely validates: `relay_tasks/sora/duration_validate.go` and
- * `minimax/models.go` answer HTTP 400 for an unlisted length. A live catalogue
- * would tell us a name exists without telling us any of that, so knowing the
- * name is not knowing how to ask.
- *
- * The judgement is also not the catalogue's here: the catalogue types these
- * models `OpenAI video format` → `/v1/videos`, while this plugin submits to the
- * unified async entry `/v1/video/create` and gets clips back. Routing is decided
- * by the path the caller chose, not by the model name, so an endpoint type is
- * simply the wrong question to ask about a video model.
- *
- * Both fields stay enums for the reason the image tool learned the hard way: an
- * unlisted value is not refused quickly, it is refused after the user has
- * waited, or accepted and quietly reinterpreted. The durations are the set this
- * family has answered on (`4/6/8`, echoed back in `detail.input` on a live
- * submit); the shapes are the two the route's own published contract names.
- *
- * A deployment adopting another vendor adds its row here, because a model and
- * its accepted values are one fact.
- */
-const ROUTE_MODELS: Record<string, VideoModelSpec> = {
-  'veo_3_1-fast': { durations: [4, 6, 8], aspects: ['16:9', '9:16'], firstFrame: true },
-  'veo_3_1': { durations: [4, 6, 8], aspects: ['16:9', '9:16'], firstFrame: true },
-  // The whole `veo_3_1` family this key can reach, measured 2026-08-19: a plain
-  // text prompt on `-components` submitted in 7.2s and finished in 122s, next to
-  // 175s for `veo_3_1` on the same prompt. `firstFrame` is false because its
-  // reference images are a *set* the vendor composes from (1–3 of them), not a
-  // clip's opening frame, and that behaviour is unmeasured here — offering it
-  // under the first-frame argument would be promising a shape nobody verified.
-  'veo_3_1-components': { durations: [4, 6, 8], aspects: ['16:9', '9:16'], firstFrame: false },
-}
+const OFFERED_ASPECTS = ['16:9', '9:16']
 
 function describe(firstFrame: boolean): string {
   return 'Generate a short video from a text prompt. '
@@ -158,8 +103,8 @@ function describe(firstFrame: boolean): string {
 export interface VideoToolOptions {
   /** Route origin and token reader, shared with the account face. */
   readonly access: ConsoleAccess
-  /** Model to film with; the default is a route-verified one. */
-  readonly model?: string
+  /** Model to film with, or a runtime reader updated by server delivery. */
+  readonly model?: string | (() => string | undefined)
 }
 
 /** The arguments this tool's path derivation depends on. */
@@ -172,22 +117,14 @@ export interface VideoArgs {
 }
 
 /**
- * Which model a given call films with.
- *
- * Shared by the three places that must agree — the submit, the artifact path and
- * the call view — because a path derived from a different answer than the submit
- * writes the clip somewhere the produced-file row is not looking.
- *
- * An unknown name falls back rather than throwing: the schema's `enum` already
- * refuses those, so reaching here with one means the argument arrived unvalidated
- * (a replayed call from an older build, say), and a path is still owed.
- * @param fallback - the composition's configured model.
- * @param args - the call's arguments.
- * @returns a key of `ROUTE_MODELS`.
+ * One refusal's "use this instead", when there is one to give.
+ * @param alternative - a model this key can film with, or undefined.
+ * @param lead - the sentence to put in front of the name.
+ * @param none - what to say when nothing here fits.
+ * @returns the clause to append to the refusal.
  */
-function pickVideoModel(fallback: string, args: VideoArgs): string {
-  const named = args.model
-  return named !== undefined && ROUTE_MODELS[named] !== undefined ? named : fallback
+function suggestion(alternative: string | undefined, lead: string, none: string): string {
+  return alternative === undefined ? none : `${lead}${alternative}。`
 }
 
 /**
@@ -204,13 +141,21 @@ function pickVideoModel(fallback: string, args: VideoArgs): string {
  * prompt but animate different pictures share one slot. The tool cannot express
  * that difference without a handle the model can quote, which is the extension
  * this leaves room for.
- * @param model - the model the composition films with; part of the identity.
+ *
+ * The identity carries the model **the call named**, not the one it films with.
+ * They differ only when nobody named one, and then the answer comes from the
+ * live catalogue — which the call view cannot read, because it is recomputed
+ * synchronously on every render including replays. Keying on the resolved model
+ * would therefore point the produced-file row at a path the job never wrote.
+ * The cost is that two unnamed calls with identical arguments share one slot
+ * even if delivery changed the default between them, which is right: nobody
+ * expressed a preference either time.
  * @param args - the call's arguments.
  * @returns an absolute path under the harness home.
  */
-export function videoArtifactPath(model: string, args: VideoArgs): string {
+export function videoArtifactPath(args: VideoArgs): string {
   const identity = JSON.stringify([
-    model,
+    args.model?.trim() ?? '',
     args.prompt,
     args.aspect_ratio ?? '',
     args.duration ?? '',
@@ -237,19 +182,27 @@ export function registerVideoTool(ctx: Context, options: VideoToolOptions): void
     ctx.logger.debug('openlux: no tool runtime in this composition; the video tool stays unregistered')
     return
   }
-  const configured = options.model ?? DEFAULT_VIDEO_MODEL
-  if (ROUTE_MODELS[configured] === undefined) {
-    ctx.logger.warn(`openlux: video model "${configured}" has no known parameter set; filming with ${DEFAULT_VIDEO_MODEL} instead`)
+  // What the server delivered, if anything. Which model an unnamed call ends up
+  // filming with is settled at call time against the live catalogue, because
+  // delivery can name a model this key has no channel for and because there may
+  // be no delivered default at all.
+  const deliveredModel = (): string | undefined => {
+    const configured = typeof options.model === 'function' ? options.model() : options.model
+    const trimmed = configured?.trim()
+    return trimmed === undefined || trimmed === '' ? undefined : trimmed
   }
-  // What a call that names no model films with. A call may name any row above;
-  // the schema's own `enum` is what refuses the rest, so an unknown name never
-  // reaches the route and never gets silently swapped for this one.
-  const fallbackModel = ROUTE_MODELS[configured] === undefined ? DEFAULT_VIDEO_MODEL : configured
-  const route = ROUTE_MODELS[fallbackModel] ?? ROUTE_MODELS[DEFAULT_VIDEO_MODEL]!
 
   ctx.effect(() => tools.register(defineTool({
     name: VIDEO_TOOL_NAME,
-    description: describe(route.firstFrame),
+    // The schema is fixed at registration and the model is not, so it describes
+    // what this tool can do rather than what one model does. It used to be
+    // derived from the default's own shape, which reads careful and is not: the
+    // default was a compiled-in name, so a machine whose delivery named a
+    // text-only model lost the `animate_last_image` argument entirely — for
+    // every model, including the ones that film from pictures. Advertising the
+    // capability and refusing per call is the honest half of that trade, and
+    // the refusal names a model that would have worked.
+    description: describe(true),
     // Each call starts its own vendor task and writes its own path, so two
     // different clips may be asked for at once.
     isConcurrencySafe: () => true,
@@ -261,34 +214,39 @@ export function registerVideoTool(ctx: Context, options: VideoToolOptions): void
       },
       aspect_ratio: {
         type: 'string',
-        enum: route.aspects,
-        description: 'Frame shape. Defaults to 16:9; use 9:16 for a portrait clip.',
+        enum: OFFERED_ASPECTS,
+        description: 'Frame shape. Defaults to 16:9; use 9:16 for a portrait clip. '
+          + 'Some models only film landscape and will say so rather than reinterpret this.',
       },
       duration: {
         type: 'integer',
-        enum: route.durations,
-        description: `Clip length in seconds (${route.durations.join(' / ')}). Defaults to ${String(route.durations[0])}; longer clips cost more and take longer.`,
+        // No enum: the accepted lengths differ per vendor (4/6/8 on the veo
+        // family, 6/10 on MiniMax, an open range elsewhere), and a schema built
+        // at registration cannot know which model the call will name. A model
+        // with a verified set has it enforced at call time; the rest let the
+        // route answer, which is the only party that actually knows.
+        description: 'Clip length in seconds. Leave it out unless the user asked for a specific length; '
+          + 'longer clips cost more, and a length the chosen model does not accept is refused here with the ones it does.',
       },
       model: {
         type: 'string',
-        // An enum here where the image tool has free text, because these names
-        // are not interchangeable: each row above carries its own accepted
-        // durations and shapes. A name outside the list is refused by the
-        // registry's own validation, which is both instant and self-explaining.
-        enum: Object.keys(ROUTE_MODELS),
-        description: 'Optional. Only set this when the user named a specific video model — pass their name through verbatim. '
-          + `Leave it out otherwise and ${fallbackModel} is used, which is the verified default.`,
+        // Free text, like the image tool's, and for the reason that one learned
+        // on a live run: an enum fixed at registration cannot list what this key
+        // can film with today, so it turns "the user named a model" into "the
+        // argument was dropped and something else was filmed". A name this
+        // account cannot serve is refused by name here, with the servable ones
+        // listed — never substituted.
+        description: 'Set this whenever the user named a specific video model, passing their name through verbatim — '
+          + 'passing a name is always safe, because one this account cannot film with is refused by name with the '
+          + 'list of usable ones, never substituted. Leave it out only when the user named none, in which case the '
+          + 'server-configured default is used.',
       },
-      ...route.firstFrame
-        ? {
-            animate_last_image: {
-              type: 'boolean',
-              description: 'Use the newest image in this conversation as the clip\'s first frame. '
-                + 'The prompt should then describe the motion, not the scene. '
-                + 'Fails if the conversation has no image yet.',
-            },
-          }
-        : {},
+      animate_last_image: {
+        type: 'boolean',
+        description: 'Use the newest image in this conversation as the clip\'s first frame. '
+          + 'The prompt should then describe the motion, not the scene. '
+          + 'Fails if the conversation has no image yet, or if the named model only films from words.',
+      },
     },
     output: {
       schema: {
@@ -323,39 +281,79 @@ export function registerVideoTool(ctx: Context, options: VideoToolOptions): void
       if (jobs === undefined) {
         throw new VideoGenerationError('这个会话没有后台任务能力（需要 @deepseek-ai/dsh-jobs 与 dsh-tool-jobs），无法生成视频。')
       }
-      const model = pickVideoModel(fallbackModel, args as VideoArgs)
-      const spec = ROUTE_MODELS[model] ?? route
-      // The schema's enums were built from the default model's row, so a call
-      // that both names another model and picks a value that row does not take
-      // is the one combination the schema cannot catch. Refusing it here costs a
-      // turn; letting it through costs a 400 from `duration_validate.go` minutes
-      // later, or a silently reinterpreted shape.
-      if (args.duration !== undefined && !spec.durations.includes(args.duration)) {
+      // Which vendor films this name, and whether this key can film with it at
+      // all, is one question answered here against the live catalogue. Getting
+      // it wrong in the other direction is what this replaced: a name outside a
+      // three-entry enum used to be dropped, and the user paid for a clip from
+      // a model they did not choose.
+      const catalog = await readVideoCatalog(ctx, options.access)
+      const animating = args.animate_last_image === true
+      const named = args.model?.trim() ?? ''
+      const model = named === '' ? defaultVideoModel(catalog, deliveredModel(), animating) : named
+      if (model === undefined) throw new VideoGenerationError(videoDefaultRefusal(catalog, animating))
+      const resolved = resolveVideoModel(catalog, model)
+      if (resolved === undefined) throw new VideoGenerationError(videoModelRefusal(catalog, model))
+      const provider = resolved.provider
+      const spec = provider.spec(model, resolved.types)
+      // A length outside a vendor's verified set is refused here rather than
+      // minutes later by `duration_validate.go` — and only where such a set
+      // exists, because inventing one refuses lengths the route does serve.
+      if (args.duration !== undefined && spec.durations !== undefined && !spec.durations.includes(args.duration)) {
         throw new VideoGenerationError(`${model} 只接受 ${spec.durations.join(' / ')} 秒，不接受 ${String(args.duration)} 秒。`)
+      }
+      if (args.duration !== undefined && spec.durationRange !== undefined
+        && (args.duration < spec.durationRange[0] || args.duration > spec.durationRange[1])) {
+        throw new VideoGenerationError(`${model} 只拍 ${String(spec.durationRange[0])}~${String(spec.durationRange[1])} 秒，`
+          + `拍不了 ${String(args.duration)} 秒。`)
       }
       if (args.aspect_ratio !== undefined && !spec.aspects.includes(args.aspect_ratio)) {
         throw new VideoGenerationError(`${model} 只出 ${spec.aspects.join(' / ')} 画面，不出 ${args.aspect_ratio}。`)
       }
-      if (args.animate_last_image === true && !spec.firstFrame) {
-        throw new VideoGenerationError(`${model} 不支持用图片当首帧；要图生视频请不要指定这个模型，或改用 ${DEFAULT_VIDEO_MODEL}。`)
+      // The alternative named in these two refusals is read out of the same
+      // catalogue rather than compiled in, so it is a model this key can film
+      // with right now. A build-time name here was worse than no suggestion:
+      // the model would pass it through on the next call and get refused again,
+      // this time by name.
+      if (animating && !spec.firstFrame) {
+        throw new VideoGenerationError(`${model} 不支持用图片当首帧；`
+          + suggestion(defaultVideoModel(catalog, undefined, true), '要图生视频请改用 ', '要图生视频请换一个能接首帧的模型。'))
+      }
+      // The mirror of the line above, and the commoner mistake: vendors ship one
+      // name per direction, so a picture-only name asked for a clip from words
+      // alone would otherwise be refused from inside the background job.
+      if (!animating && spec.requiresFirstFrame === true) {
+        throw new VideoGenerationError(`${model} 只做图生视频，得先有一张图当首帧。`
+          + suggestion(defaultVideoModel(catalog, undefined, false), '纯文字出片请改用 ', '纯文字出片请换一个模型。')
+          + '也可以先生成一张图再让它动起来。')
       }
       // Resolved before the job starts: "there is no picture yet" is the answer
       // the model needs in this turn, not a background failure six minutes later.
       const firstFrame = args.animate_last_image === true ? await readLastImage(ctx, exec.agent?.session) : undefined
+      // Vendors whose image route has no aspect field at all: the picture is
+      // filmed as it is. An explicit request is refused rather than dropped,
+      // because dropping it would answer a portrait request with whatever shape
+      // the picture happened to be.
+      const referenceShaped = firstFrame !== undefined && spec.referenceDecidesShape === true
+      if (referenceShaped && args.aspect_ratio !== undefined) {
+        throw new VideoGenerationError(`${model} 的图生视频画面比例跟着首帧走，指定不了 ${args.aspect_ratio}。`
+          + `想要 ${args.aspect_ratio} 就别用这张图当首帧（纯文字出片可以指定比例），或者先把图改成这个比例再动画。`)
+      }
       // The model never sees the picture's shape (generated images stay out of
       // model-visible content), so left to itself it guesses — one live run
       // guessed portrait for a square source and then told the user it had used
       // landscape. The reference itself knows, so it decides when the call did
       // not, and the shape it produced is reported back rather than assumed.
-      const aspect = args.aspect_ratio ?? (firstFrame === undefined ? undefined : orientationOf(firstFrame.ref, spec.aspects))
-      const path = videoArtifactPath(model, args as VideoArgs)
+      const aspect = args.aspect_ratio
+        ?? (firstFrame === undefined || referenceShaped ? undefined : orientationOf(firstFrame.ref, spec.aspects))
+      const path = videoArtifactPath(args as VideoArgs)
       const jobId = jobs.start({
         kind: 'video',
         label: `${VIDEO_TOOL_NAME}: ${args.prompt.slice(0, 80)}`,
         ...exec.agent === undefined ? {} : { owner: exec.agent },
-        run: () => filmInBackground(ctx, options.access, {
+        run: () => filmInBackground(ctx, options.access, provider, {
           model,
           prompt: args.prompt,
+          ...resolved.types.length === 0 ? {} : { endpointTypes: resolved.types },
           ...aspect === undefined ? {} : { aspectRatio: aspect },
           ...args.duration === undefined ? {} : { durationSeconds: args.duration },
           ...firstFrame === undefined ? {} : { images: [firstFrame.dataUri] },
@@ -365,7 +363,7 @@ export function registerVideoTool(ctx: Context, options: VideoToolOptions): void
         jobId: String(jobId),
         path,
         model,
-        ...firstFrame === undefined ? {} : { firstFrame: describeFirstFrame(firstFrame, aspect) },
+        ...firstFrame === undefined ? {} : { firstFrame: describeFirstFrame(firstFrame, aspect, referenceShaped) },
       }
     },
     presentCall: (args) => {
@@ -379,7 +377,7 @@ export function registerVideoTool(ctx: Context, options: VideoToolOptions): void
         kind: 'edit',
         title: '生成视频',
         rawInput: call.prompt,
-        locations: [{ path: videoArtifactPath(pickVideoModel(fallbackModel, call), call) }],
+        locations: [{ path: videoArtifactPath(call) }],
       }
     },
   })), 'openlux: video tool')
@@ -451,11 +449,14 @@ function orientationOf(ref: { width: number; height: number }, offered: readonly
  * a user who asked to animate their square photo will see them and ask why.
  * @param frame - the resolved reference image.
  * @param aspect - the shape the clip is being filmed in.
+ * @param follows - whether the picture's own shape is the clip's, in which case
+ *   there is no shape to announce and no bars to warn about.
  * @returns one line of model-facing text.
  */
-function describeFirstFrame(frame: FirstFrame, aspect: string | undefined): string {
+function describeFirstFrame(frame: FirstFrame, aspect: string | undefined, follows: boolean): string {
   const origin = frame.source === 'attached' ? '用户发的图' : '你刚生成的图'
   const shape = `${String(frame.ref.width)}x${String(frame.ref.height)}`
+  if (follows) return `首帧用的是${origin}（${shape}），出片就按这张图的比例，不会留黑边。`
   const square = frame.ref.width === frame.ref.height
   const filmed = aspect ?? '16:9'
   const bars = square || (frame.ref.height > frame.ref.width) !== (filmed === '9:16')
@@ -474,6 +475,7 @@ function describeFirstFrame(frame: FirstFrame, aspect: string | undefined): stri
  * status the model can read.
  * @param ctx - host context.
  * @param access - route origin and token reader.
+ * @param provider - the vendor adapter resolved for this model.
  * @param request - what to generate.
  * @param path - where the finished clip goes; already announced by the call view.
  * @returns the registry's control hooks.
@@ -481,7 +483,8 @@ function describeFirstFrame(frame: FirstFrame, aspect: string | undefined): stri
 function filmInBackground(
   ctx: Context,
   access: ConsoleAccess,
-  request: Parameters<typeof generateVideo>[2],
+  provider: VideoProvider,
+  request: Parameters<typeof generateVideo>[3],
   path: string,
 ): JobHooks {
   const stop = new AbortController()
@@ -493,7 +496,7 @@ function filmInBackground(
 
   const done = (async (): Promise<JobOutcome> => {
     try {
-      const video = await generateVideo(ctx, access, request, (status, percent) => {
+      const video = await generateVideo(ctx, access, provider, request, (status, percent) => {
         write(percent === undefined ? status : `${status} ${String(percent)}%`)
       }, stop.signal)
       await mkdir(dirname(path), { recursive: true })

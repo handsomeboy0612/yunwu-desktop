@@ -26,6 +26,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ToolCallBlock, ToolResultNode } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
+import type { MediaKey } from './media-locales.ts'
 
 /** What the registration hands this row beyond the slot's own payload. */
 export interface ImageCardInjected {
@@ -49,6 +50,19 @@ export interface ImageCardInjected {
 
 /** Full props of the image row. */
 export type ImageToolCardProps = ToolCallViewProps & PropsLocale<'openlux.media'> & ImageCardInjected
+
+/**
+ * The four titles each thing this row can be uses, keyed by which it is.
+ *
+ * A table rather than a ternary per state: the row has three vocabularies over
+ * four states, and spelling that out inline reads as a puzzle at the one place
+ * a reader goes to answer "why does the card say that".
+ */
+const COPY = {
+  show: { idle: 'show.title', pending: 'show.pending', done: 'show.result', failed: 'show.failed' },
+  draw: { idle: 'call.title', pending: 'call.pending', done: 'result.title', failed: 'result.failed' },
+  edit: { idle: 'edit.title', pending: 'edit.pending', done: 'edit.result', failed: 'edit.failed' },
+} as const satisfies Record<string, Record<'idle' | 'pending' | 'done' | 'failed', MediaKey>>
 
 const styles = {
   card: { display: 'flex', flexDirection: 'column', gap: '6px' },
@@ -82,7 +96,7 @@ const styles = {
  */
 export function ImageToolCard({ block, load, kind, t }: ImageToolCardProps) {
   const settled = settledOf(block)
-  const prompt = summaryOf(block)
+  const { summary: prompt, editing } = argsOf(block)
   const images = useMemo(() => imagesOf(settled), [settled])
   const labels = useMemo<MessageImageLabels>(() => ({
     image: t('image.label'),
@@ -99,18 +113,20 @@ export function ImageToolCard({ block, load, kind, t }: ImageToolCardProps) {
   // presentation projection is computed for top-level calls only, so the row
   // shows the text the model got instead of an empty card.
   const bare = settled !== undefined && !failed && images.length === 0
-  const idle = kind === 'show' ? t('show.title') : t('call.title')
+  // Which of the three vocabularies this row speaks. Changing a picture is not
+  // drawing one, and a row that says it drew when it was asked to change is the
+  // same comfortable lie the tool refuses to tell the model. Mid-stream the
+  // arguments are still arriving, so an edit reads as a drawing until the flag
+  // lands — the same window in which the summary is still empty.
+  const copy = COPY[kind === 'show' ? 'show' : editing ? 'edit' : 'draw']
+  const idle = t(copy.idle)
   const title = settled === undefined
     ? idle
     : failed
-      ? kind === 'show' ? t('show.failed') : t('result.failed')
-      : bare
-        ? idle
-        : kind === 'show'
-          ? t('show.result', { count: images.length })
-          : t('result.title', { count: images.length })
+      ? t(copy.failed)
+      : bare ? idle : t(copy.done, { count: images.length })
   const summary = settled === undefined
-    ? (prompt === '' ? (kind === 'show' ? t('show.pending') : t('call.pending')) : prompt)
+    ? (prompt === '' ? t(copy.pending) : prompt)
     : failed ? firstLine(resultText) : prompt
 
   return (
@@ -159,27 +175,33 @@ function imagesOf(settled: ToolResultNode | undefined): readonly { attachment: I
 }
 
 /**
- * What this call is about, in one line: the prompt it draws, or the files it
- * shows.
+ * What this call is about, in one line — the prompt it draws, or the files it
+ * shows — and whether it changes an existing picture rather than drawing one.
  *
  * Both are read from the same place because both tools put their subject in
  * their arguments, and the row does not need to know which tool it is to find
- * it.
+ * it. The edit flag rides along on the same parse rather than a second one: the
+ * row's whole vocabulary turns on it, and two parses of one JSON string is two
+ * places for the answer to differ.
  * @param block - the running or settled call.
- * @returns the summary, or an empty string when the arguments are unreadable.
+ * @returns the summary (empty when the arguments are unreadable) and whether
+ *   this call edits.
  */
-function summaryOf(block: ToolCallBlock): string {
+function argsOf(block: ToolCallBlock): { summary: string; editing: boolean } {
   const raw = 'kind' in block ? block.call?.argsRaw : block.argsRaw
-  if (raw === undefined || raw === null || raw === '') return ''
+  if (raw === undefined || raw === null || raw === '') return { summary: '', editing: false }
   try {
-    const args = JSON.parse(raw) as { prompt?: unknown; paths?: unknown }
-    if (typeof args.prompt === 'string') return args.prompt
-    if (Array.isArray(args.paths)) return args.paths.filter(path => typeof path === 'string').join(' · ')
-    return ''
+    const args = JSON.parse(raw) as { prompt?: unknown; paths?: unknown; edit_last_image?: unknown }
+    const editing = args.edit_last_image === true
+    if (typeof args.prompt === 'string') return { summary: args.prompt, editing }
+    if (Array.isArray(args.paths)) {
+      return { summary: args.paths.filter(path => typeof path === 'string').join(' · '), editing }
+    }
+    return { summary: '', editing }
   } catch {
     // A truncated argument stream is normal mid-call; the row simply has no
     // summary to show yet.
-    return ''
+    return { summary: '', editing: false }
   }
 }
 

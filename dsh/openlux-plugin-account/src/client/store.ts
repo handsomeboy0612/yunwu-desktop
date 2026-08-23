@@ -43,6 +43,8 @@ interface HostAccountStatus {
   readonly signedIn: boolean
   readonly userId?: number
   readonly apiKeyConfigured: boolean
+  /** Console origin this machine talks to — the session's, else the configured one. */
+  readonly baseUrl: string
 }
 
 /** Everything both surfaces need, in one immutable snapshot. */
@@ -56,6 +58,12 @@ export interface AccountView {
   readonly message: string | undefined
   /** A read is in flight; any previous value keeps showing under it. */
   readonly fetching: boolean
+  /**
+   * Where the account lives on the web, so a surface can offer the console
+   * itself: topping up, invoices, and the request log are all there and none of
+   * them belong in this app. Undefined only before the first read.
+   */
+  readonly baseUrl: string | undefined
 }
 
 const EMPTY: AccountView = {
@@ -66,6 +74,7 @@ const EMPTY: AccountView = {
   balance: undefined,
   message: undefined,
   fetching: false,
+  baseUrl: undefined,
 }
 
 /** Observable account state; one instance per plugin activation. */
@@ -103,7 +112,11 @@ export class AccountStore {
       read: true,
       fetching: false,
       ...status.ok
-        ? { signedIn: status.value.signedIn, apiKeyConfigured: status.value.apiKeyConfigured }
+        ? {
+            signedIn: status.value.signedIn,
+            apiKeyConfigured: status.value.apiKeyConfigured,
+            baseUrl: status.value.baseUrl,
+          }
         : {},
       ...balance.ok
         ? {

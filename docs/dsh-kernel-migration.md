@@ -4599,6 +4599,23 @@ node .tmp-probe\turn-smoke.mjs
 
 两者 userData 分开，但默认都用 `~/.dsh` 当 DSH_HOME，所以**别同时开**——会抢同一份会话与凭据。
 
+**它还会自己升级，然后把家目录迁到我们读不了的格式（2026-08-23 栽了一次）。** 那天开发版
+启动即崩：
+
+```
+credentials-local: the value for "version" in C:\Users\000\.dsh\.credentials.yaml must be a string
+```
+
+真因不是我们改坏了什么：安装的那份（命令行带 `--updated`，Squirrel 升级后的标志）已经跑在比
+`rc.6` 新的内核上，把 `.credentials.yaml` 从**平铺 map**（`KEY: value`，rc.6 唯一认的形状，
+见 `dsh-credentials-local/lib/index.js:121` `parseCredentialsDocument`）迁成了
+`version: 1` + `refs:` 的嵌套形状。新版能读旧的，旧版读不了新的，于是只有开发版起不来。
+
+处置：备份后把三条 `refs` 提回顶层平铺，开发版即正常启动；下次安装版再跑一遍又会迁回去，
+所以**这是每次它自动更新后都会复发的**。两个信号帮你 5 秒定位而不是去查自己的改动——
+崩在 `#credentials` 这一层、且报的是「某个键的值必须是字符串」。
+根治要么钉住安装版不让它升，要么给开发版单独一个 `DSH_HOME`（但会再多一个家目录，见上）。
+
 从源码起之前先重建两个包，否则你看到的是上一次构建的代码（8/19 那次就是这么差点看错的）：
 
 ```powershell
@@ -4791,3 +4808,976 @@ PowerShell 5.1 的 `>` 重定向写的是 UTF-16，直接重定向会把补丁�
 
 > **这一节被并发编辑冲掉过一次**：写进去之后另一处按自己读到的快照整文件写回文档，这 100 多行
 > 无声消失。判据是 `grep` 自己刚写的标题——**写完文档要回头搜一遍确认还在**，和 CSS 那次同一个坑。
+
+## 视频接了第二、第三家：一家一个 provider，判据是活目录的端点类型（2026-08-21 真机四发出片）
+
+**要复现的结果**：用户在对话里点名一个中转站真有的视频模型，就得用那个模型出片；
+接不了的当场按名字拒绝并列出能用的，绝不静默换成默认值。
+
+改之前这条链只认写死的三条 veo（`ROUTE_MODELS` 是个 enum），点名别家会被 schema 挡掉。
+现在池子是 **3 → 10**（veo 3 + 豆包 seedance 5 + 海螺 2），真机拒绝那一发把这 10 条原样列了出来。
+
+### 形状：`media/video/` 一家一个文件，与内核自带的五个视频扩展同形
+
+`provider.ts` 定契约（`endpointTypes` / `fallbackModels` / `spec` / `submit` / `poll`），
+`registry.ts` 从 `/v1/models` 现拉目录、按端点类型认领，`video.ts` 只剩「等、下片、判 MP4」。
+加一家是一个文件加一行，骨架不动——内核 `openclaw/extensions/{runway,minimax,pixverse,fal,vydra}`
+就是这么写的，不是我们发明的。
+
+**没做成 Cordis Service**（`ctx.web` 那种接缝）：那套的价值是让**别的包**注册进来，而我们三家都在同一个包里，
+换来的只是占掉一个全局服务名。契约形状照着接缝做，将来真要跨包再抬。
+
+### 三个坑，全是真机当场撞出来的，读代码读不出来
+
+| 坑 | 现象 | 判据 |
+|---|---|---|
+| 照抄老壳的端点类型清单 | 豆包被当成统一入口发到 `/v1/video/create`，回 **HTTP 429「未找到该模型的定价配置」**，日志里还被 i18n 改写成「请求过于频繁」 | 端点类型只能从库里 `models.endpoints` 现读：豆包声明的是 `/volc/v1/contents/generations/tasks` 与 `/api/v3/contents/generations/tasks`，**不是**统一入口。定价是按路由挂的，走错路在选渠道之前就被拒 |
+| 轮询时重新推路径 | seedance 2.0 中转站侧早已 SUCCESS，客户端却一直「生成中」直到超时 | **错的挂载不回 404，回 HTTP 200 + 空壳 `{"id":"…"}`**。所以提交时走的哪条路必须带回给 poll（`VideoSubmitted.handle`），不能在 poll 里再猜一次 |
+| 只按文档读 `error` 字段 | 任务失败，界面上却说「错误信息没有给出具体原因」 | 火山这条路上 `error` 是**字符串**不是对象：真机回执 `{"status":"failed","error":"[OutputAudioSensitiveDetected]…","output":{"message":"…"}}`。两种形态都要读 |
+
+### 真机复验（2026-08-21，四发出片 + 一发拒绝）
+
+| 发 | 走哪条 | 结果 |
+|---|---|---|
+| `doubao-seedance-1-0-pro-250528` | `/volc/v1/contents/generations/tasks` | 75s / 7.19MB，计费日志 720P（1248×704）/ 5s |
+| `doubao-seedance-2-0-260128` | `/api/v3/contents/generations/tasks` | 225s / 2.18MB（同一模型第一发被上游音频审核拦了，`OutputAudioSensitiveDetected`，不是我们的代码）|
+| `MiniMax-Hailuo-02` | `/minimax/v1/video_generation` | 95s / 1.31MB，计费日志 768P / 6s |
+| `veo_3_1-fast`（回归）| `/v1/video/create` | 115s / 1.28MB / 1280×720 / 4s，计费日志 `veo_3_1-fast` 基础价 0.5760 |
+| `kling-video`（没接的一家）| — | 当场拒绝，并列出这个账号能用的 10 条 |
+
+veo 那一发是**必须真拍的**，不能算「代码没动所以回归」：统一入口的收发被搬进了
+`video/unified.ts`，搬家本身就是改动。四条挂载点各有一行真机计费日志，缺哪条就等于那条没验。
+
+顺带看到的一条好消息：被音频审核拦掉的那发 seedance 2.0，中转站自己冲了预扣
+（`quota` 一正一负 347126），失败路径不需要我们这侧补退费。
+
+驱动脚本 `scripts/probe-video-model.mjs`：CDP 打字发消息 + 盯 `~/.dsh/media/video` 出文件，
+判据是**产物文件**不是回复文本——「模型名被悄悄丢掉、用默认模型出了一片」在屏幕上看着也像成功。
+
+### 这一轮明确不接的
+
+- **统一入口全族**（veo2/veo3/sora/grok-video）：这把密钥的 `/v1/models` 里**一条都没有**，
+  `Unified video format` 这个类型已经从目录里消失、`OpenAI video format` 接了班。加类型名不会让任何模型进池，
+  所以那条路这轮零收益，没做。
+- 可灵 / PixVerse / Vidu / 百炼 happyhorse / 万相 / grok：目录里有、渠道也有，缺我们这侧适配器，
+  下一轮按同一个形状一家一个文件加，老壳 `resources/yunwu-video-plugin/index.mjs` 里每一家的契约与坑都还在。
+
+后台白名单（`admin-server` 的 `desktopSupportedVideoDefaults`）与管理端下拉同步成了这 10 条，
+判据是**按挂载点验**：一条挂载点一发真机出片，同挂载点下的同族变体才跟着放行。
+
+## 出图照同一个形状接了三家，另外撞出一条「画成了、钱花了、存不下」（2026-08-21 真机复验）
+
+**要复现的结果**：与视频那节同一句话——点名一个中转站真有的出图模型就用那个模型画，
+接不了的当场按名字拒绝并说清是哪一种接不了，绝不静默换成默认值。
+
+改之前这条链只走 `/v1/images/generations` 一条路，池子 **23 → 31**：
+多了 Gemini 6 条（走对话端点）、`mj_imagine`、`aigc-image-kling`。
+
+### 形状与视频那侧逐条对应，因为它就是照着抄的
+
+`media/image/provider.ts` 定契约，一家一个文件（`openai.ts` / `gemini.ts` / `mj.ts` / `vod.ts`），
+`registry.ts` 现拉 `/v1/models` 按端点类型认领，`images.ts` 收成门面只管「下载、嗅类型、封顶、报账」。
+两处与视频不同，都是被出图本身的形状逼的：
+
+- **`ImageCarrier` 允许回 bytes 或 url**。视频永远是 url，出图不是：`b64_json`（seedream / gpt-image）
+  与 `url`（qwen / z-image）同时存在，Gemini 更是把 data URI 写在**对话正文**里。门面收口之后，
+  四家都不必各自写一遍下载与体积判断。
+- **`variesCount` / `variesSize` 要声明，丢掉的参数事后回报**。MJ 没有尺寸字段（比例只能写进提示词的
+  `--ar`），腾讯云一次只出一张。真机上模型把这两条如实转述给了用户——
+  「MJ 这条接口不支持单独的尺寸字段，所以这次是方图（2048×2048），我传的横版比例没有生效」。
+  这是设计要的结果：**参数被无声吞掉**和**模型被无声换掉**是同一类事故。
+
+### 这一轮撞出来的三条
+
+| 坑 | 现象 | 判据 |
+|---|---|---|
+| 附件库 5MB 上限 | MJ 每一发都是**画成了、计费了、存不下**：界面只说「出图失败」，用户看不到那张已经付过钱的图 | MJ `imagine` 回的是一张 2×2 四格图，实测 7.3～8.5MB，而 `attachment-local` 的 `maxImageBytes` 默认 5MB。这不是我们选的数，是从上游继承来的通用默认 |
+| 模型名按「长相」被归类成工具名 | 「用 mj_imagine 画…」被答成「工具 mj_imagine 在本机并不存在」，然后用默认模型画了 | 提示词里早写了「这一条只管工具名，不管模型名」，没用——`mj_imagine` 是 snake_case，模型按**拼写**分类。规则必须给一条不依赖长相的判据 |
+| 拒绝话术把两种「接不了」说成一种 | `kling-image` 明明在这个账号的目录里，拒绝时第一句却说「这个账号的出图接口上没有」 | 目录读取原本把没人认领的行直接丢掉，于是分不清「路由下架了」和「我们没适配器」。这两件事对用户是不同的结论：前者他得换模型，后者是我们欠的 |
+
+第一条的改法值得单说，因为它是**内核自己的旋钮**、不是我们发明的机制：
+`dsh-plugin-desktop/cordis.patch.yml` 给 `attachment-local` 配 `maxImageBytes: 33554432`。
+32MB 这个数也不是为凑过 MJ 挑的——**老壳就是 32MB**
+（`resources/yunwu-video-plugin/index.mjs` 的 `DEFAULT_MAX_BYTES`，挂在内核 `agents.defaults.mediaMaxMb` 上），
+所以四格图在上一代产品里本来就过得去。代价要说清楚：这个上限同时管 `read_image` 与用户粘贴的图，
+那些**会真的进模型请求、并且在压缩之前每一轮都计费**，所以放开的是成本不是安全边界；
+`maxImagePixels`（40MP）保持默认，解码那道闸没动。
+
+第三条现在按 `catalog.present`（目录里所有 id，不只被认领的）分两句话说，两条分支都真机验过。
+
+### 真机复验（2026-08-21，三发新路 + 一发老路回归 + 两发拒绝）
+
+| 发 | 走哪条 | 结果 |
+|---|---|---|
+| `gemini-3-pro-image` | `/v1/chat/completions`，图在正文的 data URI 里 | 19s / 1.04MB / **768×1376 竖**（`image_config.aspectRatio` 生效）；计费日志 模型价格 0.33 × 分组倍率 0.18 |
+| `mj_imagine` | `/mj/submit/imagine` → `/mj/task/{id}/fetch` | 84s / **7.3MB PNG** / 2048×2048 四格；计费日志 固定价格 0.30，操作 IMAGINE。**这一发在抬闸之前存不下** |
+| `aigc-image-kling` | 腾讯云点播 aigc 提交 + 轮询 | 64s / 1.25MB / 768×1360 竖；计费日志 `aigc-image-kling-3.0 (API: Kling 3.0)`，说明名字/版本拆分与中转站内部计费名一致 |
+| `doubao-seedream-4-0-250828`（回归）| `/v1/images/generations` | 12s / 1.39MB；计费日志 大小 1536x1024。老那条路整体搬进了 `image/openai.ts`，搬家本身就是改动，必须真画一发 |
+| `kling-image`（目录里有、没适配器）| — | 拒绝：「这个账号有，但本工具还没接它走的那条厂商专属接口」 |
+| `dall-e-9`（目录里没有）| — | 拒绝：「这个账号的出图接口上没有」 |
+
+计费日志查的是 **`openlux_log`**，不是 `logs`——客户端连的是 `api.openlux.ai`，
+按用户名去云雾那张表里查会一行都查不到，早先在这上面白绕了一圈。
+
+提示词那条改动单独验了一次，用的是同样 snake_case、同样在目录里但没接的 `mj_blend`：
+模型答「用户点名了模型 mj_blend，我按照人设规则直接把它填进 model 参数」，被按名字拒绝，
+**先告诉用户再**改用 `mj_imagine`。改动前后同一形状的名字，一个被当工具驳回、一个被当模型传出去。
+
+### 这一轮明确不接的
+
+按活目录点名，文生图里没接的就三条，判据是端点类型没人认领：
+
+- `kling-image`（`Kling image generation` / `Kling image expand` / `Kling multi-image to image`）
+- `kling-omni-image`（`omni-image`）
+- `viduq2`（`Vidu image generation`）
+
+可灵那两条**不是「没来得及写」，是写了也验不了**：2026-08-20 直连探过一次，路由本身是通的，
+上游当场回 `{"code":400,"message":"Account balance not enough"}`——
+
+```
+POST /kling/v1/images/generations  (kling-v3)      -> 429，Account balance not enough
+POST /kling/v1/images/omni-image   (kling-image-o1) -> 429，Account balance not enough
+```
+
+卡的是那个渠道的余额，不是我们这侧的形状。按本项目「做完要真机验证」的规矩，
+今天写下去也拿不到一发出图的证据，所以留到渠道有余额再接。
+契约不用重查：老壳 `resources/yunwu-video-plugin/index.mjs` 里这两条都在（`n` 上限 9、三档
+`aspect_ratio`、上游模型名 `kling-v3` / `kling-image-o1`），补上适配器加真机一发即可。
+`viduq2` 没探过，不知道是同样的余额问题还是别的，接之前先探一次。
+
+> **2026-08-21 改判，三条全接了。** 可灵那两条见文末「可灵两条接进新插件」：改判的理由不是
+> 余额通了（还是没通），而是判据换了——能验到的最远处是**路由与上游模型名被接受**，
+> 这一层用一发对照组证死了，剩下的成功路径写进文档标成未验。
+> 一直不接的代价是另一头：交付页照样把它们列成可选出图模型，运维选中就整条出图挂掉。
+>
+> `viduq2` 探完是另一回事：**上面这行「没接」的判据本身就是错的**，见文末
+> 「viduq2 当年不该被排除」。它两半都当场验通了，是这一批里唯一成功路径可验的一条。
+
+**MJ 的 action / blend / describe / upload / modal 与 `OpenAI image edit` 那几类不算漏接**：
+它们是**改图**不是文生图，要先有「把输入图交给工具」这个能力，是另一件事。
+
+后台这侧不用同步：图片默认模型在 `admin-server` 没有白名单（`desktopSupportedVideoDefaults` 只管视频），
+管理端图片 tab 用的是 `ModelNameSelect` 自由选，本来就不写死清单。
+
+驱动脚本 `scripts/probe-image-model.mjs` 与视频那份同形，判据同样是**产物文件**。
+它有一个已知的钝处：拒绝检测匹配的是整页文本，会命中还留在屏幕上的历史消息——
+这次就误报过一次，得回头读一遍当轮的界面才认。
+
+## 改图接上了：「生图 → 再叫改图」以前是**默默重画一张**（2026-08-21 真机复验）
+
+**要复现的结果**：用户说「把这张图里的猫改成黑色」，改的就得是那张图；
+改不了的当场说改不了，绝不退回去照提示词重画一张交差。
+
+### 上一轮把这件事划到范围外，理由是错的
+
+上一节写着「MJ 动作族与 `OpenAI image edit` 那几类是**改图**不是文生图，是另一件事」。
+边界划错了地方。真机一验：先画一只白猫，再说「把猫改成黑色，桌子和背景别动」，
+模型**没有拒绝**，它去调 `image_generate` 重画——甚至挑了个名字里带 edit 的模型
+（`qwen-image-edit-2509`）想照办。但那时工具的入参只有 `model / prompt / count / size`，
+**根本没有装图片的槽**，白猫从来没被发出去过。用户会拿到一只长得不一样的黑猫，
+并被告知「改好了」。这与静默换模型是同一类事故：看着成了，要的事没发生。
+
+### 三处证据说明它接得了，而且不用发明机制
+
+- **老壳接过并验通**：`references/media-video.md` 记着 2026-08-17 的结案读数
+  「池子 33 条、**可改图 17 条**」，还留了两条关键结论——云雾的 `/v1/images/edits`
+  要 **multipart**（内核 litellm 那条发的是 JSON + data URL，一直是坏的，只是没人试过），
+  以及 Gemini 那族**出图与改图是同一个请求**，只多一个 `image_url`。
+- **「哪张图」我们自己已经解决了**：`media/session-images.ts` 的 `findLatestImage(session)`
+  走会话日志找最近一张图（用户贴的或刚生成的）。生成的图刻意不进模型可见内容，
+  所以模型手上没有附件 id 可以引用，只能由工具自己找。视频那侧的 `animate_last_image`
+  就是靠它做的图生视频——改图缺的只是**同一个开关装到 `image_generate` 上**。
+- **动手前先验，没有直接照搬册子**：册子那两条是 08-17 的读数，不能当今天的证据。
+  2026-08-21 直连各打一发：`gpt-image-1` multipart **200 / 53.8 秒**，
+  `gemini-2.5-flash-image` 对话端点 **200 / 27.5 秒**且 `prompt_tokens` 277
+  （同路径纯文字提问不到 40，说明图真被读进去了）。两条都成立才开始写。
+
+### 「能不能改图」按端点类型认领，名字不算数
+
+判据与选模型同源：`OpenAI image edit` / `images-edits` / `openai-编辑` / `image-edit`
+四个名字是同一条 `/v1/images/edits`，加上 Gemini 全族（这条路上编辑不是第二条路由）。
+**`qwen-image-edit-2509` 是反例**：名字里就写着 edit，但它的行一个编辑端点都没声明，
+所以不认领它。真机拒绝那一发列出的可改图正好 **13 条**（6 Gemini + 5 gpt-image + 2 grok），
+与册子 08-17 记的「7 直连 + 6 对话端点」逐条对上。
+
+### 一个必须想清楚的决定：用户没点名模型时怎么办
+
+配置下发的默认模型是 seedream，它**不会改图**。两种情况分开处理，判据是「用户有没有表达过意见」：
+
+- **点名了一个不会改图的模型** → 按名拒绝并列出能改的，不替换。用户的选择不是我们能改的。
+- **谁都没点名** → 自动换一个能改图的（`EDIT_DEFAULTS`，只放真编辑成功过的两条，
+  两种传输各占一条、便宜的在前），结果里如实报出用的是谁。没点名时本来就是工具在挑，
+  为改图挑一个能改图的属于同一类决定，不是替换。
+- **目录读不出来** → 保持原样并报「查不到，所以不能确定它改不改得了」，**不在看不见的时候换**。
+
+### 真机复验（2026-08-21，两条传输 + 两条拒绝 + 老路回归）
+
+| 发 | 结果 |
+|---|---|
+| 白猫基线（没点名）| `doubao-seedream-4-0-250828`，19.5 秒——**老那条出图路的回归** |
+| 「把猫改成黑色，桌子背景别动」（没点名）| 模型自己判定要用 `edit_last_image`；自动换到 `gemini-2.5-flash-image`，9 秒，计费 0.15 × 0.18。**猫的姿势、桌角桌腿、墙上两道斜光、左下角阴影全部留住，只有毛色变了** |
+| 「用 gpt-image-1 改成橘色虎斑」| multipart 那条经我们代码跑通，68 秒 / 1.73MB PNG，场景同样逐项保住 |
+| 「用 doubao-seedream-4-0-250828 改成灰色」| 当场拒绝并列出 13 条可改图的；模型是**被拒之后才明说**换用 gpt-image-1 的 |
+| 新会话里「把刚才那张图改成黑白的」| 拒绝：「这个对话里还没有图片」 |
+
+最后那发还带出一条要补的话：模型被拒之后跑去 glob 磁盘、翻出桌面上一张无关 PNG，
+再拿 `read_image` 撞了一次「文本模型不能读图」，白费四步。所以那句拒绝后面补了
+「改图只认这段对话里的图，磁盘上的文件找出来也用不上」——把门关死比让它去猜便宜。
+
+### 仍然不接的，和上一轮同一个判据
+
+- **MJ 动作族**（`MJ action` 9 条 + `mj_modal`）：要上一个任务的 `taskId` + 图序号，
+  是 MJ 自己定义的 Secondary Editing，我们这侧没有「记住上一个 MJ 任务」这件事。
+- **`mj_blend`**：它确实是改图，但**不收 prompt**——把 2~9 张图混合，
+  对「把猫改成黑色」这种诉求帮不上忙，不属于这一轮要复现的结果。
+- 腾讯云点播那条没探过有没有改图路径，没验就不声明。
+
+### 卡片文案有两份，只改宿主那份等于没改（2026-08-21 补）
+
+改图接通那天真机上卡片仍写着「已生成 1 张图片」。不是逻辑没生效——同一轮里拒绝话术、
+`edit_last_image` 开关都对了——而是**标题根本不走 `presentResult`**：桌面端给
+`image_generate` 注册了自己的卡片（`client/ImageToolCard.tsx`），文案取自
+`client/media-locales.ts`，宿主那份 `presentCall` / `presentResult` 只服务没有卡片的界面。
+
+补法是给浏览器侧字典加一档 `edit.*`（修改图片 / 修改中… / 已改出 {count} 张图片 / 改图失败），
+卡片从它已经在解析的 `argsRaw` 里读 `edit_last_image` 决定说哪一档。顺手把三层嵌套三元换成
+一张 `COPY` 表——同一处要在「展示 / 文生 / 改图」三套词汇 × 四个状态里选，写成内联三元
+读起来是道谜题。
+
+**复验没花钱**：卡片是从日志回放重画的，所以重启后打开昨天那段对话就能看结果——
+`已生成 1 张图片`（老路没连累）、`已改出 1 张图片` ×3、`改图失败`（被拒那发）、
+`已展示 1 张图片`（`image_show` 没受影响）。以后凡是动卡片文案，先问一句「桌面端这行字
+是从哪个字典来的」。
+
+### 还没收口的：交付页认得比插件多（选得到、跑不动）
+
+判据脚本 `scripts/verify-image-endpoints.mjs:128` 自己写着这条不变量：
+*「界面凭端点类型认，插件凭适配器跑。多认出一条就是『选得到、跑不动』。」*
+但它锁的是**老插件**那份名单（`:27` 的 `mj_imagine` / `mj_blend` / `kling-image` /
+`kling-omni-image` 四条），新插件这侧没人锁。
+
+今天两边对不上：
+
+| | 谁认 |
+|---|---|
+| 端点类型那份清单（`src/shared/media-endpoints.ts`）| `IMAGE_ASYNC_ENDPOINT_TYPES` 整档六个类型全部当出图模型，且消费它的 `model-catalog.ts:489-499` **一律 `canEdit: true`** |
+| 新插件（`media/image/registry.ts:54-59`）| 异步只有 `mjImagine` 一个适配器；另有一个 `vod`，而它**不在**上面那份类型清单里 |
+
+> **2026-08-21 更正：上面那张表说的不是新客户端的交付链路。**
+> `src/main/model-catalog.ts` 只被 `yunwu-desktop/src/**` 消费（老 Electron 壳的
+> `Activate.tsx` / `settings/Models.tsx` / `main/ipc.ts` / `config-writer.ts`），
+> **不喂 DSH 客户端**。新客户端的默认出图模型走的是另一条：
+> **admin-cloud 交付页 → 中转站 → 插件 `models/delivered.ts:69`
+> （`GET /api/desktop-config/model-delivery`）→ `index.ts:594-596`**。
+>
+> 沿着这条真链路重查，「选得到、跑不动」不但还在，而且口子比原文写的更大：
+> - 页面那侧（`admin-cloud/src/components/form/ModelNameSelect.tsx`）是**全模型库的自由补全**，
+>   `filterOption={false}`，按能力一个都不筛。出图 tab 的 placeholder 写着「从图像模型中选择」，
+>   但没有任何东西拦着填一个对话模型或视频模型。
+> - 中转站那侧（`controller/desktop_delivered_model_client.go:143`）唯一的把关是
+>   `deliveredModelAllowed` = **可调用 ∧ 在模型广场里**，不问桌面端有没有适配器。
+>
+> 所以真正的兜底只有插件那句拒绝，它会在每一次出图上出现，直到有人回后台改掉。
+> 这条口子今天没堵，先记在这里；堵它要么让交付页按能力筛，要么把适配器名单发布出去给页面用，
+> 都跨仓，值得单独一轮。
+
+**2026-08-21 已接掉可灵两条（见下一节）与 `viduq2`（见文末）**，
+`mj_blend` 是刻意不接（不收 prompt），不是漏接。
+
+### 可灵两条接进新插件（2026-08-21，成功路径仍未验）
+
+目录今天 474 行，异步出图正好 4 行，与老插件那份适配器名单一一对应：
+`kling-image`（一行挂着 generations / 多图生图 / 扩图三个类型）、`kling-omni-image`
+（只有 `omni-image`）、`mj_imagine`、`mj_blend`。
+
+**动手前先打了三发直连**，因为册子里那两条是 08-17 的读数，不能当今天的证据：
+
+| 发 | 结果 |
+|---|---|
+| `/kling/v1/images/generations`，`model_name: kling-v3` | HTTP **429**，体 `{"code":400,"message":"Account balance not enough"}` |
+| `/kling/v1/images/omni-image`，`model_name: kling-image-o1` | 同上 |
+| 对照组：`model_name` 填目录 id `kling-image` | HTTP 429，`model_name value 'kling-image' is invalid` |
+
+**对照组那发是关键**：没有它，前两发只能证明「被拒了」；有了它才能说前两发不是笼统拒绝——
+两个上游模型名今天都过了名字校验，只在渠道余额那步被挡。顺带今天复验了两条老结论仍成立：
+业务错误包在 HTTP 429 里（判据只能看体里的 `code`）、目录 id 不能当 `model_name`。
+
+落地成 `media/image/kling.ts`，两个 provider 共用提交 / 轮询。与老插件的三处刻意不同：
+
+- **`endpointTypes` 只认 `Kling image generation` 一个**，不认多图生图与扩图。今天它们与
+  generations 同在一行，所以照样认得出 `kling-image`；但哪天平台把它们拆成独立的行，
+  只认一个会让那行落到「没接这条」的准确拒绝上，认三个则会拿 generations 的请求体去撞。
+- **`fallbackModels` 留空**。这份名单只在目录读不出来时用，契约是「真出过图的名字」——
+  可灵在这台机器上一张都没出过，这时候猜它等于在什么都验不了的时刻把付费请求送上没验过的路。
+- **轮询上限 200 秒**（老插件 300）：工具自己的预算是 `TOOL_TIMEOUT_MS = 250_000`，
+  轮询超过它只会被换成一句没有信息量的通用超时。
+
+**没验到的是成功路径**：任务建起来之后的轮询、状态词汇、`task_result` 形状，
+在这把密钥上一次都没跑到过，是照着老插件原样搬的。第一次真跑通时要盯着看，别当已验。
+
+真机复验（同一台客户端，两发）：
+
+| 发 | 结果 |
+|---|---|
+| 「用 kling-image 画一只橘猫坐在窗台上」| **出图失败：可灵拒绝了这次提交：Account balance not enough** —— 从「本工具还没接它走的那条厂商专属接口」变成厂商自己的话，就是路由到位的证据 |
+| 「用 kling-omni-image 把刚才那张橘猫图改成黑白的」| **改图失败**（标题不是「出图失败」）：说明 omni 被认成可改图，请求带着 `image_list` 真发了出去，才被余额挡回 |
+| 两发之后的兜底 | 模型都如实说明了「你点名的是 X、被拒原因是 Y、我改用了 Z」，没有静默替换；默认模型出图 / 改图各成功一次，**老路无回归** |
+
+第二发还顺手把卡片文案那条补验了：`已改出 1 张图片` 这次是在**实时路径**上出现的，
+之前只在回放上看过。
+
+### viduq2 当年不该被排除（2026-08-21，两半都验通）
+
+老插件把它列进「明确不接」，理由是 `/ent/v2/reference2image` 不是「按一句话出图」。
+这个理由是**读名字读出来的**，而网关自己的请求类型写得很清楚
+（`new-yunwu-api/dto/vidu.go:118-123`）：
+
+```go
+Images []string // 图像参考，可选，viduq2支持输入 0～7 张图片
+Prompt string  // 注1：使用 Viduq2 且没有上传任何 images 时，模型会用该参数的文本内容生成图片
+```
+
+**0 张就是文生图，1 张就是改图，同一条路。** 一条路同时对上我们两套词汇，
+反而比别的家更省事。教训与本文档里其他几条同源：路径名不是契约，请求类型才是。
+
+真机三发，成功路径**全程看到底**（这是这一批里唯一做到的一条）：
+
+| 发 | 结果 |
+|---|---|
+| 文生（不带 `images`）| HTTP 200 `state: created` → 38 秒 `success`，6 credits |
+| 改图（带 1 张 404 KB 参考图）| 53 秒 `success`，8 credits，下载 1984.5 KB，magic `89504e47`（真 PNG，不是错误页） |
+| 客户端点名 `viduq2` 出图 + 改图 | 「已生成 1 张图片」/「已改出 1 张图片」，构图、木屋位置、窗光都留住了，只有季节变了——是真改不是重画 |
+
+契约上与别家不一样的三处，都是量出来的：
+
+- **参考图要带 `data:` 前缀**（与 MJ 同侧、与可灵的裸 base64 相反）。中转站对 `images`
+  不做任何转换（`relay/channel/task/vidu/` 里没有一处碰 base64），所以格式是上游的规矩，
+  只能实测。提交回执里它被改写成了 `ssupload:?id=…`，是平台替我们上传了。
+- **提交本身很慢，而且随参考图大小涨**：裸提示词 2 秒，404 KB 参考图 12 秒，2.5 MB 参考图 **68 秒**。
+  所以预算按**整段**算（`TOTAL_BUDGET_MS = 240_000`）而不是提交、轮询各一份——各一份加起来
+  会越过工具自己的 250 秒上限，届时用户看到的是通用超时，我们这句「任务还在上游跑」就没了。
+- **`aspect_ratio: auto` = 与输入图同比例**，改图默认走它。
+
+最后这条是**写完之后看图才发现的缺陷**，值得单独记：第一版照着可灵的写法写成
+`aspectOf(request.size) ?? '1:1'`。改图时模型不会传 `size`，于是 1:1 被我们主动加了上去，
+一张 1080×1920 的竖版灯塔**改完变成了方图**——而改图这件事的全部意义就是「除了点名要改的，
+别的都别动」。改成「没人要求就不塞」之后复验：参考图 1080×1920，出来 1080×1920。
+`kling.ts` 里同样的 `?? '1:1'` 一并去掉了（可灵的合法值只有三档、没有 `auto`，
+保不住原比例，但至少不该由我们主动强加一个）。
+
+**接口返回的图不小**：两次都是 2~3 MB PNG，靠的是 `maxImageBytes` 早先抬到 32 MB。
+默认 5 MB 也够，但离得不远。
+
+### Vidu 视频：四条路接了两条（2026-08-21，两条都真机出片）
+
+出图收口之后按同样的办法对视频点了一次名。活目录 84 行音视频里，已认领的只有三家
+（unified 的 veo、doubao、minimax 的海螺），**未认领的最大一块就是 Vidu 的四条视频路由**，
+覆盖 viduq1 / q1-classic / q2 / q2-turbo / q3-pro / q3-turbo / vidu2.0 等 10 个模型。
+
+**只接了两条，另两条是刻意不接**：Vidu 按「你给它什么」分路——纯文字、一张首帧、两张首尾帧、
+最多七张主体参考。而本工具一次只递一张图（`video-tool.ts:350`），所以首尾帧缺第二张、
+参考生视频缺主体词汇。把一张图塞给要两张的路是 400，塞给「主体参考」则拍出来的是另一件事，
+不如让只有 `Vidu reference to video` 的那几个（`viduq3` / `viduq3-mix` / `viduq2-pro`）
+落到注册表那句准确的「没接这条」上。
+
+真机 `viduq3-turbo` 540p/4s，两条路各一发：
+
+| | 提交 | 出片 | 产物 |
+|---|---|---|---|
+| 文生视频 | HTTP 200 / 1 秒 | 36 秒 | mp4；客户端整条走完 86 秒，**720×1280**，请求的 9:16 生效 |
+| 图生视频 | HTTP 200 / 12 秒（它要上传参考图）| 46 秒，28 credits | mp4；客户端整条 90~105 秒 |
+
+顺手量出来的两件事，猜都会猜错：
+
+- **同一个模型，两条路被中转站分到了不同上游**：文生那发的产物在腾讯云 VCLM 的桶里，
+  图生那发在 Vidu 自己的 S3。回执形状也随之不同——文生只回三个字段、没有 `credits`、
+  不回显参数，图生把整个请求回显一遍。所以解析不能依赖那份厚的。按
+  `platform-data.md` 的分工，谁承载是中转站的事，我们两边都得能读。
+- **路径是 `/ent/v2/img2video`**。请求类型自己的注释写的是 `image2video`
+  （`dto/vidu.go:70`），但路由注册和 adaptor 匹配的都是短的那个，照注释写就是 404。
+
+**没有声明时长白名单**，这是按 `video/provider.ts` 自己的规矩来的：中转站对时长/分辨率/比例
+不是拒绝而是**逐模型纠正**（`relay/channel/task/vidu/models.go:481` 的 `CorrectDuration`，
+以及 `CorrectResolution` / `CorrectAspectRatio`），本地再声明一份猜来的集合，只会把路由其实
+收的值拦掉。比例是例外，它值得带：不支持的比例不会向请求靠拢，而是被换成模型默认值，
+不声明就会出现「要竖版、拿到横版、没有人说一声」。
+
+#### 为此动了两处公共契约，都是被真机逼出来的
+
+**其一，`spec()` 现在收第二个参数 `types`。** Vidu 把**模式编码在端点类型里而不是模型名里**：
+`viduq2` 能文生不能图生、`viduq3-turbo` 两样都行、`viduq3` 两样都不行，名字上一点看不出来。
+而 `spec()` 原来只拿得到模型名，于是「viduq2 不能用图片当首帧」这句话只能等后台作业跑起来
+才报——那已经是它该出现的那一轮之后了。真机复验这条：
+
+```
+用 viduq2 把刚才那张白猫图动起来
+→ 当轮 Error: viduq2 不支持用图片当首帧；要图生视频请不要指定这个模型，或改用 veo_3_1-fast。
+```
+
+模型收到之后没有静默换模型，而是把选择抛回给了用户。另外三家 provider 不用改（TS 允许实现
+少收参数），`video-tool.ts` 两个调用点各加一个实参。
+
+**其二，`VideoModelSpec` 多了 `referenceDecidesShape`。** 这条是**写完之后量文件才发现的假话**，
+形状与出图那边的 `?? '1:1'` 完全一样，值得并排记：
+
+```
+源图 2048×2048（方）→ 出片 960×960（方，跟着首帧走，没有黑边）
+而模型当时对用户说的是：「出片 16:9 横版（源图正方形，出片会留黑边）」
+```
+
+假话不是模型编的，是工具喂的：`video-tool.ts` 会从参考图推一个比例再讲给模型听，
+那套说辞是照 veo 那条路写的（veo 确实要选一个比例并给方图加黑边），而 **Vidu 的 `img2video`
+根本没有 `aspect_ratio` 字段**，画面就是首帧本身。改法是让 provider 自己声明这件事：
+声明了的，工具不再推比例、改说「出片就按这张图的比例，不会留黑边」，用户如果显式点名了比例
+则当轮拒绝并说明去哪儿要（纯文字出片可以指定，或先把图改成那个比例）。
+
+复验两条都做了：Vidu 图生（源图 2048×2048 → 出片 960×960，措辞里不再有比例和黑边）；
+**老路不回归**——默认 veo 走同一张方图，照旧说「16:9 横屏……两侧可能会有一点黑边」，
+作业状态 `1280x720`，与改动前一致。
+
+#### 顺带查出一条静默失效：grok 视频今天没人认
+
+`unified.ts:122-126` 的 `endpointTypes` 里写着 `Grok video`，而活目录里 grok 那两行
+（`grok-imagine-video`、`grok-imagine-video-1.5-preview`）挂的类型是 **`官方格式`** 和 `edit`。
+名字对不上，所以今天没有任何 provider 认得到它们，点名就落到「这个账号的出片接口上没有」。
+
+这条**没有就地改掉**，因为 `官方格式` 是个非常泛的中文名，今天只有 grok 两行挂着它，
+明天完全可能挂上别家；照 `endpointTypes` 直接认领等于赌它永远专属，而 `claims(id)` 收窄成
+`/^grok-/` 又是在没验过 grok 这条路到底吃不吃统一格式请求体的情况下先写代码。
+按本文档一贯的顺序，这条要先探一发再动手，记在这里免得下次又当新发现。
+
+> **2026-08-21 探完了，而且推翻了「加个字符串就行」的猜想。** 打 `/v1/video/create` 发
+> `{"model":"grok-imagine-video"}`，回的是统一入口自己的形状（`{"id":"","status":"error",
+> "error":"prompt is required"}`）——看着像是它就属于这条路。但库里 `models.endpoints` 写的是
+> **`官方格式` → `POST /v1/videos/generations`**，即 xAI 原生那条（老插件第七家适配器打的就是
+> 它）。统一入口只是宽容，**判据归 `endpoints`，不归一次探针的宽容度**。所以 grok 是一个独立
+> 适配器，不是一行字符串；仍未接。
+
+### 百炼接进新插件：happyhorse + 万相，6 个模型（2026-08-21，端到端出片）
+
+Vidu 那轮把视频这侧的差集看清了：**老插件有七家适配器（`media-video.md:804-813`，全部端到端
+验过），新 DSH 插件只有四家**（unified / doubao / minimax / vidu）。缺的是可灵 v1、可灵 3.0
+turbo、PixVerse、百炼 happyhorse。先花一发确认这四家今天还活不活——发缺字段的请求，只看路由
+与渠道，不产生计费任务——**六条全部回了「缺哪个字段」的校验投诉，没有一条是无可用渠道**。
+
+先接百炼，因为它一个适配器带两家：`Happyhorse video`（1.0 四条）、`happyhorse视频`（1.1 三条）、
+`Wan video generation`（万相两条）在平台侧是同一个 channel、同一条路径、同一套状态字面量
+（`relay/channel/task/ali/bailain/models.go` 的 ModelList 里 wan2.x 与 happyhorse 并列）。
+落进本工具词汇的是 **6 个**：happyhorse 1.0/1.1 的 t2v + i2v，加 `wan2.5-i2v-preview`、
+`wan2.6-i2v`。`-r2v`（要 reference_image）与 `-video-edit`（要一个公网视频 URL）是另一档能力，
+按 `media-video.md:844-846` 的规矩不塞进出片档。
+
+**认领按精确名而不是后缀**，这一条跟别家不同：平台的 `GetModelAction`（`models.go:21-32`）是个
+精确 switch，`-t2v` / `-r2v` / `-video-edit` 各自对应一种动作，**其余一律 image_to_video**——
+万相那两条正是落在这条 default 上。所以将来某个 `happyhorse-1.2-t2v` 在平台眼里是图生，
+照后缀猜就会替用户发一个必然缺图的请求。
+
+#### 真机（720P / 3 秒）
+
+| 用例 | 提交 | 出片 | 产物 |
+|---|---|---|---|
+| `happyhorse-1.0-t2v`，`ratio:16:9` | HTTP 200 / 1 秒 | 96 秒 | 1280×720，1.19 MB |
+| `happyhorse-1.0-i2v`，方图首帧 | HTTP 200 / 12 秒 | 87 秒 | **960×960**，1.41 MB |
+| `happyhorse-1.0-i2v`，不给图 | HTTP 500 / 1 秒 | — | `必须提供 first_frame 媒体` |
+| `happyhorse-1.0-t2v`，`ratio:1:1` | HTTP 200 | 109 秒 | 960×960，1.88 MB |
+| 客户端整条：点名 `happyhorse-1.0-t2v` 拍 3 秒 | — | 80 秒 | 1280×720，1.90 MB，**无水印** |
+| 客户端整条：点名 `wan2.6-i2v` 动画一张方图 | — | 165 秒 | 960×960，2.63 MB |
+
+第二行就是**写代码之前**量出来的那条：请求的是 `16:9`，回来的是源图的方形——`img_url` 这条路
+的 `parameters` 里根本没有 `ratio` 字段（文档站的字段面里也没有，而且分辨率那条的说明原话是
+「输出的视频宽高比与输入首帧近似一致」）。所以百炼图生也声明 `referenceDecidesShape`，
+与 Vidu 同一条。这次没等模型对用户说出假话。
+
+#### 文档站挖出一个没人知道的旋钮：happyhorse 默认烧水印
+
+`ratio` 在中转站侧**不校验**（dto 里只有 `Ratio string`，校验的是时长与分辨率），所以合法集
+只能问上游，而按 `platform-data.md:83` 那条路子——文档站前端包里内联着整份 Apifox 导出——
+一次就取到了：`16:9`(默认) / `9:16` / `1:1` / `4:3` / `3:4`，其中三个已真机量过。
+
+同一份导出里还带出一条谁也没提过的：**`watermark` 默认 `true`，会在右下角烧上 "Happy Horse"**。
+产物文件名一律是 `…_refiner_watermark.mp4`，所以光看回执永远发现不了。按册子的规矩验了一发
+（同一 prompt 拍两条、各抠一帧对比）：默认那条角上确有字样，`watermark:false` 那条干净。
+现在固定发 `false`；万相那边本来就默认 false，发了也不亏。
+
+#### 两处公共契约又动了，仍然是被真机逼的
+
+- **`durationRange`**：百炼校验的是**区间**不是集合（happyhorse 3~15、万相 2~15，
+  `relay_tasks/ali/bailian/duration/task.go:119-125`，越界回 400）。原来只有 `durations`
+  离散白名单，把十三个整数列出来会读成「量过的白名单」，其实不是。
+- **`requiresFirstFrame`**：这一家 6 条里有 4 条只能图生。原来只有反方向的 `firstFrame`
+  （拿图给不吃图的模型），正方向「只吃图的模型却只给了文字」没有当轮判据，只能等后台作业
+  里报。海螺的 `MiniMax-Hailuo-2.3-Fast` 同一形状，一并声明，submit 里那道保留作兜底。
+
+复验这条拒绝时，**模型的反应比拒绝本身更值得记**：
+
+```
+用 wan2.6-i2v 拍一段视频：一只柴犬在雪地里奔跑
+→ 当轮 Error: wan2.6-i2v 只做图生视频，得先有一张图当首帧。纯文字出片请换一个模型
+  （比如 veo_3_1-fast），或者先生成一张图再让它动起来。
+→ 模型照着后半句做了：先出一张柴犬图，再用它当首帧调 wan2.6-i2v。
+```
+
+拒绝文案里那句「或者先生成一张图再让它动起来」不是客套，它是模型下一步的依据。
+
+#### 一个真实故障：7 MB 首帧把提交拖过了我们自己的闸
+
+上面那次自救**当场失败了两次**，报的是「账号服务超时（120 秒未响应）」。量了一发才知道不是
+上游抽风，是**体积**：同一张 2048×2048 的 PNG（7.03 MB，base64 之后 9.37 MB）——
+
+| 首帧 | happyhorse 提交 | wan 提交 |
+|---|---|---|
+| 9.37 MB data URI | 51 秒 | **173 秒** |
+| 缩到 0.16 MB | 4 秒 | 3 秒 |
+
+两发都是 HTTP 200，路是通的，只是上传腿随体积涨，而 wan 那条超过了 provider 里写死的 120 秒。
+所以带参考图的提交给到 300 秒（Vidu 同一暴露面，一并调整），复验那条失败两次的用例
+165 秒出片、960×960。
+
+**但这只是把伤止住了，正确的修法是根本别发 7 MB。** 这几家都只出 720p/1080p，四百万像素的首帧
+一点用没有，缩到 1536 边长再发能把上传腿从三分钟压到几秒。卡在编码器上：`sharp` 确实在应用的
+依赖树里（`dsh-attachment-local` 自己在用），但插件是 junction 链进 `dsh-plugin-desktop/node_modules`
+的，**node 按 realpath 解析，从插件真实路径 `require.resolve('sharp')` 是 MODULE_NOT_FOUND**
+（实测）。给插件单加一份原生模块要动打包，这一轮验不了——按规矩不先写，记在这里。
+
+### 可灵视频接进新插件：一个品牌两套协议（2026-08-21，四条路真机出片）
+
+差集四家里剩下的两家：`kling-video` 与 `kling-3.0-turbo`。**它们不是一个协议的两个名字**——
+v1 收扁平字段（`model_name` / `mode` / `duration`）、终态 `succeed`、url 在
+`data.task_result.videos[0].url`；3.0 turbo 把参数塞进 `settings`、参考图塞进 `contents` 数组、
+终态 `succeeded`、url 在 `data[0].outputs[0].url`，而且**提交回对象、查询回数组**
+（它自己的 dto 两种都认，`dto/kling_v30_turbo.go:203-233`）。所以是两个 provider，
+不是一个带分支的。
+
+#### 写代码之前先把四条路的形状问清楚，一发片子都没产
+
+用的是册子记的那招：**毒一个校验顺序靠后的字段**。四条路各一发，全部回 HTTP 429 + 体内 `code:400`：
+
+| 路径 | 毒的字段 | 回什么 |
+|---|---|---|
+| `/kling/v1/videos/text2video` | `aspect_ratio: '99:1'` | `aspect_ratio value '99:1' is invalid` |
+| `/kling/v1/videos/image2video` | `image: 'not-an-image'` | `File is not in a valid base64 format` |
+| `/kling/text-to-video/kling-3.0-turbo` | `settings.resolution: '4k'` | `settings.resolution must be 720p or 1080p` |
+| `/kling/image-to-video/kling-3.0-turbo` | `contents` 里不放首帧 | `contents must include at least one first_frame item` |
+
+**这几句投诉的措辞有额外信息**：中转层自己的本地校验说的是 `invalid aspect_ratio value: …`
+（`kling/adaptor.go:1085`），而回来的是 `aspect_ratio value '…' is invalid`——**措辞不同，
+说明请求穿到了可灵本身**，不是被平台在门口拦下。判「路通不通」时这比状态码有用得多。
+
+同一发也证伪了一个我差点写进注释的推断：拿目录 id `kling-video` 当 `model_name` 发过去，
+回的**也是**比例投诉——**这不能证明它合法**，只说明比例排在名字之前校验。所以仍按老结论发
+真实版本号 `kling-v1`（白名单 `kling/adaptor.go:1928`）。事后平台日志把这条钉死了：
+
+```
+2026-08-21 18:19:11  kling-video  渠道 4124  模型 kling-v1，模式 std，时长 5s，基础总价 0.15
+```
+
+计费行的 `model_name` 是目录 id，`content` 里记的才是上游版本号——两者确实是两回事。
+
+#### 真机四发（720p / 5 秒）
+
+| 用例 | 出片 | 产物 |
+|---|---|---|
+| 客户端点名 `kling-3.0-turbo` 文生 | 301 秒 | 1280×720，6.67 MB |
+| 客户端点名 `kling-video` 文生 | 341 秒 | 1280×720，5.99 MB |
+| 客户端点名 `kling-video` 动画一张 1024×1536 竖图 | 371 秒 | **832×1216**，3.58 MB |
+| 客户端点名 `kling-3.0-turbo` 动画同一张竖图 | 175 秒 | **784×1176**，2.46 MB |
+
+后两行是这一轮唯一真正的新知识。`referenceDecidesShape` 我原本只是照平台源码断言的
+（v1 的 `image2video` 根本没有 `aspect_ratio` 字段，turbo 的图生我则是刻意不发 `settings.aspect_ratio`），
+而 **2:3 根本不在我们声明的比例集 `16:9 / 9:16 / 1:1` 里**，两条路的产物却都与源图同比——
+所以画幅确实由图定，两代同一条。同一轮客户端对用户说的是「视频会保持竖版比例，不留黑边」，
+这句正是这个字段的输出；Vidu 那次它说的是假话，这次两条都是真的。
+
+turbo 明显更快（图生 175 秒 vs v1 371 秒），但两条都远超统一入口的 veo（约 100 秒）——
+facade 那个十分钟预算当初就是照可灵定的，别往下调。
+
+#### 两处与老插件刻意不同
+
+- **不认领 `Multi-image reference to video`**。那条要 2~4 张图，而本工具最多交给 provider 一张
+  （`media/video-tool.ts`）。`kling-video` 靠另外两个类型照样认得出，少认一个类型不丢模型，
+  却能让将来真拆出去的多图行落到「没接这条」的准确拒绝上。
+- **`claims` 按 `kling-` 前缀收窄**。`Text to video` / `Image to video` 是整份目录里最泛的两个
+  类型名，今天只有可灵挂着；将来别家挂上同名类型时，没有这道收窄就会把它的请求发到 `/kling/…`。
+
+轮询仍然必须走**提交时那个挂点**（`handle` 带过去）：这条路上问错挂点不回 404，回的是一个 stub，
+于是轮询会把整个预算耗在一个几分钟前就拍完了的任务上。
+
+### grok 视频：xAI 原生那条，也是这个目录里唯一挂在 `/v1` 下的（2026-08-21，两条路出片）
+
+上一轮记的那句「统一入口只是宽容，判据归 `endpoints`」这次兑现了：`grok-imagine-video` 与
+`grok-imagine-video-1.5-preview` 挂的类型是 **`官方格式` → `POST /v1/videos/generations`**，
+请求体、终态字面量、错误封套跟统一入口全不一样，所以是独立适配器，不是往 `unified.ts` 里
+加一行字符串。**别家的专属路由都在站点根（`/kling/…`、`/minimax/…`、`/ent/v2/…`），只有这条在
+`/v1` 下**，用 `wire.base` 而不是 `root`——拼错了得到的是一个看着像「任务不存在」的 404。
+
+#### 五个必填字段，以及一个不会文生的型号
+
+`model / prompt / aspect_ratio / resolution / duration` 缺一不可（`xaivideo/adaptor.go:84-96`）——
+其中后两个在我们工具里是可选的，所以默认值得在适配器里定（时长按秒计价，用户没点名长度就
+不该替他多买三秒，取 5 而不是平台默认的 8）。四发探针全部被中转层**本地**拒掉，没产片没计费，
+而本地拒绝同时也证明这把 key 在这条路上有渠道（选渠道跑在校验之前）：
+
+| 发的 | 回的 |
+|---|---|
+| `resolution: '1080p'` | `resolution 1080p is not supported yet` |
+| `grok-imagine-video-1.5-preview` 不给图 | `only supports image-to-video, image is required` |
+| 同上但给了图 | 过了那道关，改报被我毒的分辨率 |
+| `duration: 99` | `duration must be in range [1, 15]` |
+
+第二行就是 `requiresFirstFrame` 的第三个客户（前两个是百炼与海螺）：平台把它写成一张显式表
+（`xaivideo/models.go:33-42`），两个名字只差一个版本尾巴，看名字是判不出来的。
+
+#### 两处形状跟这个目录里所有别家都不同
+
+- **参考图是对象** `image: { url }`，不是裸字符串（`xaiMediaRef` 收 `url` / `image_url` / `file_id`）。
+- **拒绝时 `code` 是字符串**（`{"code":"invalid_request"}`），而可灵成功时 `code` 是数字 0。
+  照搬可灵的判据会把 grok 的每一次回答都读成失败，所以这边的判据是「有没有 `request_id`」——
+  提交成功时它回的就是一个裸 `{request_id}`，没有状态也没有包装层。
+
+#### 真机
+
+| 用例 | 出片 | 产物 |
+|---|---|---|
+| 客户端点名 `grok-imagine-video` 文生 | 100 秒 | 1280×720，9.04 MB |
+| 客户端点名它动画一张 1024×1536 竖图 | 80 秒 | 720×1280，3.58 MB |
+| 直连：同一张竖图 + 显式 `16:9`、480p、1 秒 | 43 秒 | **848×480**，0.27 MB |
+| 客户端点名 `-1.5-preview` 纯文字 | — | 当轮拒绝，模型改为先出图再动画 |
+
+第三行是**专门为了不重蹈 Vidu 那次**打的。第二行看着像「图决定形状」，其实不是：源图是 2:3，
+产物却是 9:16，两者不同——是模型自己挑了 9:16。要分清「照搬源图」和「按字段选」，判据必须让
+源图比例**落在合法集之外**，再显式要一个跟它最不像的。竖图要 16:9 回的是横屏，所以这条路
+**不声明 `referenceDecidesShape`**：它即使带图也必填 `aspect_ratio`，画幅是选的不是继承的。
+同一发还顺带钉死了 `image.url` 收 data URI（2.09 MB 的 PNG，7 秒提交完）。
+
+## 改图的第二条路：源图塞进 generations，目录里一个字都看不出来（2026-08-21 真机复验）
+
+**要复现的结果**：点名 `doubao-seedream-4-0-250828` 或 `qwen-image-3.0` 说「把这张图改成黑白」，
+它就真的改。改之前我们回的是「「qwen-image-3.0」在这个账号上只能凭提示词出新图，没有改图这条
+路径」——**那是假话**，而且是我们自己那条「宁可拒绝也不静默重画」的规矩误伤的。
+
+### 先把出图这侧的差集算干净，才发现缺的不是模型是能力
+
+镜像注册表的认领规则去减活目录（`.tmp-probe/image-gap.mjs`，同一套四字段、同一组判据）：
+476 行里认领 34 条，`模型广场`「图像」档中没人认领的 14 条**逐条都不该接**——9 条 MJ 动作族
+＋ `mj_modal` 要上一个任务的 taskId，`mj_describe` 与 `kling-image-recognize` 是图转文，
+`mj_blend` 不收 prompt 且要 2 张以上，`dall-e-3` 标着「弃用」且一个端点类型都没声明。
+
+**出图这一档没有缺口**，缺的是那 34 条里有多少会改图：改之前算出 16 条，改之后同一支探针
+数出 **24 条**（多的 8 条是豆包 seedream 5 条 + 千问图像 3.0 两条 + kontext 一条）。
+
+### 判据不在目录里，在平台自己的控制台
+
+这条路是**照常 POST `/v1/images/generations`，body 里多带一个源图字段**，同一个模型就从
+文生图变成改图。所有走这条路的行 `supported_endpoint_types` 都只有 `image-generation`，
+与纯文生图的行**逐字节相同**，所以按端点类型写的判据必然把它们判成不能改图。
+
+平台自己的答案在 `web/src/data/modelParams.js` 的 `supportsImageInput` 标志 +
+`web/src/pages/Lab/capability/buildImageRequest.js:329 / :249 / :292` 三处按家族拼字段。
+**字段名逐家不同、猜不出来**：seedream 5.0 收数组 `images`，它自己的 `-pro` 兄弟收字符串
+`image`。所以 `media/image/openai.ts` 里那张 `GENERATIONS_EDIT_FAMILIES` 是**必要的**，
+不是偷懒的硬编码——目录答不了这个问题。
+
+### 「是改图不是重画」怎么证：提示词里不给任何景物
+
+指令是「把这张图改成黑白的，其他都不要变」，**一个主体词都没有**。忽略源图的模型无从画起，
+所以回来的还是原来那盏灯笼/那把红伞，就只能是读了源图。这比肉眼比「像不像」硬，也比看
+HTTP 200 硬——这条路最危险的失败形态恰恰是 200 + 一张漂亮的无关新图。
+
+| 模型 | 字段 | 用时 | 结果 |
+|---|---|---|---|
+| `doubao-seedream-4-0-250828` | `image` | 13 s | 改，裁成方图 |
+| `doubao-seedream-4-5-251128` | `image` | 13 s | 改，裁成方图 |
+| `doubao-seedream-5-0-260128` | **`images`（数组）** | 97 s | 改，裁成方图 |
+| `doubao-seedream-5-0-pro-260628` | `image` | 61 s | 改，保住竖版；**带「AI生成」水印** |
+| `qwen-image-3.0` | `image` | 84 s | 改，保住竖版 |
+| `qwen-image-3.0-pro` | `image` | 94 s | 改，保住竖版 |
+
+控制台把这栏写作 URL（`imageInputFormat: 'url'`）而我们没有图床，所以**data URI 收不收**是
+唯一的悬念：2.79 MB 的 data URI 六家全收。**这条路上图的大小不是瓶颈**，与视频那侧「参考图
+太大就提交超时」正好相反——32 KB 与 2.79 MB 的反应逐字节一样。
+
+### 两条真接不了，一条欠着渠道
+
+- `qwen-image-max` / `z-image-turbo`：中转层走同一套映射（`relay/channel/ali/image.go:32-51`
+  把 `image` 拼成 `content[0].image`），但上游 DashScope 分别回 `content parameter's length
+  invalid` 与 `Field 'text' is required in content item`。**换 32 KB 小图报一模一样的错**，
+  所以是形状不合、不是负载太大。不接。
+- `flux.1-kontext-pro`：三次全 429，账单里写着 `No available channel`。渠道空缺不是接法有问题，
+  所以按控制台声明照接（in-context 编辑是这一族的全部用途），欠一次真机——猜错也是响亮失败。
+
+### 顺手捞到的：豆包水印默认是开的
+
+`doubao-seedream-5-0-pro` 出的图右下角盖着「AI生成」。控制台对豆包**每一发**都显式带
+`watermark: false`（`buildImageRequest.js:330`），我们一个字没发，吃的是厂商默认；带上之后
+同一张图干净了。**只给看见过的那一家补**：这条路上不认识的参数会原样转给上游变成被拒的请求，
+拿一个没人见过的水印换一个人人见得到的失败不划算。
+
+### 一处连带修正
+
+`editableDefault` 的注释原来写着「今天的默认模型（seedream）不会改图」，那句话从这一版起
+不成立了——默认模型现在两条都会，所以没点名时它原样留用，`EDIT_DEFAULTS` 只在下发的默认
+模型确实只会画画时才被摸到。
+
+### 真机复验（客户端一轮跑完两步）
+
+一句话两步：`doubao-seedream-4-0-250828` 画竖版红伞 → `qwen-image-3.0` 改成黑白。产物是同一把
+伞、同一块青石板、同一处水洼涟漪的黑白版；账单两行分别是 19:47:46 `doubao-seedream-4-0-250828`
+（1024×1536，9 s）与 19:49:02 `qwen-image-3.0`（65 s）——**点名的两个模型各自扣费，没有偷换**。
+
+## 附件收任意文件：内核这一版没有入口，我们自己接了一条（2026-08-23 真机复验）
+
+起因是用户的两张图：内核的输入框**只能拖图片**，拖别的报「仅支持 PNG/JPG/WebP/GIF」；
+而 WorkBuddy 什么文件都能扔进去，用**同一个中转站的令牌和对话模型**照样处理。
+查完得到的形状，六条事实，每条都决定了一处取舍：
+
+| 事实 | `path:line` | 逼出来的取舍 |
+|---|---|---|
+| `@文件` 补全（`ui-reference`）在 npm 上**最低 rc.8**，它的依赖要 `^0.1.0-rc.8` 的 `api-remotes` / `client-runtime` / `client-ui-input-trigger` | npm view | 我们全线钉 rc.6，装下去会并存第二份 slots 契约，槽位合并当场坏；这条能力跟内核升级来 |
+| 拖进来的文件整批交给 `onAddImages` | `ui-attachment/ComposerAttachments.tsx:65` | 「拖任意文件」升不升级都要自己拦 |
+| `inputActions.setDraft(text)` 是唯一公开草稿写入路径，且属会话标准套件 | `ui-conversation/contract/slots.ts`（`SessionStandardProps`） | 往输入框插路径不用碰内核、不用 DOM 黑魔法 |
+| `fs-sandbox` 三档全是围 **mutation** 的 | 内核 README「`read-only`：拒绝一切 mutation」 | 桌面上任意绝对路径都读得动，**不用把字节搬进工作区** |
+| `read` / `write` / `edit` / `read_image` / `bash` / `pwsh` 都在 vendored 清单里 | `tool-fs/src/read.ts:77` 等 | 「路径进消息」是真能落地的活路 |
+| DSH 的窗口 `sandbox: true` 且**不挂 preload** | `dsh-plugin-desktop/src/window-options.ts` | 渲染层拿不到 `webUtils.getPathForFile`（Electron 43 里 `File.path` 早没了），所以「只传路径不传字节」这条走不通 |
+
+据此落地的形状（`openlux-plugin-account`）：
+
+- **按钮在 `conversation.input.left`**——内核给「紧挨常驻控件的小控件」留的列表槽，
+  实测渲染在「访问模式」和模型选择器之间，正是 WorkBuddy 回形针的位置。
+- **隐藏 `<input type=file>` 收文件，字节走本插件自己的 RPC（`files.stage`）**，
+  宿主写进 `~/.dsh/media/incoming/`，回一个绝对路径，`setDraft` 把它以行内代码插进草稿。
+  上限 32 MiB，和内核收图那条 `attachment-local.maxImageBytes` 同一个数。
+- **文件名 = 原名（保留中日韩字符）+ 内容 SHA256 前 12 位 + 原扩展名。** digest 取自内容，
+  所以同一个文件附两次落到同一份文件（实测第二次「新增 0 个」）。
+- **人设补一句**（`persona/tool-reality.ts`，条件是这个 agent 真看得见 `read`）：消息里的路径是
+  本机真实文件、有权打开、不受「产出落在工作目录」那条约束；`read` 打不开的二进制改用
+  `pwsh` / `bash`。缺这句就退化成「请把内容粘贴给我」。
+
+**用槽位要引声明它的那个包的类型。** `conversation.input.left` 的契约在
+`dsh-client-ui-conversation` 里，不加这个 types-only 依赖，`SlotMap` 里就没有这个键，
+`register` 过不了类型。注意本插件 `client/summon.ts` 有条相反的注释「`IConversation`
+所在的包本插件不依赖」——那说的是**值**（服务面），结构化声明就够；**槽位名是类型**，只能靠真依赖。
+
+### 真机复验：纯文本模型 DeepSeek V4 Flash，两个附件
+
+判据都设成「答案里必须出现文件内部才有的东西」，避免它靠文件名编：
+
+| 附件 | 判据 | 结果 |
+|---|---|---|
+| 脚本现造的 pptx，正文写一个**随机**验证码 | 原样念出那个码 | 通过：模型自己判断 pptx 是 zip，用 `Pwsh` 解出两页 XML，念出 `YW-402872` 并复述第二页。18 s / 4 步 |
+| `~/.dsh/media/video` 里一段 8 秒 mp4（中文文件名） | 时长 / 分辨率 / 帧率与 `ffprobe` 一致 | 通过：8 s、1280×720、24 fps、H.264+AAC 全对，还跑 `signalstats` 推出画面偏暖。1m41s / 16 步 |
+
+第二条顺带量出了纯文本模型的代价：它看不见帧，只能靠命令行绕，16 步换一段描述。
+真要「看画面」得视觉模型 + 抽帧（WorkBuddy 就是抽帧喂 `image_url`），这条还没接。
+
+**驱动手法**（原生文件对话框没有 DOM，点按钮验不了）：CDP `DOM.setFileInputFiles` 把真文件塞给
+那个隐藏 input，再读 `textarea.value` 看路径有没有进草稿——`.tmp-probe/attach-file.mjs`。
+
+### 拖放那半：preload 其实不需要（同日）
+
+计划里写着「要给 DSH 窗口加最小 preload 暴露 `webUtils.getPathForFile`」——**决定搬字节之后
+这条前提自己没了**：`dataTransfer.files` 给的 `File` 和文件选择器给的完全一样，
+同一条暂存路径直接复用。所以拖放只剩一件事：**捕获阶段的 `document` 上拦下带非图片的 drop**
+（内核的在冒泡阶段，`ComposerAttachments.tsx:70`），`stopPropagation` 一下，
+「仅支持 PNG/JPG/WebP/GIF」就不会冒出来。
+
+分流规则：**整批都是图片 → 原样放给内核**（缩略图轨、预览、多模态轨都是路径给不了的）；
+**掺了一个非图片 → 整批归我们**，图片也变路径。因为内核那个 handler 要么吃下整个
+`dataTransfer.files` 要么什么都不吃，拆不开；而「图片带路径」还能 `read_image` 打开，
+「pptx 被拒」是真没了。拖拽中内核那张遮罩仍写着图片字样，先留着。
+
+真机复验（`.tmp-probe/drop-file.mjs`，`Input.dispatchDragEvent` 投**真实文件路径**，
+与资源管理器同一条入口）：拖 pptx——草稿出现路径、暂存 +1、内核那句拒绝没出现；
+拖 png——草稿为空、暂存没变、内核缩略图 1 张。第二行是分流规则的另一半。
+
+**更正（8-23 量出来的）：CDP 的合成拖拽只给路径，不给字节。** 同一条命令今天复跑，
+落地的是「这个文件读不出来，没附上」。在 `document` 上挂个探子读 `dataTransfer.files`
+（`.tmp-probe/drop-bytes.mjs`）：`{name: 'attach-sample.pptx', size: 0}`，`FileReader`
+报 `NotFoundError`——渲染进程没有那条路径的读权限，真实拖拽是用户手势顺带授的，
+`Input.dispatchDragEvent` 没有。所以这条探针能证的只有**分流与拦截顺序**
+（我们的监听先跑、内核那句拒绝没冒出来）；**读字节那半由按钮那条路证**
+（`DOM.setFileInputFiles` 给的是有字节的 `File`，`stage` 之后完全同一段代码）。
+「从资源管理器真拖一个」这半只能人来点一次，记成未验。
+
+**再更正（8-23 傍晚）：字节到底给不给，取决于开发版是怎么起的。** 同一条
+`Input.dispatchDragEvent` 在直接跑 `electron.exe lib/main.js --remote-debugging-port=9333`
+的实例上**是带字节的**：拖一张 12495 字节的 png，`~/.dsh/media/incoming` 当场多出
+`ask-sample-6468b01b1394.png`，长度 12495、时间戳就是那一秒（内容寻址的名字，字节不对
+连名字都拼不出来）。所以上面那句「只给路径」是**那一次那个实例**的事实，不是 CDP 的通则。
+**判据别写成「CDP 不带字节」，写成「先看暂存目录里有没有真长度的文件」**——这是唯一
+不受启动方式影响的证据。
+
+拖放这条路顺带逼出两个真缺陷（都已修，形状值得记）：
+
+1. **拒绝只写在按钮 tooltip 里等于静默失败。** 点按钮的人指针就在那儿，拖文件的人不在。
+   现在同一句话同时进**会话通知条**：`notify(level, text)` 是内核给「机器外部的通知」留的入口
+   （`ui-conversation/lib/types/client/input/contract.d.ts:50`），**按会话路由**——
+   切了会话也落回它自己那条。它**不在**会话标准套件里（`InputActions` 只有 `setDraft` /
+   `addImages` / `removeImage` / `pruneImages` / `submit`），所以照内核自家 `QueueDock`
+   的做法从 inject 面拿（`QueueDock.d.ts:7`）。
+2. **`ctx.sessions` 不在插件 inject 清单里，碰它就抛。** 第一版直接 `composerFor(ctx, …)`，
+   异常穿过 `stage`，按钮永远停在「正在附带…」——比原来的静默更糟。改成把绑定放进
+   `ctx.inject(['sessions'], …)` 的作用域（这也是本插件 summon 已有的形状），再给 `stage`
+   补 `finally` 兜 busy。**「异常吃掉收尾状态」这个形状，值得在插件里整体搜一遍。**
+3. **`stopPropagation` 顺手把内核那张拖拽遮罩的复位一起拦了。** 用户看到的是
+   「图片拖动到此处即可添加」糊在整个窗口上不走，直到重启。原因在内核源码里写得很直白：
+   复位 `reset()`（`dragDepthRef = 0` + `setDragActive(false)`）**只挂在两处**——它自己的
+   `onDrop` 里（就在 `intakeImages` 上一行）和 `window` 的 `dragend`
+   （`ui-conversation/lib/client.js`，`dragleave` 只在指针离开视口时才复位）。
+   我们在捕获阶段把 drop 停掉，`onDrop` 就没跑；而 `dragend` 在「从操作系统拖进来」这条路上
+   页面里根本不触发，所以遮罩没有第二次机会。修法是拦下之后**照它自己的另一个入口说一声**：
+   `window.dispatchEvent(new DragEvent('dragend'))`。不碰它的 state，不猜它的类名。
+
+## 上游版本盘点：我们落后多少，值不值得跟（2026-08-23）
+
+### 硬数字
+
+| 东西 | 我们 | 上游 | 差距 |
+|---|---|---|---|
+| 内核 npm 包（`@deepseek-ai/dsh-*`） | `0.1.0-rc.6`（外壳 97 处 pin + 本插件 50 处） | `0.1.1-rc.2` | 中间还有 rc.7、rc.8、0.1.1-rc.1 |
+| 内核源码 clone（`deepseek-harness`） | rc.8 | master | 落后 207 个提交，56 篇 `.agents/notes/implemented` |
+| 外壳（`deepseek-harness-desktop`，社区维护） | clone 2.0.1 | 2.0.2，**已 pin 到 0.1.1-rc.2**（含一份 `patches/dsh-app-boot@0.1.1-rc.2.patch`） | 落后 89 个提交；我们这份 fork 与上游 head 差 177 文件 / +15513 −3060 |
+| 本机安装的 DSH Desktop.exe | — | 2.0.2 | 就是上游那版，所以它写出来的档案是新格式 |
+
+外壳里那两个提交名字就叫 `chore(runtime): upgrade DeepSeek Harness to rc2` /
+`build: migrate desktop patches to dsh rc2`——**内核这一跳的适配上游已经做完了**，
+我们要做的是把 fork 往前并，而不是自己啃 rc.6→0.1.1 的破坏性变更。
+
+### 跟上去能拿到什么（只列真影响我们的）
+
+1. **`@文件` / `@会话` 引用（rc.8）**——顺带确认我们的形状是对的：上游那篇笔记在
+   「Alternatives considered」里明确否掉了「选中即把文件内容塞进上下文」，理由和我们一样
+   （先花上下文、又绕开可审计的 `read` 调用），所以 `@file` 给模型的**也只是路径文本**。
+   跟上去多的是补全菜单 + 宿主侧工作区索引 + 内核自带的模型提示；**我们这条暂存路径不会白写**：
+   它管的是工作区外的文件（桌面、下载）和拖放，`@file` 的索引只覆盖工作区。
+2. **pi-ai 线兼容面（0.1.1）**——30 个 compat 字段里放出 20 个，可按路由/按模型写，
+   其中就有 `supportsDeveloperRole` 和 `maxTokensField`。今天这版的行为是：**手写路由
+   （我们的中转站就是）拿到的是 OpenAI 自己的报文形状**——`role: "developer"`、
+   `max_completion_tokens`、`store`，而且写了配置也会被静默丢掉。这正是我们记过的
+   「DeepSeek 那条 `developer` 角色」那类问题唯一的正经旋钮。
+3. **图片请求管线统一（0.1.1）**——持久附件与「每条模型路由自己的请求版本」分开，
+   解决的两件事我们都撞过：大但正常的图被拒、每轮重复塞 base64。
+4. **附件所有权改走槽位（0.1.1）**——`ui-conversation` 声明
+   `conversation.input.attachments` / `conversation.message.images`，`ui-attachment` 去注册。
+   这意味着上面那个「捕获阶段拦 drop」的土办法将来有正经缝可用。**还多解一件今天解不了的**：
+   图轨里已有的图想转成路径，得读 `draftImages` / `removeImage`，而 rc.6 把它们关在
+   `ComposerBarInjected` 这个包内私有面里（`contract/slots.d.ts:529-537`），
+   `conversation.input.left` 够不着——所以「视觉模型下贴了图、再换成纯文本模型」这一格
+   目前只能停在内核那句「当前模型不支持图片，请切换支持图片的模型」。
+5. **Agent Teams 成了内核自带服务（含 experimental 包）**——专家团我们是自己在
+   `tool-subagent` 上搭的。再动这块之前先读它，别又发明一遍。
+
+不算收益的两件：`deepseek-files-inline-fallback` 走的是 DeepSeek 直连 Files 那条路，
+不是我们的中转站；`web-*` 那批改的是浏览器部署。
+
+### 代价与顺序
+
+破坏性变更集中在客户端启动那一层：`dsh-client-web` 变成不带框架的 boot kernel，
+React 根交给新的 `dsh-client-ui-renderer` 动态插件；设置面改成插件自持 + describe 镜像；
+会话投影与 client views 重写；experimental 包整体改名。这些都可能碰到我们插件的槽位注册，
+外壳那 177 文件的差异里也埋着我们自己的品牌/去更新器/SSRF 改动要重新落位。
+
+**所以：值得跟，但当成一件单独的任务排在当前「模型能力事实」这条线之后。**顺序是
+外壳 fork 先并上游 2.0.2（内核跳版随它一起过来）→ 再修本插件 50 处 pin 与编译错误 →
+再按现有探针复验一轮。中途还有个天天在收的税：**安装版 2.0.2 每跑一次就把
+`~/.dsh/.credentials.yaml` 迁成 `version: 1` + `refs:` 的嵌套格式，rc.6 的
+`credentials-local` 只认平铺 `KEY: value`（且 value 必须是字符串），开发版就起不来**，
+每次都要手工摊平一遍。
+
+### 「升级能不能省掉图片入口这摊事」——不能（2026-08-23 查 rc.8 源码）
+
+问题起于要不要接着自己写「发图给纯文本模型」的分流。查完 rc.8 的答案是**省不掉**，
+三条事实各自独立地把这条路堵死，而且都不是版本差距造成的，是上游的设计就这样：
+
+| 事实 | 出处（rc.8 源码） | 对我们的意思 |
+|---|---|---|
+| 线上模型目录**不带模态** | `packages/host/apiproxy/src/api/sessions.ts:120-129`，`ModelCatalogModel` 只有 `id` / `name` / `description?` / `reasoning?` | 渲染层升级后照样不知道「当前这个模型收不收图」，能力事实只在宿主。我们那个 `files.vision` 端点该写还得写 |
+| 客户端**一处模态判断都没有** | 整个 `packages/client` 里 `inputModalities` 命中 0 | 「当前模型不支持图片」只在发送时由宿主抛（`api-proxy.ts:2402-2408`），死胡同是上游的设计，不是我们落后 |
+| 拖放**仍然只收图片** | `ui-attachment/src/client/ComposerAttachments.tsx:65`（`onAddImages([...dataTransfer.files])`）、`:70` 冒泡阶段挂 `document`；`canAcceptDrop = !locked && !machineBusy && addImages !== undefined`（`ui-conversation/src/client/skeleton/InputBar.tsx`），与模型无关 | 我们那个捕获阶段拦截升级后照样有效，也照样是拖一个 pptx 进来的唯一办法 |
+
+升级**确实**能省的只有半句话：`@file` 会带上游自己的提示词
+（`context/file-reference/src/index.ts:18` 的 `FILE_REFERENCE_PROMPT`，内容和我们人设里那句
+「路径是真文件，先 read」几乎一样），到时候可以删掉我们的重复表述。但它
+**按 session cwd 划边界**（同文件 `list()` 的契约：*agent whose session cwd bounds discovery*），
+所以桌面 / 下载目录里的文件仍然只能走我们这条暂存路径。
+
+还有一条顺带查清的：上游**没有任何「让能看图的模型代看一眼」的工具**
+（`packages/` 里 `image_ask` / `describeImage` / `visionFallback` 命中全为 0），
+所以 `image_ask` 这类东西升不升级都得我们自己养。
+
+## 真升了：外壳并到 2.0.2，内核 rc.6 → 0.1.1-rc.2（2026-08-23）
+
+在独立工作树（`.wt-dsh-upgrade`，分支 `chore/dsh-0.1.1-rc.2`）里做，主工作树照旧跑着开发版。
+`git subtree pull` 带进来 379 个文件、17 个冲突；解完之后 `yarn check` 全绿
+（构建、类型、847 + 274 个测试、运行时闭包、loader、profile、许可）。
+
+### 守住的分岔（每一条都是当初有理由的）
+
+| 分岔 | 上游 2.0.2 的样子 | 我们保留的做法 |
+|---|---|---|
+| 品牌 | DSH Desktop | OpenLux：窗口标题、品牌标记、nsis、`APP_ID` 常量（上游 main.ts 重写后是硬编码字面量，改回常量） |
+| 更新器 | 有 `desktop-updates` 行 | 仍然不挂：端点是 `update-checker.ts` 里的模块级常量，指着上游的发布服务，挂上去就是替上游发版 |
+| 市场界面 | 自带 `dsh-community-market` | 依赖收了、UI 不挂，市场仍走我们自己的 `openlux-market` 段 |
+| 客户端入口 | 新增桌面设置 UI、文件夹拖放、原生目录选择器 | 入口保持最小形状，`applyDesktopSettings` 不调；目录选择器的两条路由收作惰性脚手架（路由在、界面不挂） |
+| web_fetch | 直接挂 `dsh-web-fetch-http` | 仍走我们的 `web-fetch-guard`（先分类目标再用它作传输），私网防护不外包 |
+| 布局校验 | 上游版 `verify-layout.mjs` | 我们这版（subtree 感知 + 双语说明检查）；合并时它悄悄吃掉了一个 `basename` 导入，已补回 |
+
+### 新拿到的旋钮
+
+`hooks` 隔间（插件把裸 observable 交给渲染层，渲染层绑成 `use<Name>`）、
+`dsh-client-ui-renderer` 这个 React 根、`settings-models` 里「改过 baseURL 就解锁 API 字段」、
+`app-boot` 接受空 patch 层、Workspace 浏览器的 drop 目标标记、Trajectory 工具栏中文、
+诊断与通知两行（`desktop-diagnostics` / `desktop-notifications`，已挂）。
+
+### rc.2 打断我们的三处，以及怎么落回去
+
+| 断点 | rc.2 的变化 | 我们的落法 |
+|---|---|---|
+| `bindSnapshotSelector` | `dsh-client-web-react` 整包没了，函数搬进 `ui-renderer` 且不对外导出 | 改走 rc.2 认可的 `hooks` 隔间：注入面里给 `hooks: { account: store }`，渲染层负责绑 |
+| 图片原子 | `ui-attachment` 不再导出 `ImageGallery` / `ImageLoader` / `MessageImageLabels` | 自持：把 `ImageLightbox` / `MessageImage` 搬进本插件，CSS module 翻成内联样式（不为此引一套 CSS 构建） |
+| `AssembleContext.agent` | 那个字段由 `@deepseek-ai/dsh-agent` 的模块增强提供 | 在 `tool-reality.ts` 里加一条 type-only import，包进 devDependencies |
+
+### 四个补丁对 rc.2 重打（这次的主要工作量）
+
+| 补丁 | 管什么 | rc.2 还需要吗 |
+|---|---|---|
+| `conversation` | 首页副标题「预览版 → 桌面版」 | 需要，rc.2 仍写 `预览版` / `Preview` |
+| `settings-general` | 账户设置页的导航图标 | 需要，`navIcon` 仍是按 id 硬编码，`ui-slots` 里 `icon` 命中为 0 |
+| `agent-preset` | 切会话后预设显示回不来 | 需要，rc.2 的 `load()` 才从会话推导 `current`，切会话只调 `apply()` |
+| `settings-models` | 采纳对话框：搜索、只看已选、不预勾、全选只作用于命中项、计数行 | 需要，rc.2 有 `selectAll` 但作用于整份回复，且仍 `new Set(models.map(...))` 预勾 |
+
+**上游自己也补了 `settings-models`**（`baseURL` 那条），而一个包只能有一个补丁文件，
+所以我们的必须叠在它上面。可复用的重打流程：
+
+1. `yarn patch <pkg>@npm:<version>`（`-u` 不可靠：它没把上游那份带进来，装好的产物里却有）。
+2. 在解出来的副本里**先手打上游那份**，`git init` + commit 作基线。
+3. `git apply --reject` 打我们的旧版补丁，看剩几块。这次 18 块里 11 块直接进，7 块要手工移。
+4. 手工移那几块：CSS 那串不能整串替换（上游也改过），按规则算增量再挪
+   （这次是新增 14 条、改 4 条、丢 0 条，另外上游新增的 `.candidateActions` 要留）；
+   派生集合尽量沿用上游的变量名、只收窄语义，这样它现有的 JSX 不用动。
+5. 删掉 `.rej` 和临时 `.git`，`node --check` 过一遍语法，再 `yarn patch-commit -s`。
+6. **两个坑**：`patch-commit` 把文件写进 `.yarn/patches/`（locator 里的 `~` 是项目根，不是家目录），
+   还会把 workspace manifest 里那条依赖改成 `patch:` 写法——两处都要按仓内约定改回：
+   文件放 `./patches/<pkg>@<version>.patch`，`resolutions` 里 `npm:x` 与 `npm:^x` 两条都写，
+   manifest 里恢复成纯版本号。
+7. 复验：装一遍，然后直接在 `node_modules` 里的产物上验标记（含上游那处有没有被挤掉）。
+
+### 顺手补的守卫
+
+这次 resolutions 是被合并吃掉的：补丁文件还在，没人引用，产品静悄悄跑上游行为。
+所以照上游的写法给这四个补丁各加了一个 `package.spec.ts` 断言——钉住两条 resolution key，
+再钉一个必须能在装好的产物里看到的标记。
+
+另外三处 `yarn test` 失败已分清，不是合并弄坏的：一处是上游断言根 `typecheck` 脚本只有两个
+workspace（我们多一个 `openlux-plugin-account`，改成 `toContain`），另两处是上游测试只按 POSIX
+写——`module-resolution` 用 `file:///tmp/...` 作锚（Windows 上 `fileURLToPath` 要盘符）、
+`profile-create-window` 断言路径里有 `/native-ui/`（Windows 是反斜杠）。
+
+### 还没做完的
+
+1. **账号插件的适配要重做一遍**：这轮是对着上一次提交的插件做的，而主工作树里有 48 处
+   未提交的新工作（`AttachFileButton`、`files/`、`doc-tool`、`AccountTrigger` 那批），
+   `AccountAction.tsx` 在那边已被删掉。断点还是上面那三类，落点是
+   `client/index.ts:23,134`、`AccountSection.tsx:52,79`、`AccountTrigger.tsx:42,64`、
+   `ImageToolCard.tsx:24`、`image-loader.ts:16`、`tsdown.config.ts:51`、`tool-reality.ts:387`。
+2. **真机起开发版验一轮**，包括那笔每天都在收的税：安装版 2.0.2 会把
+   `~/.dsh/.credentials.yaml` 迁成嵌套格式，得先摊平。

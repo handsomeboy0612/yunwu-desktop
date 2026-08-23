@@ -1,0 +1,186 @@
+diff --git a/lib/index.js b/lib/index.js
+index d9dc18dd73504ce966d056ad60886ea7a9c7b3c9..fb7c0718ba4309507c5bb0056618db9cc2e96742 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -97,73 +97,71 @@ var DeepSeekSearchProvider = class {
+ 	}
+ 	available() {
+ 		const options = this.resolveOptions();
+-		return ((options.apiKey?.length ?? 0) > 0 || options.resolveApiKey !== void 0) && URL.canParse(options.baseURL) && isPositiveInteger(options.maxTokens) && isPositiveInteger(options.maxUses);
++		return ((options.apiKey?.length ?? 0) > 0 || options.resolveApiKey !== void 0) && options.models.length > 0 && URL.canParse(options.baseURL) && isPositiveInteger(options.maxTokens) && isPositiveInteger(options.maxUses);
+ 	}
+ 	async search(request, signal) {
+ 		const options = this.resolveOptions();
+ 		const apiKey = await this.apiKey(options, signal);
+-		throwIfSearchAborted(signal);
+ 		const endpoint = `${options.baseURL}/messages`;
+-		const body = {
+-			model: options.model,
+-			max_tokens: options.maxTokens,
+-			messages: [{
+-				role: "user",
+-				content: [{
+-					type: "text",
+-					text: `Perform a web search for the query: ${request.query}`
++		const failures = [];
++		for (const model of options.models) {
++			throwIfSearchAborted(signal);
++			const body = {
++				model,
++				max_tokens: options.maxTokens,
++				messages: [{
++					role: "user",
++					content: [{
++						type: "text",
++						text: `Perform a web search for the query: ${request.query}`
++					}]
++				}],
++				tools: [{
++					type: "web_search_20250305",
++					name: "web_search",
++					max_uses: options.maxUses
+ 				}]
+-			}],
+-			tools: [{
+-				type: "web_search_20250305",
+-				name: "web_search",
+-				max_uses: options.maxUses
+-			}]
+-		};
+-		options.recordRequest?.({
+-			endpoint,
+-			apiVersion: options.apiVersion,
+-			body
+-		});
+-		throwIfSearchAborted(signal);
+-		let response;
+-		try {
+-			response = await fetch(endpoint, {
+-				method: "POST",
+-				redirect: "error",
+-				headers: {
+-					"x-api-key": apiKey,
+-					"authorization": `Bearer ${apiKey}`,
+-					"anthropic-version": options.apiVersion,
+-					"content-type": "application/json",
+-					"accept": "application/json",
+-					"user-agent": USER_AGENT
+-				},
+-				body: JSON.stringify(body),
+-				...signal !== void 0 ? { signal } : {}
++			};
++			options.recordRequest?.({
++				endpoint,
++				apiVersion: options.apiVersion,
++				body
+ 			});
+-		} catch (error) {
+-			if (signal?.aborted === true || isAbortError(error)) throw searchAborted(signal, error);
+-			throw new WebError(`DeepSeek search request failed: ${String(error)}`, "WEB_PROVIDER_ERROR", { cause: error });
+-		}
+-		if (!response.ok) {
+-			let message = `DeepSeek API error (HTTP ${response.status})`;
++			throwIfSearchAborted(signal);
+ 			try {
+-				const parsed = await response.json();
+-				const detail = typeof parsed.error === "string" ? parsed.error : parsed.error?.message ?? parsed.message;
+-				if (detail !== void 0 && detail.length > 0) message = detail;
++				const response = await fetch(endpoint, {
++					method: "POST",
++					redirect: "error",
++					headers: {
++						"x-api-key": apiKey,
++						"authorization": `Bearer ${apiKey}`,
++						"anthropic-version": options.apiVersion,
++						"content-type": "application/json",
++						"accept": "application/json",
++						"user-agent": USER_AGENT
++					},
++					body: JSON.stringify(body),
++					...signal !== void 0 ? { signal } : {}
++				});
++				if (!response.ok) {
++					let message = `DeepSeek API error (HTTP ${response.status})`;
++					try {
++						const parsed = await response.json();
++						const detail = typeof parsed.error === "string" ? parsed.error : parsed.error?.message ?? parsed.message;
++						if (detail !== void 0 && detail.length > 0) message = detail;
++					} catch (error) {
++						if (signal?.aborted === true || isAbortError(error)) throw searchAborted(signal, error);
++					}
++					throw new WebError(message, "WEB_PROVIDER_ERROR");
++				}
++				return mapAnthropicResponse(await response.json());
+ 			} catch (error) {
+ 				if (signal?.aborted === true || isAbortError(error)) throw searchAborted(signal, error);
++				const message = error instanceof Error ? error.message : String(error);
++				failures.push(`${model}: ${message}`);
+ 			}
+-			throw new WebError(message, "WEB_PROVIDER_ERROR");
+-		}
+-		try {
+-			return mapAnthropicResponse(await response.json());
+-		} catch (error) {
+-			if (signal?.aborted === true || isAbortError(error)) throw searchAborted(signal, error);
+-			if (error instanceof WebError) throw error;
+-			throw new WebError(`DeepSeek returned an unprocessable response body: ${String(error)}`, "WEB_PROVIDER_ERROR", { cause: error });
+ 		}
++		throw new WebError(`All configured web-search models failed: ${failures.join(" | ")}`, "WEB_PROVIDER_ERROR");
+ 	}
+ 	/**
+ 	* Resolve one operation's credential without retaining it on the provider.
+@@ -241,6 +239,7 @@ const Config = z.object({
+ 	apiKeyEnv: z.string().role("credential-ref").default(DEFAULT_API_KEY_ENV),
+ 	baseURL: z.string(),
+ 	model: z.string().default(DEEPSEEK_DEFAULT_MODEL),
++	models: z.array(z.string()),
+ 	apiVersion: z.string().default(DEEPSEEK_DEFAULT_API_VERSION),
+ 	maxTokens: z.number().step(1).min(1).default(DEEPSEEK_DEFAULT_MAX_TOKENS),
+ 	maxUses: z.number().step(1).min(1).default(5)
+@@ -265,6 +264,9 @@ const WEB_SEARCH_DEEPSEEK_SETTINGS_NAMESPACE = settingsNamespace("web-search-dee
+ function resolveOptions(ctx, config) {
+ 	const apiKeyEnv = credentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV);
+ 	const literalApiKey = config.apiKey !== void 0 && config.apiKey.length > 0 ? config.apiKey : void 0;
++	const configuredModels = Array.isArray(config.models)
++		? [...new Set(config.models.map((model) => model.trim()).filter((model) => model.length > 0))]
++		: [];
+ 	return {
+ 		...literalApiKey === void 0 ? {} : { apiKey: literalApiKey },
+ 		resolveApiKey: async () => {
+@@ -275,7 +277,7 @@ function resolveOptions(ctx, config) {
+ 		},
+ 		apiKeyEnv,
+ 		baseURL: config.baseURL ?? launchEnvironmentOf(ctx).get(SEARCH_BASE_URL_ENV)?.value ?? "https://api.deepseek.com/anthropic/v1",
+-		model: config.model ?? "deepseek-v4-flash",
++		models: configuredModels.length > 0 ? configuredModels : [config.model ?? "deepseek-v4-flash"],
+ 		apiVersion: config.apiVersion ?? "2023-06-01",
+ 		maxTokens: config.maxTokens ?? 4096,
+ 		maxUses: config.maxUses ?? 5,
+diff --git a/lib/types/index.d.ts b/lib/types/index.d.ts
+index 3372e2789af35f122301357d1449e7ecfcaf8953..72e4aeac22e03b5237631bb6a2d1cccf4a573f89 100644
+--- a/lib/types/index.d.ts
++++ b/lib/types/index.d.ts
+@@ -22,6 +22,8 @@ export interface Config {
+     baseURL?: string;
+     /** Anthropic-format model name. Defaults to `deepseek-v4-flash`. */
+     model?: string;
++    /** Ordered search models. The provider tries the next model when one request fails. */
++    models?: string[];
+     /** `anthropic-version` header value. Defaults to `2023-06-01`. */
+     apiVersion?: string;
+     /** Upper bound on generated tokens for the Messages request. Defaults to 4096. */
+diff --git a/lib/types/provider.d.ts b/lib/types/provider.d.ts
+index 93605f61f141d9a2bca3ef042c9ce6b05d98aa5a..a974690d2e5ca6e31e5befd9483abb80bdadb466 100644
+--- a/lib/types/provider.d.ts
++++ b/lib/types/provider.d.ts
+@@ -74,8 +74,8 @@ export interface DeepSeekSearchProviderOptions {
+     apiKeyEnv?: CredentialRef;
+     /** Endpoint base; `/messages` is appended. */
+     baseURL: string;
+-    /** Anthropic-format model name. */
+-    model: string;
++    /** Ordered Anthropic-format model names; failures fall through to the next entry. */
++    models: readonly string[];
+     /** `anthropic-version` header value. */
+     apiVersion: string;
+     /** Upper bound on generated tokens for the Messages request. */

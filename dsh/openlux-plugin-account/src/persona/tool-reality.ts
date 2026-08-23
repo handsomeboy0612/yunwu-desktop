@@ -41,6 +41,39 @@
  * visible tools respectively. Only a `complete: true` section would suppress it
  * (`dsh-persona/README.md:18,21`), and nothing this product ships sets one.
  *
+ * ## Why the model-name bullet grants instead of warning
+ *
+ * It used to sit inside the same list as the tool names — 「工具名、模型名 …
+ * 不一定在本机存在」 — and that phrasing cost a user their choice on 2026-08-21.
+ * Asked for `gpt-image-2`, the model replied that the name 「在本机不存在，无法传入」,
+ * vocabulary lifted straight from this section, and drew with the delivered default
+ * instead. Nothing had refused it: that key's live catalogue carried both
+ * `gpt-image-2` and `gpt-image-2-c` among 23 servable image models, and
+ * `media/tool.ts` takes the name as free text precisely so it can.
+ *
+ * The defect is structural rather than a wording slip. Calling model names
+ * possibly-fake while listing only the real *tools* leaves an agent no way to tell a
+ * real model name from an invented one, so omitting it becomes its safest move — and
+ * a silent swap to the default is the single outcome `media/image/registry.ts` was written
+ * to prevent. So the bullet says who decides instead of who to distrust: the check
+ * happens at call time, therefore the agent must not pre-judge.
+ *
+ * ## Why the bullet also says how to tell the two apart
+ *
+ * Because saying "this rule is about tool names, not model names" was not enough,
+ * and the second failure proves it was never a wording problem either. Asked to
+ * draw 「用 mj_imagine 画…」 on 2026-08-21, the model answered 「工具 mj_imagine
+ * 在本机并不存在——我实际能用的出图工具只有 image_generate」 and drew with the
+ * delivered default. It had applied the *tool* rule correctly; it had simply
+ * classified `mj_imagine` as a tool name, which is a reasonable read of a
+ * snake_case identifier and exactly what half the servable image catalogue looks
+ * like (`mj_imagine`, `aigc-image-kling`).
+ *
+ * A rule that separates the two categories is useless while the agent sorts
+ * names into them by shape. So the bullet now gives the test that actually
+ * works: the *request* decides, not the spelling — a name said while asking for
+ * a picture is a model name, whatever it looks like.
+ *
  * ## What this layer cannot do
  *
  * Make the model comply. Reaching the prompt and being obeyed are different
@@ -59,7 +92,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 // Merges `ctx.systemPrompt` and the `system-prompt/assemble` waterfall.
 import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
-import { IMAGE_SHOW_TOOL_NAME, IMAGE_TOOL_NAME, VIDEO_TOOL_NAME } from '../media/name.ts'
+import {
+  DOCUMENT_ASK_TOOL_NAME,
+  IMAGE_ASK_TOOL_NAME,
+  IMAGE_SHOW_TOOL_NAME,
+  IMAGE_TOOL_NAME,
+  VIDEO_TOOL_NAME,
+} from '../media/name.ts'
 
 /** Section name; also the key an agent-scoped override would shadow. */
 export const TOOL_REALITY_SECTION = 'openlux:tool-reality'
@@ -82,6 +121,12 @@ const MCP_PREFIX = 'mcp__'
 /** Web tools worth naming when telling an agent where outside facts come from. */
 const WEB_TOOLS = ['web_search', 'web_fetch'] as const
 
+/** The kernel's file reader (`dsh-tool-fs`), which is what an attached path is for. */
+const READ_TOOL = 'read'
+
+/** Shells, for the formats `read` cannot decode; named in this order when present. */
+const SHELL_TOOLS = ['bash', 'pwsh'] as const
+
 /**
  * The part that holds for every agent regardless of what it can call.
  *
@@ -92,9 +137,13 @@ const WEB_TOOLS = ['web_search', 'web_fetch'] as const
 const CORE = `> **本机工具真相——与下文人设里任何说法冲突时，以这一段为准。**
 >
 > - 你的工作目录是 \`{{cwd}}\`。产出文件就落在这里、用相对路径，别自己拼一个绝对路径——拼错了文件会落到用户找不到的地方。
-> - 人设可能来自另一个平台，里面点名的工具名、模型名、"技能"和团队机制**不一定在本机存在**。
->   只有本段列出的工具是真的；没列出的一律不要调用，也不要向用户承诺。
-> - 模型名是数据不是工具：不填就走验过的默认模型，只有用户点名了某个模型，才把他说的那个名字原样填进 \`model\` 参数。
+> - **用户点名了某个模型时，把他说的那个名字原样填进 \`model\` 参数，不要替他判断这个名字存不存在。**
+>   本机能用哪些模型是调用时才知道的事，你手上没有那份清单也不需要有：名字不可用时工具会当场拒绝并告诉你哪些可用，
+>   而你擅自省略它就等于让用户花钱买到一个他没点的东西、还不知道被换过。不填 \`model\` 才是走默认模型。
+>   **是不是模型名，看用户在说哪件事，不看名字长什么样**：他让你画图/出片时点的那个名字就是模型名，
+>   哪怕它长得像函数名（\`mj_imagine\`、\`aigc-image-kling\` 都是真模型名）——照填 \`model\`，不要当成"本机没有的工具"驳回。
+> - 人设可能来自另一个平台，里面点名的**工具名**、"技能"和团队机制**不一定在本机存在**。
+>   只有本段列出的工具是真的；没列出的一律不要调用，也不要向用户承诺。这一条只管工具名，不管模型名。
 > - 工具参数以工具自己的说明为准，人设不复述——工具会随版本变，这段文字不会。`
 
 /**
@@ -106,7 +155,8 @@ const CORE = `> **本机工具真相——与下文人设里任何说法冲突�
  * by having to notice it is missing from the list above.
  */
 const PHANTOMS = '> - 下文若出现 `HY-Image` / `HY-Video` / `YT-Video` / `ImageGen` / `ImageEdit` / `多模态内容生成`'
-  + ' / `SendMessage` / `TeamCreate` / `use_skill` 这类名字，**本机一个都没有**：不要调用，也不要填进任何参数。'
+  + ' / `SendMessage` / `TeamCreate` / `use_skill` 这类**工具名**，本机一个都没有：不要调用。'
+  + '（这些是工具名，不是模型名——用户点名的模型名照填不误。）'
 
 /** A tool the model can actually call, rendered as inline code. */
 function code(name: string): string {
@@ -132,6 +182,101 @@ function mcpLine(tools: readonly string[]): string | undefined {
     ? '这台机器上没有联网检索工具，缺资料就说明缺，别编。'
     : `要外部资料就用 ${web.map(code).join(' / ')}，并说清这是公开检索的结果、不是权威数据源。`
   return `> - **本机没有配置任何 MCP 工具**，人设里 \`mcp__…\` 那些名字（企查查、ima 知识库这类）一个都不存在。${how}`
+}
+
+/**
+ * What a path sitting in the user's message means.
+ *
+ * The composer's file button hands over a path rather than the bytes
+ * (`client/AttachFileButton.tsx`), which is the only shape that works for a pptx
+ * or an mp4 — and it only works if the model opens the file instead of asking
+ * the user to paste its contents. Two things make that non-obvious to it: a
+ * chat model's default assumption is that it cannot reach the user's disk, and
+ * a path outside the working directory looks out of bounds next to the `cwd`
+ * rule above.
+ *
+ * Conditional on `read` being visible, because a teammate restricted away from
+ * it must not be told to call it — the same rule the rest of this block follows.
+ * @param tools - the assembly's visible tool names.
+ * @returns the line, or `undefined` when this agent cannot open a file.
+ */
+function attachedFileLine(tools: readonly string[]): string | undefined {
+  if (!tools.includes(READ_TOOL)) return undefined
+  const shells = SHELL_TOOLS.filter(name => tools.includes(name))
+  // Documents used to be sent to a shell from here, and that instruction was
+  // measured costing 13 calls, three minutes and 162k tokens on one PDF before
+  // giving up — a machine with no PDF tooling cannot be talked into having any.
+  // With the document tool visible, that whole branch is one call; without it,
+  // the honest instruction is to name what is missing rather than to keep trying.
+  const otherwise = tools.includes(DOCUMENT_ASK_TOOL_NAME)
+    ? `PDF / Word / Excel / PowerPoint 别用 ${code(READ_TOOL)}，也别用命令行去解，`
+      + `直接调 ${code(DOCUMENT_ASK_TOOL_NAME)}（见下一条）。`
+      + (shells.length === 0 ? '' : `其余 ${code(READ_TOOL)} 打不开的格式（mp4 这类）才轮到 ${shells.map(code).join(' / ')}。`)
+    : shells.length === 0
+      ? `${code(READ_TOOL)} 打不开的格式（pptx / xlsx / pdf / mp4 这类）本机没有别的手段，直接说清打不开、缺什么。`
+      : `${code(READ_TOOL)} 打不开的格式（pptx / xlsx / pdf / mp4 这类）改用 ${shells.map(code).join(' / ')} 想办法`
+        + '（先探一下机器上有没有能用的命令行工具），试过仍不行就说清卡在哪，别猜内容。'
+  return `> - **用户消息里出现的文件路径是本机真实存在的文件，你有权打开它**——`
+    + `附件就是这么交给你的，那些路径不受"产出落在工作目录"那条约束。`
+    + `先 ${code(READ_TOOL)} 打开再回答，不要反过来让用户把内容粘贴给你。${otherwise}`
+}
+
+/**
+ * How to read a document nothing on this machine can parse.
+ *
+ * The same shape as {@link imageAskLine} and for the same reason, but the
+ * sequence differs in one way that matters: there is no "try and be refused"
+ * step to lean on. `read` does not refuse a PDF usefully — it decodes UTF-8 and
+ * a PDF is bytes, so what comes back is mojibake that a model will happily try
+ * to interpret. So this line names the formats up front and forbids the two
+ * detours that were actually observed: opening it with `read` anyway, and
+ * shelling out to look for a parser that is not installed.
+ * @param tools - the assembly's visible tool names.
+ * @returns the line, or `undefined` when this agent cannot ask.
+ */
+function documentAskLine(tools: readonly string[]): string | undefined {
+  if (!tools.includes(DOCUMENT_ASK_TOOL_NAME)) return undefined
+  return `> - **PDF / Word / Excel / PowerPoint 用 ${code(DOCUMENT_ASK_TOOL_NAME)} 读**`
+    + '——它会把这份文档交给一个能收文件的模型，把文字结论带回来给你'
+    + '（参数 `path` 填文档路径，有具体问题就写进 `question`，追问就再调一次）。'
+    + `**别用 ${code(READ_TOOL)} 硬读**（读出来是乱码，不是内容），`
+    + '也别去装或找 python / pypdf / pdftotext 这类工具——本机没有，试也是白试。'
+    + '拿回来的是别人读到的：照着它答，但**别说成自己打开过**，也别把这条路径、'
+    + '这个工具、替你读的是谁讲给用户听。结论里没有的就再调一次去问，别自己补。'
+}
+
+/**
+ * How to look at a picture when this model may not be able to.
+ *
+ * Whether it can is not a fact the model has: the route's capability lives in
+ * settings, and the only way it learns is by being refused. So the instruction
+ * is the sequence rather than the condition — try the kernel's reader, and when
+ * it says no, hand the file to a model that can see (`media/ask-tool.ts`). A
+ * vision model therefore pays nothing extra, and a text-only one stops at one
+ * refusal instead of reaching for a shell or asking the user to describe it.
+ *
+ * The second half of the line separates two things that used to travel together.
+ * "You did not see this" is a fact the model needs — otherwise a follow-up about
+ * a detail the report never mentioned gets answered from the report instead of
+ * from a second look. Telling the *user* that, which is what "说清是读图结果"
+ * produced, is a different matter: it put the plumbing and a full absolute path
+ * in front of someone who asked what was in their picture (decided 2026-08-23,
+ * with the composer's own routing notice, removed the same way).
+
+ * @param tools - the assembly's visible tool names.
+ * @returns the line, or `undefined` when this agent cannot ask.
+ */
+function imageAskLine(tools: readonly string[]): string | undefined {
+  if (!tools.includes(IMAGE_ASK_TOOL_NAME)) return undefined
+  const opener = tools.includes(READ_TOOL)
+    ? `图片先用 ${code(READ_TOOL)} 打开；**被拒（说当前模型不支持图片）就改调 ${code(IMAGE_ASK_TOOL_NAME)}**`
+    : `**看图片用 ${code(IMAGE_ASK_TOOL_NAME)}**`
+  return `> - ${opener}——它会把这张图交给一个能读图的模型，把文字结论带回来给你`
+    + `（参数 \`path\` 填图片路径，有具体问题就写进 \`question\`）。`
+    + '拿回来的是别人看到的：照着它答，但**别说成自己看见的**，也别把这条路径、'
+    + '这个工具、替你看图的是谁讲给用户听——用户要的是答案，不是我们内部谁替谁看。'
+    + '结论里没有的细节就再调一次去问，别在原文之外自己发挥。'
+    + '不要用命令行去猜图片内容，也不要让用户改用文字描述。'
 }
 
 /** Media facts, each conditional on the tool being visible to this agent. */
@@ -206,6 +351,9 @@ export function toolReality(tools: readonly string[], origin?: string): string {
     inventory(names),
     PHANTOMS,
     mcpLine(names),
+    attachedFileLine(names),
+    imageAskLine(names),
+    documentAskLine(names),
     ...mediaLines(names),
     ...origin === 'subagent' ? memberLines(names) : [],
     ...delegates.length > 0 ? leadLines(names, delegates) : [],

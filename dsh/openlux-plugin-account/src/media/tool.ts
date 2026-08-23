@@ -29,36 +29,28 @@
  * @module openlux-plugin-account/media/tool
  */
 
+import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { Context } from '@deepseek-ai/cordis'
+import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ConsoleAccess } from '../market/console.ts'
 import { imageArtifactPath, writeImageArtifact } from './artifact.ts'
 import { describeImage, imageBlocks, imagesOf, TOOL_IMAGE_PROPERTIES, type ToolImage } from './card.ts'
-import { assertImageModel, readImageCatalog } from './catalog.ts'
+import type { ImageCatalog } from './image/registry.ts'
+import {
+  defaultImageModel,
+  imageDefaultRefusal,
+  imageEditRefusal,
+  imageModelRefusal,
+  readImageCatalog,
+  resolveImageModel,
+} from './image/registry.ts'
+import type { ImageReference } from './image/provider.ts'
 import { generateImages, ImageGenerationError, size } from './images.ts'
 import { IMAGE_SHOW_TOOL_NAME, IMAGE_TOOL_NAME } from './name.ts'
+import { findLatestImage } from './session-images.ts'
 
 export { IMAGE_TOOL_NAME } from './name.ts'
-
-/**
- * The model this tool draws with when nobody named one.
- *
- * Chosen from what the route actually serves through `/v1/images/generations`,
- * not from what the catalog lists: asking for `gemini-2.5-flash-image-preview`
- * on this endpoint is refused with HTTP 503 and a list of every group that has
- * no channel for it, so the whole `gemini-*-image-*` family is unreachable here
- * however available it looks. Seedream 4.0 answers in about 15 seconds with a
- * ~900 KB JPEG, renders Chinese text legibly, and is the cheapest of the
- * current-generation options on this route.
- *
- * A caller may name another one, and the reason it is allowed to is that the
- * alternative turned out to be worse: this key's catalogue carried 22 servable
- * image models on 2026-08-19, and a request for any of the other 21 used to be
- * answered by drawing with this one and logging a warning nobody reads. Naming
- * a model that is not servable is now refused with the list of ones that are
- * (see `media/catalog.ts`), which costs no upstream round trip.
- */
-export const DEFAULT_IMAGE_MODEL = 'doubao-seedream-4-0-250828'
 
 /**
  * The sizes this tool offers, for every model.
@@ -80,7 +72,11 @@ export const DEFAULT_IMAGE_MODEL = 'doubao-seedream-4-0-250828'
  *
  * Three is also the whole vocabulary worth having: a longer list reads as a
  * promise of precision this tool does not keep, since the shape is all any
- * caller downstream distinguishes.
+ * caller downstream distinguishes. It is also what makes these values portable
+ * across the other transports, which take a ratio rather than a pixel pair:
+ * square / landscape / portrait fold onto `1:1` / `16:9` / `9:16`, which both
+ * Gemini and Tencent's AIGC route accept. A transport with no shape field at all
+ * (MJ) says so afterwards rather than silently framing it differently.
  */
 const IMAGE_SIZES = ['1024x1024', '1536x1024', '1024x1536'] as const
 
@@ -111,8 +107,8 @@ const description = 'Generate one or more images from a text prompt and show the
 export interface ImageToolOptions {
   /** Route origin and token reader, shared with the account face. */
   readonly access: ConsoleAccess
-  /** Model to draw with; the default is a route-verified one. */
-  readonly model?: string
+  /** Model to draw with, or a runtime reader updated by server delivery. */
+  readonly model?: string | (() => string | undefined)
 }
 
 /**
@@ -132,11 +128,15 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
     ctx.logger.debug('openlux: no tool runtime or attachment store in this composition; the image tool stays unregistered')
     return
   }
-  // What a call that names no model draws with. It is not checked against a
-  // table here: which models are servable belongs to the route's channel pool
-  // at call time, so that check moved to `media/catalog.ts` where it can be
-  // answered with today's answer instead of this build's.
-  const fallbackModel = options.model ?? DEFAULT_IMAGE_MODEL
+  // What the server delivered, if anything. Whether it is servable — and what
+  // to draw with when nothing was delivered at all — belongs to the route's
+  // channel pool at call time, so both answers come from
+  // `media/image/registry.ts` with today's catalogue rather than this build's.
+  const deliveredModel = (): string | undefined => {
+    const configured = typeof options.model === 'function' ? options.model() : options.model
+    const trimmed = configured?.trim()
+    return trimmed === undefined || trimmed === '' ? undefined : trimmed
+  }
 
   ctx.effect(() => tools.register(defineTool({
     name: IMAGE_TOOL_NAME,
@@ -159,13 +159,15 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
         // what it may ask for. Numeric specs carry `enum`/`const` and no
         // range keywords, so the allowed counts are listed.
         enum: Array.from({ length: IMAGE_MAX_COUNT }, (_, index) => index + 1),
-        description: `How many images to generate, 1 to ${String(IMAGE_MAX_COUNT)}. Defaults to 1; each one is billed separately.`,
+        description: `How many images to generate, 1 to ${String(IMAGE_MAX_COUNT)}. Defaults to 1; each one is billed separately. `
+          + 'Some models can only produce one per call and will say so in the result rather than refusing.',
       },
       size: {
         type: 'string',
         enum: IMAGE_SIZES,
         description: 'Optional shape: square, landscape, or portrait respectively. '
-          + 'Omit it unless the user asked for a shape, in which case pick the matching one.',
+          + 'Omit it unless the user asked for a shape, in which case pick the matching one. '
+          + 'A model with no shape control of its own says so in the result instead of reinterpreting it.',
       },
       model: {
         type: 'string',
@@ -173,9 +175,18 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
         // to the route and changes without a release here, so an enum would be
         // a list that goes stale in both directions. An unservable name is
         // refused by name at call time with the list of servable ones.
-        description: 'Optional. Only set this when the user named a specific image model — pass their name through verbatim. '
-          + `Leave it out otherwise and a route-verified default (${DEFAULT_IMAGE_MODEL}) is used; `
-          + 'do not guess at model names, because a name this account cannot serve is refused rather than substituted.',
+        description: 'Set this whenever the user named a specific image model, passing their name through verbatim — '
+          + 'passing a name is always safe, because one this account cannot serve is refused by name with the list of '
+          + 'servable ones, never substituted. Do not omit it because you are unsure the name exists: you have no list '
+          + 'to check against, the check happens here, and omitting it draws with a model the user did not ask for. '
+          + 'Leave it out only when the user named none, in which case the server-configured default is used.',
+      },
+      edit_last_image: {
+        type: 'boolean',
+        description: 'Set this when the user wants the newest picture in this conversation changed rather than a new one drawn — '
+          + '"make the cat black", "remove the text", "same but at night". The prompt then describes the change, not the whole scene. '
+          + 'Without it the picture is drawn from scratch and the result only resembles the original by luck, which is not what they asked for. '
+          + 'Fails plainly if this conversation has no picture yet, or if the model cannot edit — it is never quietly turned into a fresh drawing.',
       },
     },
     output: {
@@ -194,6 +205,14 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
             },
           },
           failures: { type: 'array', items: { type: 'string' } },
+          // Which picture this call changed. The model cannot see either the
+          // source or the result, so without this line it has no way to tell a
+          // reader whether its own edit landed on the picture they meant.
+          edited: { type: 'string' },
+          // What this model's own transport had no field for. Reported after the
+          // fact rather than refused up front: losing a picture over a shape
+          // nobody promised is worse than drawing it and saying so.
+          ignored: { type: 'array', items: { type: 'string' } },
           // Whether this call ran inside a delegated child. It belongs to the
           // value rather than being read where the text is built, because
           // `render` receives the arguments and the value and nothing else —
@@ -212,24 +231,32 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
     },
     async execute(args, exec) {
       const count = args.n ?? 1
-      // A named model is checked against the live catalogue before the request:
-      // the refusal is immediate and says what this account can draw with,
-      // where the previous behaviour — draw with the default and log a warning
-      // — spent the user's money on a picture in a style they did not choose
-      // and told nobody. The default itself is not re-checked, because the
-      // deployment verified it and a catalogue read is a round trip.
+      // Every resolved model is checked against the live catalogue before the
+      // paid request, and the check answers two questions at once: whether this
+      // key can draw with the name at all, and which of the four transports it
+      // is sold on. The delivery endpoint proves neither — it says the token may
+      // call a name, not that the name accepts any particular image route.
       const named = typeof args.model === 'string' ? args.model.trim() : ''
-      const model = named === '' ? fallbackModel : named
-      if (named !== '' && named !== fallbackModel) {
-        assertImageModel(await readImageCatalog(ctx, options.access, exec.signal), named)
-      }
-      const outcome = await generateImages(ctx, options.access, {
+      const catalog = await readImageCatalog(ctx, options.access, exec.signal)
+      const editing = args.edit_last_image === true
+      const model = named === '' ? defaultImageModel(catalog, deliveredModel(), editing) : named
+      if (model === undefined) throw new ImageGenerationError(imageDefaultRefusal(catalog, editing))
+      const resolved = resolveImageModel(catalog, model)
+      if (resolved === undefined) throw new ImageGenerationError(imageModelRefusal(catalog, model))
+      // Both checks happen before the paid request, and neither one falls back
+      // to drawing. A user who asked for their picture to be changed and got a
+      // different picture has been told a comfortable lie; being told plainly
+      // that this model only draws is worth more than a result that looks right.
+      const reference = editing
+        ? await readLastImage(attachments, exec.agent?.session, resolved.canEdit, catalog, model)
+        : undefined
+      const outcome = await generateImages(ctx, options.access, resolved.provider, {
         model,
         prompt: args.prompt,
-        n: count,
+        count,
         ...args.size === undefined ? {} : { size: args.size },
-        maxBytes: attachments.imageLimits.maxImageBytes,
-      }, exec.signal)
+        ...reference === undefined ? {} : { reference: reference.image },
+      }, attachments.imageLimits.maxImageBytes, exec.signal)
 
       const saved: ToolImage[] = []
       const failures = [...outcome.failures]
@@ -273,22 +300,30 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
         model,
         images: saved,
         ...failures.length === 0 ? {} : { failures },
+        ...outcome.ignored.length === 0 ? {} : { ignored: [...outcome.ignored] },
+        ...reference === undefined ? {} : { edited: reference.note },
         ...exec.agent?.session.header.origin === 'subagent' ? { delegated: true } : {},
       }
     },
+    // These two titles are the fallback for a UI with no card of ours. The
+    // desktop has one, and it carries its own copy in its own dictionary
+    // (`client/media-locales.ts`), so changing the wording here alone changes
+    // nothing a user sees — which is exactly how it was got wrong once.
     presentCall: (args) => {
-      const prompt = typeof (args as { prompt?: unknown }).prompt === 'string' ? (args as { prompt: string }).prompt : ''
-      return { card: 'generic', title: '生成图片', rawInput: prompt }
+      const call = args as { prompt?: unknown; edit_last_image?: unknown }
+      const prompt = typeof call.prompt === 'string' ? call.prompt : ''
+      return { card: 'generic', title: call.edit_last_image === true ? '修改图片' : '生成图片', rawInput: prompt }
     },
-    presentResult: (_args, result) => {
+    presentResult: (args, result) => {
       const images = imagesOf(result.meta)
       // No metadata means a nested call under a composite transport (the
       // projection is computed for top-level calls only), where the text
       // content is the whole of what a reader gets anyway.
       if (result.isError || images.length === 0) return undefined
+      const edited = (args as { edit_last_image?: unknown }).edit_last_image === true
       return {
         card: 'generic',
-        title: `已生成 ${String(images.length)} 张图片`,
+        title: `${edited ? '已改出' : '已生成'} ${String(images.length)} 张图片`,
         content: imageBlocks(images),
       }
     },
@@ -300,7 +335,65 @@ interface ToolValue {
   readonly model: string
   readonly images: readonly ToolImage[]
   readonly failures?: readonly string[]
+  readonly ignored?: readonly string[]
+  readonly edited?: string
   readonly delegated?: boolean
+}
+
+/** The reference picture an edit starts from, with the line the model reads. */
+interface EditSource {
+  readonly image: ImageReference
+  readonly note: string
+}
+
+/**
+ * Resolve the picture an edit changes, refusing before anything is paid for.
+ *
+ * The reference is not an argument, and cannot be: generated pictures are kept
+ * out of model-visible content on purpose (see this module's header), so nothing
+ * ever shows the model an attachment id to quote. It is found the same way the
+ * video tool finds a first frame — the newest image in the session log, whether
+ * the user attached it or `image_generate` drew it.
+ *
+ * Both refusals here are deliberate dead ends rather than fallbacks. Drawing
+ * something new when the edit cannot happen would return a picture that is not
+ * the one the user asked to have changed, and neither they nor the model can see
+ * that it is the wrong one.
+ * @param attachments - the store holding the bytes.
+ * @param session - the calling agent's session; its log is the source of truth.
+ * @param canEdit - whether the resolved model has an edit path at all.
+ * @param catalog - the catalogue read, for naming the models that do.
+ * @param model - the model this call resolved to.
+ * @returns the reference bytes and the line describing them.
+ * @throws {ImageGenerationError} when there is no picture, or no way to edit it.
+ */
+async function readLastImage(
+  attachments: AttachmentStore,
+  session: Session | undefined,
+  canEdit: boolean,
+  catalog: ImageCatalog | undefined,
+  model: string,
+): Promise<EditSource> {
+  if (!canEdit) throw new ImageGenerationError(imageEditRefusal(catalog, model))
+  if (session === undefined) {
+    throw new ImageGenerationError('这次调用不属于任何会话，取不到会话里的图片，无法改图。')
+  }
+  const found = findLatestImage(session)
+  if (found === undefined) {
+    // The last clause is not padding: without it a live run answered this by
+    // globbing the filesystem, finding an unrelated PNG on the desktop, and
+    // spending a `read_image` call to be told the session's chat model takes no
+    // image input. Editing reads the conversation and nothing else, so saying so
+    // here is what stops the search.
+    throw new ImageGenerationError('这个对话里还没有图片，没有可以改的东西。先画一张，再说要改成什么样。'
+      + '（改图只认这段对话里的图，磁盘上的文件找出来也用不上。）')
+  }
+  const stored = await attachments.readImage(found.ref)
+  const origin = found.source === 'attached' ? '用户发的图' : '刚生成的图'
+  return {
+    image: { data: stored.data, mediaType: found.ref.mediaType },
+    note: `改的是${origin}（${String(found.ref.width)}x${String(found.ref.height)} ${found.ref.mediaType}）。`,
+  }
 }
 
 /**
@@ -340,17 +433,28 @@ async function writeArtifact(ctx: Context, path: string, data: Uint8Array): Prom
 function renderText(value: ToolValue): string {
   const lines = value.images.map((image, index) => describeImage(image, index))
   const count = String(value.images.length)
+  const verb = value.edited === undefined ? '生成' : '改出'
   const head = value.delegated === true
-    ? `已用 ${value.model} 生成 ${count} 张图片。`
+    ? `已用 ${value.model} ${verb} ${count} 张图片。`
       + '**你是被派活的成员，这些图只出现在你自己这条会话里，用户和主理人都看不到。**'
       + `把上面每一行的文件路径原样写进你的汇报，并请主理人用 ${IMAGE_SHOW_TOOL_NAME} 展示给用户；`
       + '路径写漏了这些图就等于没出。你自己也看不到图片内容，不要描述或评价它。'
-    : `已用 ${value.model} 生成 ${count} 张图片，已直接展示在对话中，用户可以看到；`
+    : `已用 ${value.model} ${verb} ${count} 张图片，已直接展示在对话中，用户可以看到；`
       + '你自己看不到图片内容，不要描述或评价它。'
   const tail = value.failures === undefined || value.failures.length === 0
     ? []
     : ['未能取回的部分：', ...value.failures]
-  return [head, ...lines, ...tail].join('\n')
+  // Stated plainly and separately from failures, because it is neither an error
+  // nor something to retry: the pictures are there, one of the asks was not
+  // honoured, and only the user can decide whether that matters.
+  const notes = value.ignored === undefined || value.ignored.length === 0
+    ? []
+    : ['这个模型没能照办的部分（图已经出了，如果这点要紧就换个模型重来）：', ...value.ignored]
+  // Which picture was changed, said before the per-image lines: an edit that
+  // landed on the wrong source looks exactly like a successful one from here,
+  // and this sentence is the only thing that lets anyone notice.
+  const source = value.edited === undefined ? [] : [value.edited]
+  return [head, ...source, ...lines, ...tail, ...notes].join('\n')
 }
 
 /**

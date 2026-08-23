@@ -4,8 +4,15 @@
  * Its own namespace for the same reason the market has one: the card is
  * registered independently of the account surfaces, and a namespace is the unit
  * the kernel's locale registry hands out. One dictionary rather than two,
- * because the two rows differ only in these four titles — everything below them
- * is the same gallery.
+ * because the rows differ only in these titles — everything below them is the
+ * same gallery.
+ *
+ * The generate row has two wordings because it does two things: an edit that
+ * announces itself as a fresh drawing is the same comfortable lie the tool
+ * refuses to tell on the model-facing side. The host says this a second time in
+ * its own `presentCall`/`presentResult` (`media/tool.ts`) for a UI that has no
+ * card of ours; when one side's wording changes the other has to follow, and
+ * only the copy here is what the desktop actually shows.
  *
  * The `image.*` half is not ours by choice — the attachment atoms take every
  * string as a prop (`@deepseek-ai/dsh-client-ui-attachment` reads no
@@ -20,6 +27,11 @@ export const zh = {
   'call.pending': '生成中…',
   'result.title': '已生成 {count} 张图片',
   'result.failed': '出图失败',
+
+  'edit.title': '修改图片',
+  'edit.pending': '修改中…',
+  'edit.result': '已改出 {count} 张图片',
+  'edit.failed': '改图失败',
 
   'show.title': '展示图片',
   'show.pending': '读取中…',
@@ -44,6 +56,11 @@ export const en = {
   'call.pending': 'Generating…',
   'result.title': 'Generated {count} image(s)',
   'result.failed': 'Image generation failed',
+
+  'edit.title': 'Edit image',
+  'edit.pending': 'Editing…',
+  'edit.result': 'Edited {count} image(s)',
+  'edit.failed': 'Image edit failed',
 
   'show.title': 'Show image',
   'show.pending': 'Reading…',

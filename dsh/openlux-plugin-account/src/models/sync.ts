@@ -3,10 +3,27 @@
  *
  * Which entries belong to which layer is {@link ./delivery.ts}'s subject; this
  * module is the round that applies it — read the console, merge, and fill in
- * the fields only the installed catalog knows. The one thing it owns outright
+ * the fields only the installed catalog knows.
+ *
+ * The delivered half has two possible sources and this module owns the order:
+ * the console's own list ({@link ./delivered.ts}) first, and the square-tag
+ * rule ({@link ./delivery.ts}) only when that says nothing. Operations own the
+ * first; the second is what a station that has configured nothing still has.
+ *
+ * The one thing this module owns outright
  * is the thinking declaration (`reasoningEfforts` / `compat`): nothing else in
  * the shell can write those, and without them a hand-declared model simply
  * does not reason, so they are refreshed for the user's own entries too.
+ *
+ * Those fields come from the installed catalog, and the catalog describes each
+ * vendor's own service rather than the channel our relay put behind that name.
+ * Where the two disagree the console has the last word
+ * ({@link ./profiles.ts}) — the layer this shell was missing, and the reason
+ * `deepseek-v4-flash` was written as text-only while it reads images fine.
+ *
+ * Two neighbouring sections are written from the same snapshot: the search
+ * chain, and the install default ({@link applyDefaultModel} — narrowly, because
+ * that one belongs to the user).
  *
  * **A round that cannot read the console changes nothing about membership.** An
  * unreachable console means the delivered list is *unknown*, not empty, and
@@ -20,8 +37,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { catalogFacts } from './capabilities.ts'
+import { fetchDeliveredModelConfig, type DeliveredModelConfig } from './delivered.ts'
 import { deliveredIds, isManaged, merge, type ModelEntry } from './delivery.ts'
 import { fetchChatPool } from './pool.ts'
+import { fetchModelOverrides, type ModelOverrides } from './profiles.ts'
 
 /**
  * The settings namespace that owns provider routes. Not ours — we write into
@@ -30,6 +49,18 @@ import { fetchChatPool } from './pool.ts'
  * settings document", `bundle/base/cordis.patch.yml`).
  */
 const PI_AI_NS = settingsNamespace('llm-pi-ai')
+const SEARCH_NS = settingsNamespace('web-search-deepseek')
+/**
+ * The section deciding which model a new session starts on.
+ *
+ * Not ours either, and unlike the two above it is *the user's own choice*: the
+ * client's model picker writes it through the host's
+ * `saveDefaultModelSelection` seam (`dsh-host-apiproxy`, which calls
+ * `agentDefaultModel.saveSelection`). That is why {@link applyDefaultModel}
+ * touches it in two narrow cases rather than mirroring the delivered list onto
+ * it every round.
+ */
+const DEFAULT_NS = settingsNamespace('agent-default-model')
 
 /**
  * Our route key. Fixed rather than configurable: the kernel's models page
@@ -46,8 +77,17 @@ interface PiAiSection {
 /** What one sync did, for the log and for tests. */
 export interface SyncOutcome {
   readonly changed: boolean
-  /** Why nothing happened, when nothing did. */
-  readonly skipped?: 'no-settings' | 'no-key' | 'no-pool' | 'unchanged'
+  /**
+   * Why nothing happened, when nothing did. `no-pool` covers "neither source
+   * answered": no console list *and* no square, which is the offline case.
+   */
+  readonly skipped?: 'no-settings' | 'no-key' | 'no-pool' | 'empty-result' | 'unchanged'
+  /**
+   * Where the delivered ids came from. Worth logging on its own: the two
+   * sources fail in different ways, and "which one answered" is the first
+   * thing anybody asks when the picker holds the wrong rows.
+   */
+  readonly source?: 'console' | 'square'
   readonly models?: number
   /** Of those, the ones the console delivered. */
   readonly managed?: number
@@ -55,13 +95,115 @@ export interface SyncOutcome {
   readonly kept?: number
   /** Models whose thinking declaration the installed catalog supplied. */
   readonly described?: number
+  /**
+   * Of those, the ones the console overrode. Reported on its own because "did
+   * the capability layer reach this machine at all" is the first question when
+   * a model still refuses images after operations ticked the box — and an
+   * unreachable console and an empty table look identical from the settings
+   * file alone.
+   */
+  readonly overridden?: number
+  /** The full server snapshot, also used by the media tools' runtime defaults. */
+  readonly delivery?: DeliveredModelConfig
 }
+
+/** One path edit, in the service's own vocabulary (`{op:'set'|'unset', path}`). */
+type SettingsOp =
+  | { readonly op: 'set'; readonly path: readonly string[]; readonly value: unknown }
+  | { readonly op: 'unset'; readonly path: readonly string[] }
 
 /** The settings service surface this module uses. */
 interface SettingsLike {
   get(ns: typeof PI_AI_NS): unknown
   describe(options?: { redactSecrets?: boolean }): readonly { ns: string; user?: unknown }[]
-  mutate(ns: typeof PI_AI_NS, ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[]): Promise<void>
+  mutate(ns: typeof PI_AI_NS, ops: readonly SettingsOp[]): Promise<void>
+}
+
+function stringList(value: unknown): readonly string[] {
+  return Array.isArray(value) ? value.filter(item => typeof item === 'string') as string[] : []
+}
+
+async function applySearchDelivery(
+  settings: SettingsLike,
+  delivery: DeliveredModelConfig | undefined,
+): Promise<boolean> {
+  if (delivery?.configured !== true || delivery.searchModels.length === 0) return false
+  const current = stringList((settings.get(SEARCH_NS) as { readonly models?: unknown } | undefined)?.models)
+  if (JSON.stringify(current) === JSON.stringify(delivery.searchModels)) return false
+  await settings.mutate(SEARCH_NS, [{ op: 'set', path: ['models'], value: [...delivery.searchModels] }])
+  return true
+}
+
+/** The two fields of the default-model section this module reads. */
+interface DefaultSelection {
+  readonly provider?: string
+  readonly model?: string
+}
+
+function selectionOf(value: unknown): DefaultSelection {
+  const section = value as { provider?: unknown; model?: unknown } | undefined
+  return {
+    ...typeof section?.provider === 'string' ? { provider: section.provider } : {},
+    ...typeof section?.model === 'string' && section.model !== '' ? { model: section.model } : {},
+  }
+}
+
+/**
+ * Point the install default at the delivered list — in two cases and no more.
+ *
+ * The server states the contract (`admin-server/model/desktop_delivered_model.go`:
+ * "ChatModels：客户端模型清单，第一项是新装机默认"), and until now nothing on this
+ * side implemented it: the default stayed at whatever the composition shipped,
+ * so reordering the delivered list changed nothing and a list that dropped the
+ * packaged name left every new session starting on a model the picker no longer
+ * offers.
+ *
+ * Why not simply mirror `chatModels[0]` every round: this section is the user's
+ * own choice. Picking a model in the client writes it through the host's
+ * `saveDefaultModelSelection`, so a round that rewrote it would take the choice
+ * away again on the next sync. Hence:
+ *
+ *  - **nothing written here yet** → seed with the first delivered name. Nobody
+ *    has chosen, so operations' order is the only opinion in the room.
+ *  - **what is written names one of our models that the list no longer holds**
+ *    → move it. That name is gone from the picker, and leaving it would start
+ *    every new session on a route entry that does not exist.
+ *
+ * A default naming another provider, or an entry the user added themselves, is
+ * left alone in both cases.
+ * @param settings - the settings service.
+ * @param delivery - the server snapshot; only a configured one speaks here.
+ * @param models - the route's entries as this round leaves them.
+ * @returns whether the section was written.
+ */
+async function applyDefaultModel(
+  settings: SettingsLike,
+  delivery: DeliveredModelConfig | undefined,
+  models: readonly ModelEntry[],
+): Promise<boolean> {
+  if (delivery?.configured !== true) return false
+  // Delivered order, but only names that survived this round's merge: seeding a
+  // default the picker does not list would recreate the very problem below.
+  const first = delivery.chatModels.find(id => models.some(entry => entry.id === id))
+  if (first === undefined) return false
+
+  const written = selectionOf(settings.describe().find(entry => entry.ns === DEFAULT_NS)?.user)
+  if (written.model !== undefined) {
+    if (written.provider !== ROUTE) return false
+    if (models.some(entry => entry.id === written.model)) return false
+  }
+  const resolved = selectionOf(settings.get(DEFAULT_NS))
+  if (resolved.provider === ROUTE && resolved.model === first) return false
+
+  await settings.mutate(DEFAULT_NS, [
+    { op: 'set', path: ['provider'], value: ROUTE },
+    { op: 'set', path: ['model'], value: first },
+    // The effort was chosen for the model being left behind. Levels are
+    // declared per model (`reasoningEfforts`), so carrying one across is at
+    // best meaningless and at worst a level the next model does not have.
+    { op: 'unset', path: ['reasoningEffort'] },
+  ])
+  return true
 }
 
 function modelsOf(section: unknown): readonly ModelEntry[] | undefined {
@@ -94,18 +236,31 @@ function writtenModels(settings: SettingsLike): readonly ModelEntry[] {
 }
 
 /**
- * Overlay the installed catalog's thinking declaration onto one entry.
+ * Overlay the installed catalog's thinking declaration onto one entry, then the
+ * console's word over the catalog.
  *
  * Capacities and modalities are filled only where the entry says nothing, so a
  * context window the user typed survives; the thinking fields are ours and are
  * rewritten from the catalog every time, which is what makes a kernel upgrade
  * carrying new model data reach an existing installation.
+ *
+ * The console's statement is applied last and *replaces* rather than fills.
+ * That is the whole point of an override layer: the catalog already answered,
+ * and the answer is what operations measured to be wrong for our deployment.
+ * Nothing in the shell lets a user declare modalities by hand, so there is no
+ * choice of theirs being overwritten here (`described` still leaves a value
+ * alone when the console says nothing about that model).
  * @param entry - the entry as stored.
- * @returns the entry with catalog-derived fields applied.
+ * @param overrides - the console's statements, empty when it said nothing.
+ * @returns the entry with catalog-derived and console-derived fields applied.
  */
-function described(entry: ModelEntry): ModelEntry {
+function described(entry: ModelEntry, overrides: ModelOverrides): ModelEntry {
   const facts = catalogFacts(entry.id)
-  if (facts === undefined) return entry
+  const override = overrides.get(entry.id)
+  if (facts === undefined) {
+    if (override?.input === undefined) return entry
+    return { ...entry, input: [...override.input] } as ModelEntry
+  }
   const next: Record<string, unknown> = { ...entry }
   if (next['name'] === undefined && facts.name !== undefined) next['name'] = facts.name
   if (next['contextWindow'] === undefined && facts.contextWindow !== undefined) {
@@ -126,6 +281,7 @@ function described(entry: ModelEntry): ModelEntry {
     if (facts.compat === undefined) delete next['compat']
     else next['compat'] = { ...facts.compat }
   }
+  if (override?.input !== undefined) next['input'] = [...override.input]
   return next as ModelEntry
 }
 
@@ -164,26 +320,123 @@ export async function syncModels(
   const written = writtenModels(settings)
 
   const apiKey = await options.apiKey()
-  const pool = apiKey === undefined || apiKey === ''
-    ? undefined
-    : await fetchChatPool(ctx, options.baseUrl, apiKey, signal)
+  const hasKey = apiKey !== undefined && apiKey !== ''
 
-  if (pool === undefined && written.length === 0) {
-    return { changed: false, skipped: apiKey === undefined || apiKey === '' ? 'no-key' : 'no-pool' }
+  // The four-purpose snapshot is authoritative when configured. A missing route,
+  // old deployment or transient network failure remains "unknown": do not clear
+  // any local state, and let the packaged/square paths continue to carry chat.
+  let delivery: DeliveredModelConfig | undefined
+  if (hasKey) {
+    try {
+      delivery = await fetchDeliveredModelConfig(options, signal)
+    } catch (error: unknown) {
+      ctx.logger.warn(`openlux: model delivery unavailable; preserving local defaults (${error instanceof Error ? error.message : String(error)})`)
+    }
   }
 
-  const membership = pool === undefined
-    ? current
-    : merge(deliveredIds(pool), written.filter(entry => !isManaged(entry)))
+  // The capability layer, read in the same round and treated the same way: a
+  // console this round could not reach states nothing, and nothing is what the
+  // entries keep — the catalog's answer, which is what shipped before this
+  // layer existed.
+  let overrides: ModelOverrides = new Map()
+  if (hasKey) {
+    try {
+      overrides = await fetchModelOverrides(options, signal)
+    } catch (error: unknown) {
+      ctx.logger.warn(`openlux: model capability overrides unavailable; keeping the installed catalog's answer (${error instanceof Error ? error.message : String(error)})`)
+    }
+  }
 
-  const next = membership.map(described)
-  if (same(current, next)) return { changed: false, skipped: 'unchanged', models: next.length }
-  await settings.mutate(PI_AI_NS, [{ op: 'set', path: ['providers', ROUTE, 'models'], value: next }])
+  let searchChanged = false
+  try {
+    searchChanged = await applySearchDelivery(settings, delivery)
+  } catch (error: unknown) {
+    // Search is another settings namespace. A malformed/late-mounted section
+    // must not prevent the chat list and media defaults from applying.
+    ctx.logger.warn(`openlux: search model delivery could not be applied (${error instanceof Error ? error.message : String(error)})`)
+  }
+  const reportedDelivery = delivery === undefined ? {} : { delivery }
+
+  let ids: readonly string[] | undefined
+  let source: SyncOutcome['source']
+  if (delivery?.configured === true && delivery.chatModels.length > 0) {
+    ids = delivery.chatModels
+    source = 'console'
+  } else if (hasKey) {
+    // Only now is the square worth two requests: reaching it costs `/v1/models`
+    // plus `/api/pricing_new`, and a station that answered the list above has
+    // already told us everything this round needs.
+    const pool = await fetchChatPool(ctx, options.baseUrl, apiKey as string, signal)
+    if (pool !== undefined) {
+      ids = deliveredIds(pool)
+      source = 'square'
+    }
+  }
+
+  if (ids === undefined && written.length === 0) {
+    return {
+      changed: searchChanged,
+      skipped: hasKey ? 'no-pool' : 'no-key',
+      ...reportedDelivery,
+    }
+  }
+
+  const membership = ids === undefined
+    ? current
+    : merge(ids, written.filter(entry => !isManaged(entry)))
+
+  // A list that came out empty is a miscalculation upstream of here, never an
+  // instruction to empty the picker — nothing a user or the console can do says
+  // "leave this account with no models". Reaching the console and computing zero
+  // means its answer did not survive our own filters, and the composition floor
+  // is a better thing to leave standing than nothing at all.
+  //
+  // Not hypothetical: against a station whose `models.model_type` is mostly
+  // blank, the pool keeps only the handful that say 对话 (`pool.ts` tests for
+  // that word), none of which are ids the fallback names — so a machine with
+  // nothing written yet computed zero and tried to write `models: []`, and the
+  // picker was left showing only the two rows the composition ships. That is
+  // the case the console list above answers outright: it names the models and
+  // carries their category, so no column has to be guessed from.
+  if (membership.length === 0) {
+    return { changed: searchChanged, skipped: 'empty-result', ...reportedDelivery }
+  }
+
+  const next = membership.map(entry => described(entry, overrides))
+  // Spread rather than assign: `exactOptionalPropertyTypes` treats an explicit
+  // `undefined` as a different thing from an absent key, and a round that read
+  // neither source has no source to report.
+  const reported = source === undefined ? {} : { source }
+  const listChanged = !same(current, next)
+  if (listChanged) {
+    await settings.mutate(PI_AI_NS, [{ op: 'set', path: ['providers', ROUTE, 'models'], value: next }])
+  }
+  // After the list is written, so the seed can only name a row that is in it,
+  // and caught like the search section: another namespace failing must not undo
+  // a list this round already applied.
+  let defaultChanged = false
+  try {
+    defaultChanged = await applyDefaultModel(settings, delivery, next)
+  } catch (error: unknown) {
+    ctx.logger.warn(`openlux: default model could not be aligned with the delivered list (${error instanceof Error ? error.message : String(error)})`)
+  }
+  if (!listChanged) {
+    return {
+      changed: searchChanged || defaultChanged,
+      skipped: 'unchanged',
+      models: next.length,
+      ...reported,
+      ...reportedDelivery,
+    }
+  }
   return {
     changed: true,
+    ...reported,
     models: next.length,
     managed: next.filter(isManaged).length,
     kept: next.filter(entry => !isManaged(entry)).length,
     described: next.filter(entry => entry['reasoningEfforts'] !== undefined).length,
+    overridden: next.filter(entry => overrides.has(entry.id)).length,
+    ...reportedDelivery,
   }
 }

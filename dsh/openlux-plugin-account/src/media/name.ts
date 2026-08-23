@@ -26,6 +26,27 @@ export const IMAGE_TOOL_NAME = 'image_generate'
 export const IMAGE_SHOW_TOOL_NAME = 'image_show'
 
 /**
+ * Wire name of the tool that has a picture read by a model that can see.
+ *
+ * Deliberately not a mode of {@link IMAGE_SHOW_TOOL_NAME}: showing sends a
+ * picture *to the user* and costs nothing, while this sends it to another model
+ * and bills for the look. It also has no card — what comes back is a paragraph
+ * of text, which the transcript already renders.
+ */
+export const IMAGE_ASK_TOOL_NAME = 'image_ask'
+
+/**
+ * Wire name of the tool that has a document read by a model that accepts files.
+ *
+ * A separate name from {@link IMAGE_ASK_TOOL_NAME} rather than a format of it,
+ * because nothing about the two calls is shared past the sentence describing
+ * them: a different wire part (`file`, not `image_url`), a different set of
+ * models that accept it, and a different failure to explain when none do. It has
+ * no card either — the result is text.
+ */
+export const DOCUMENT_ASK_TOOL_NAME = 'document_ask'
+
+/**
  * Wire name of the video tool.
  *
  * It has no card of its own on purpose: a finished video reaches the user as a

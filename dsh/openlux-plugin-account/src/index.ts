@@ -35,15 +35,20 @@ import { signIn } from './account/auth.ts'
 import { BalanceReader } from './account/balance.ts'
 import { fetchCaptcha, fetchCaptchaConfig, verifyCaptcha, type CaptchaType } from './account/captcha.ts'
 import { clearSession, readSession } from './account/session.ts'
+import { FILE_STAGE_ENDPOINT, FILE_VISION_ENDPOINT } from './files/name.ts'
+import { stageFile } from './files/stage.ts'
 import { readCatalog, type Catalog, type CatalogType } from './market/catalog.ts'
 import { readExpertManifest, type ConsoleAccess } from './market/console.ts'
 import { installPreset, readInstallTarget, type InstallOutcome, type InstallRequest, type InstallTarget } from './market/install.ts'
+import { registerImageAskTool } from './media/ask-tool.ts'
+import { registerDocumentAskTool } from './media/doc-tool.ts'
 import { IMAGE_READ_ENDPOINT } from './media/name.ts'
 import { imageRefOf, readImageBytes } from './media/read.ts'
 import { registerImageShowTool } from './media/show-tool.ts'
 import { registerImageTool } from './media/tool.ts'
 import { registerVideoTool } from './media/video-tool.ts'
-import { syncModels } from './models/sync.ts'
+import { imageCapableModels } from './media/vision.ts'
+import { ROUTE, syncModels, type SyncOutcome } from './models/sync.ts'
 import { registerToolReality } from './persona/tool-reality.ts'
 
 /**
@@ -68,7 +73,7 @@ export interface Config {
    * Model the image tool draws with when a call names none. Omit for the
    * route-verified default (see `media/tool.ts`). A call may name another one;
    * a name this account cannot serve is refused rather than substituted, which
-   * is what `media/catalog.ts` is for.
+   * is what `media/image/registry.ts` is for.
    */
   readonly imageModel?: string
   /**
@@ -78,8 +83,54 @@ export interface Config {
   readonly videoModel?: string
 }
 
-/** Default console origin, matching the model route in `cordis.patch.yml`. */
-const DEFAULT_BASE_URL = 'https://api.openlux.ai'
+interface RuntimeModelDefaults {
+  imageModel: string | undefined
+  videoModel: string | undefined
+}
+
+/**
+ * Default console origin.
+ *
+ * One station serves everything this product talks to — sign-in, the model
+ * pool, the balance, the market, the image and video calls — and the chat
+ * requests themselves leave from the kernel's own route rather than from here.
+ * So the origin has to be stated in more than one place (`cordis.patch.yml`
+ * carries it for the `llm-pi-ai` route and for web search), and the only way
+ * those places stay in step is by reading the same variable. Point the variable
+ * at a local relay and the whole product follows; leave it unset and every one
+ * of them is production, which is what a shipped build wants.
+ *
+ * The env seam is upstream's own idiom for exactly this, values included
+ * (`dsh-base/cordis.patch.yml:151-154` reads
+ * `process.env.DSH_TELEMETRY_OTLP_URL ?? '<production url>'`).
+ *
+ * **A local relay must be named `localhost`, not `127.0.0.1`.** The station
+ * resolves which site a request belongs to by matching the `Host` header
+ * against its own registry, so an origin the registry does not list answers
+ * `站点不存在` to *every* route including `/api/status` — a whole-product
+ * failure that reads like the service is down (measured 2026-08-20: `Host:
+ * localhost:3001` serves 101 models, `Host: 127.0.0.1:3001` serves nothing).
+ */
+const DEFAULT_BASE_URL = process.env.OPENLUX_BASE_URL ?? 'https://api.openlux.ai'
+
+/**
+ * TEMP 2026-08-21 — pin *only the market* at local admin-server so experts can
+ * be browsed and installed while login / balance / models stay on
+ * `DEFAULT_BASE_URL`. This is the old client's `YUNWU_MARKET_*` split, inlined
+ * for one test session rather than added as a product knob.
+ *
+ * Verified the same hour: this token against
+ * `http://localhost:3000/api/desktop-market/snapshot?type=expert` → HTTP 200,
+ * 407 items. The production token against that origin is 401 (different
+ * `tokens` table), which is why the pair has to be separate.
+ *
+ * After the test: set this to `null`. Do not ship it; the production shape is
+ * still one origin once `/api/desktop-market/` is reverse-proxied there.
+ */
+const TEMP_MARKET: { readonly baseUrl: string; readonly token: string } | null = {
+  baseUrl: 'http://localhost:3000',
+  token: 'sk-3vnqdqmSBpX9y4yTc2YyHoaJGNcqg1AOcyf574ifw5l9UfMS',
+}
 
 /** Who is signed in, as far as the browser needs to know. */
 export interface AccountStatus {
@@ -98,6 +149,10 @@ export interface AccountStatus {
 export function apply(ctx: Context, config: Config = {}): void {
   const baseUrl = (config.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '')
   const balance = new BalanceReader(ctx)
+  const modelDefaults: RuntimeModelDefaults = {
+    imageModel: config.imageModel,
+    videoModel: config.videoModel,
+  }
 
   // Installs run one at a time. They stage inside the same preset root and
   // verify by re-reading the roster, so two in flight could rename over each
@@ -114,7 +169,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // and its disposal already follow this plugin's lifetime.
   ctx.connection.rpc.handle(ACCOUNT_CHANNEL, async (endpoint, payload, signal) => {
     try {
-      return await route(ctx, baseUrl, balance, serialize, endpoint, payload, signal)
+      return await route(ctx, baseUrl, balance, modelDefaults, serialize, endpoint, payload, signal)
     } catch (error: unknown) {
       // A handler that throws becomes a plain-text 500 upstream
       // (`client/connection/src/rpc-host.ts:183-185`), and the browser sees a
@@ -142,7 +197,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // screen waits on is unchanged.
   ctx.effect(() => {
     const stop = new AbortController()
-    void syncCatalog(ctx, baseUrl, 'startup', stop.signal)
+    void syncCatalog(ctx, baseUrl, modelDefaults, 'startup', stop.signal)
     return () => stop.abort()
   })
 
@@ -151,16 +206,25 @@ export function apply(ctx: Context, config: Config = {}): void {
   const access = { baseUrl, apiKey: () => apiKey(ctx) }
   registerImageTool(ctx, {
     access,
-    ...config.imageModel === undefined ? {} : { model: config.imageModel },
+    model: () => modelDefaults.imageModel,
   })
   registerVideoTool(ctx, {
     access,
-    ...config.videoModel === undefined ? {} : { model: config.videoModel },
+    model: () => modelDefaults.videoModel,
   })
   // Reaches no route and spends nothing: it shows a picture this machine already
   // has, which is how a delegated member's image gets back to the user at all
   // (`media/show-tool.ts`).
   registerImageShowTool(ctx)
+  // The reading half of the same idea: a chat model that cannot see hands the
+  // picture to one that can, chosen from what was delivered rather than from a
+  // name in this build (`media/vision.ts`). No `model` option for that reason —
+  // the pick is per call, off the settings document the sync layer maintains.
+  registerImageAskTool(ctx, { access })
+  // And the same move for documents, which no model here opens itself and the
+  // kernel deliberately does not carry (`media/documents.ts`). Same reason for
+  // having no `model` option: the pick is per call, off the delivered list.
+  registerDocumentAskTool(ctx, { access })
 
   // The sentence about those tools belongs next to the tools themselves, and it
   // is stated once at runtime rather than written into each persona — see
@@ -185,6 +249,7 @@ async function route(
   ctx: Context,
   baseUrl: string,
   balance: BalanceReader,
+  modelDefaults: RuntimeModelDefaults,
   serialize: Serializer,
   endpoint: string,
   payload: unknown,
@@ -204,7 +269,7 @@ async function route(
       return { ok: true, value: await runVerifyCaptcha(ctx, baseUrl, payload, signal) }
 
     case 'sign-in':
-      return { ok: true, value: await runSignIn(ctx, baseUrl, payload, signal) }
+      return { ok: true, value: await runSignIn(ctx, baseUrl, modelDefaults, payload, signal) }
 
     case 'sign-out':
       return { ok: true, value: await runSignOut(ctx, balance) }
@@ -215,12 +280,12 @@ async function route(
     // Hand refresh. Mount and sign-in run their own rounds, so this is for the
     // case where the account gained models after both.
     case 'models.sync':
-      return { ok: true, value: await syncModels(ctx, { baseUrl, apiKey: () => apiKey(ctx) }, signal) }
+      return { ok: true, value: await syncCatalog(ctx, baseUrl, modelDefaults, 'manual', signal) }
 
     // What the console offers this kernel. The browser cannot ask for itself:
     // the route authenticates with our token and answers without CORS headers.
     case 'market.catalog':
-      return { ok: true, value: await marketCatalog(ctx, baseUrl, payload, signal) }
+      return { ok: true, value: await marketCatalog(ctx, marketAccess(ctx, baseUrl), payload, signal) }
 
     // Where an install would land, and what the roster already holds. The
     // gallery needs both before it can mark a card installed, and the
@@ -229,13 +294,28 @@ async function route(
       return { ok: true, value: await marketTarget(ctx) }
 
     case 'market.install':
-      return await marketInstall(ctx, { baseUrl, apiKey: () => apiKey(ctx) }, serialize, payload, signal)
+      return await marketInstall(ctx, marketAccess(ctx, baseUrl), serialize, payload, signal)
 
     // The opening questions one expert publishes. Separate from the catalog
     // because the manifest is a longtext column the snapshot withholds, and
     // asked only for the item whose detail page is open.
     case 'market.prompts':
-      return { ok: true, value: await marketPrompts(ctx, baseUrl, payload, signal) }
+      return { ok: true, value: await marketPrompts(ctx, marketAccess(ctx, baseUrl), payload, signal) }
+
+    // One file the user attached in the composer, on its way to becoming a path
+    // the model's own tools can open. See `files/stage.ts` for why the bytes
+    // travel rather than the path.
+    case FILE_STAGE_ENDPOINT:
+      return { ok: true, value: await stageFile(payload) }
+
+    // Which of this account's models can be handed a picture. Read fresh each
+    // time rather than cached here: the list changes when a sync round applies
+    // the console's capability layer, and this answer is one settings read.
+    case FILE_VISION_ENDPOINT:
+      // The route travels with the list because the browser has to check that
+      // the selected model is one of *ours* before judging it: a provider the
+      // user configured themselves is outside what this answer covers.
+      return { ok: true, value: { route: ROUTE, models: [...imageCapableModels(ctx)] } }
 
     // Bytes for one image this plugin generated. See `media/read.ts` for why the
     // kernel's own attachment read cannot serve these, and what authorizes this
@@ -300,18 +380,18 @@ type Serializer = <T>(task: () => Promise<T>) => Promise<T>
  * gallery renders the reason next to whatever rows it still holds, and a
  * catalog it cannot reach is not a fault of the call.
  * @param ctx - host context.
- * @param baseUrl - console origin.
+ * @param access - console origin and token the catalog is read with.
  * @param payload - request body; `type` selects the partition.
  * @param signal - caller cancellation.
  * @returns the catalog.
  */
 async function marketCatalog(
   ctx: Context,
-  baseUrl: string,
+  access: ConsoleAccess,
   payload: unknown,
   signal?: AbortSignal,
 ): Promise<Catalog> {
-  return await readCatalog(ctx, { baseUrl, apiKey: () => apiKey(ctx), type: catalogTypeOf(payload) }, signal)
+  return await readCatalog(ctx, { ...access, type: catalogTypeOf(payload) }, signal)
 }
 
 /**
@@ -331,22 +411,20 @@ function catalogTypeOf(payload: unknown): CatalogType {
  * are an addition to a detail page, and a summon without one lands on a clean
  * composer instead of not happening.
  * @param ctx - host context.
- * @param baseUrl - console origin.
+ * @param access - console origin and token the manifest is read with.
  * @param payload - request body; `id` names the expert.
  * @param signal - caller cancellation.
  * @returns the questions, best first.
  */
 async function marketPrompts(
   ctx: Context,
-  baseUrl: string,
+  access: ConsoleAccess,
   payload: unknown,
   signal?: AbortSignal,
 ): Promise<{ prompts: readonly string[] }> {
   const id = (payload as { id?: unknown } | null)?.id
   if (typeof id !== 'string' || id.trim() === '') return { prompts: [] }
-  const manifest = await readExpertManifest(
-    ctx, { baseUrl, apiKey: () => apiKey(ctx) }, id.trim(), signal,
-  )
+  const manifest = await readExpertManifest(ctx, access, id.trim(), signal)
   return { prompts: manifest.prompts }
 }
 
@@ -497,6 +575,7 @@ type SignInReply =
 async function runSignIn(
   ctx: Context,
   baseUrl: string,
+  modelDefaults: RuntimeModelDefaults,
   payload: unknown,
   signal?: AbortSignal,
 ): Promise<SignInReply> {
@@ -526,13 +605,28 @@ async function runSignIn(
   // Seeding needs the key that was just stored, so a fresh account gets its
   // list here rather than at the next launch. Detached on purpose: a slow
   // square must not hold the sign-in screen open.
-  void syncCatalog(ctx, baseUrl, 'sign-in')
+  void syncCatalog(ctx, baseUrl, modelDefaults, 'sign-in')
   return { kind: 'ok', userId: outcome.userId, username: outcome.username }
 }
 
 /** Read the stored key, treating any credential fault as "not signed in yet". */
 async function apiKey(ctx: Context): Promise<string | undefined> {
   return await ctx.credentials.resolve(API_KEY_REF).then(hit => hit?.value).catch(() => undefined)
+}
+
+/**
+ * Origin + token the market RPCs actually use.
+ *
+ * Login, balance, model sync, and the media tools keep the console `baseUrl`.
+ * Only catalog / prompts / install take this, which is how a TEMP local pair
+ * can sit beside a production account without swapping credentials.
+ */
+function marketAccess(ctx: Context, consoleBaseUrl: string): ConsoleAccess {
+  if (TEMP_MARKET !== null) {
+    const token = TEMP_MARKET.token
+    return { baseUrl: TEMP_MARKET.baseUrl, apiKey: async () => token }
+  }
+  return { baseUrl: consoleBaseUrl, apiKey: () => apiKey(ctx) }
 }
 
 /**
@@ -543,23 +637,56 @@ async function apiKey(ctx: Context): Promise<string | undefined> {
  * the round started.
  * @param ctx - host context.
  * @param baseUrl - console origin.
+ * @param modelDefaults - mutable defaults read by media tools at call time.
  * @param reason - what triggered it, for the log line.
  * @param signal - cancellation, when the caller owns a lifetime.
  */
-async function syncCatalog(ctx: Context, baseUrl: string, reason: string, signal?: AbortSignal): Promise<void> {
+async function syncCatalog(
+  ctx: Context,
+  baseUrl: string,
+  modelDefaults: RuntimeModelDefaults,
+  reason: string,
+  signal?: AbortSignal,
+): Promise<SyncOutcome> {
   try {
     const outcome = await syncModels(ctx, { baseUrl, apiKey: () => apiKey(ctx) }, signal)
-    if (outcome.changed) {
-      ctx.logger.info(`openlux: model list synced (${reason}): ${outcome.models} models `
-        + `(${outcome.managed ?? 0} delivered, ${outcome.kept ?? 0} the user's own), `
-        + `${outcome.described ?? 0} with a thinking declaration`)
-    } else {
-      ctx.logger.debug(`openlux: model sync (${reason}) changed nothing: ${outcome.skipped}`)
+    let defaultsChanged = false
+    if (outcome.delivery?.configured === true) {
+      if (outcome.delivery.defaultImageModel !== undefined
+        && outcome.delivery.defaultImageModel !== modelDefaults.imageModel) {
+        modelDefaults.imageModel = outcome.delivery.defaultImageModel
+        defaultsChanged = true
+      }
+      if (outcome.delivery.defaultVideoModel !== undefined
+        && outcome.delivery.defaultVideoModel !== modelDefaults.videoModel) {
+        modelDefaults.videoModel = outcome.delivery.defaultVideoModel
+        defaultsChanged = true
+      }
     }
+    const reported = defaultsChanged && !outcome.changed ? { ...outcome, changed: true } : outcome
+    if (reported.changed) {
+      // The source belongs in this line: "delivered 3 models" reads the same
+      // whether operations chose them or the built-in fallback did, and telling
+      // those apart is the first step of every "wrong rows in the picker" report.
+      ctx.logger.info(`openlux: model delivery synced (${reason}): `
+        + `${reported.models ?? 0} chat models, `
+        + `${reported.delivery?.searchModels.length ?? 0} search models, `
+        // "catalogue" rather than a name: with nothing delivered the media tools
+        // pick from what this key can serve at call time, so there is no answer
+        // to print here — and printing a build-time one would be a lie, which
+        // is what this line said before the compiled defaults were removed.
+        + `image=${modelDefaults.imageModel ?? 'catalogue'}, `
+        + `video=${modelDefaults.videoModel ?? 'catalogue'}`)
+    } else {
+      ctx.logger.debug(`openlux: model sync (${reason}) changed nothing: ${reported.skipped}`)
+    }
+    return reported
   } catch (error: unknown) {
-    if (signal?.aborted === true) return
-    ctx.logger.warn(`openlux: model sync (${reason}) failed; leaving the list as it was`)
-    ctx.logger.warn(error)
+    if (signal?.aborted !== true) {
+      ctx.logger.warn(`openlux: model sync (${reason}) failed; leaving the list as it was`)
+      ctx.logger.warn(error)
+    }
+    return { changed: false, skipped: 'no-pool' }
   }
 }
 
