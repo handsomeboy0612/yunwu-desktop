@@ -5772,12 +5772,31 @@ workspace（我们多一个 `openlux-plugin-account`，改成 `toContain`），�
 写——`module-resolution` 用 `file:///tmp/...` 作锚（Windows 上 `fileURLToPath` 要盘符）、
 `profile-create-window` 断言路径里有 `/native-ui/`（Windows 是反斜杠）。
 
+### 落地顺序（2026-08-23 晚）
+
+主工作树那 48 处未提交工作先自成一笔（`5ce406c`：纯文本模型改由有能力的模型代看），
+再把升级分支并进来，破坏性变更的修复**放在合并这一笔里**——这样每个提交都装得上、编得过，
+不会留一个「内核已换、插件还引着删掉的包」的中间态。
+
+账号插件的适配因此是对着主工作树的新文件重做的，落点与上面预判的一致：
+
+- `client/index.ts` 不再 import `bindSnapshotSelector`，两个注册点各交出裸 store
+  （`hooks: { account: store }`）；组件侧类型套一层 `InjectFace`，`useAccount` 由渲染器绑好送进来。
+- `ImageToolCard.tsx` 与 `image-loader.ts` 改指自持的 `MessageImage.tsx`；
+  `tsdown.config.ts` 的 external 去掉 `dsh-client-web-react` 与 `dsh-client-ui-attachment`，
+  并把上游那条注释一起抄来（这两条之外的 `@deepseek-ai` 取值导入会被新的构建闸口拒）。
+- 插件 manifest 50 处 pin 换到 `0.1.1-rc.2`，补 `dsh-agent` 与 `react-dom`／`@types/react-dom`。
+
+**一处上游没有的连带修复**：`dsh-plugin-desktop/tsconfig.tests.json` 把 rootDir 放宽到
+workspace 根（好让三个 spec 直接 import 账号插件源码），于是 tsc 顺着 import 走进插件装好的
+tarball 去检查 `.d.ts` 内部——pi-ai 的 providers 声明用无 import 属性的 JSON 导入、
+Anthropic SDK 的类型按候选相对路径摸 undici-types，rc.2 起两处都成硬错（44 行）。
+账号插件自己的 tsconfig 早就为同一个理由关了这项检查，这里跟上（`3500d0c`）。
+范围只到 `.d.ts` 内部，我们的源码怎么用这些声明仍然全检。
+
+收尾：`yarn check` 全绿（82 个测试文件 / 854 通过 / 13 跳过，闭包 202 节点、许可证 544 包）。
+
 ### 还没做完的
 
-1. **账号插件的适配要重做一遍**：这轮是对着上一次提交的插件做的，而主工作树里有 48 处
-   未提交的新工作（`AttachFileButton`、`files/`、`doc-tool`、`AccountTrigger` 那批），
-   `AccountAction.tsx` 在那边已被删掉。断点还是上面那三类，落点是
-   `client/index.ts:23,134`、`AccountSection.tsx:52,79`、`AccountTrigger.tsx:42,64`、
-   `ImageToolCard.tsx:24`、`image-loader.ts:16`、`tsdown.config.ts:51`、`tool-reality.ts:387`。
-2. **真机起开发版验一轮**，包括那笔每天都在收的税：安装版 2.0.2 会把
-   `~/.dsh/.credentials.yaml` 迁成嵌套格式，得先摊平。
+**真机起开发版验一轮**，包括那笔每天都在收的税：安装版 2.0.2 会把
+`~/.dsh/.credentials.yaml` 迁成嵌套格式，得先摊平。
