@@ -5796,7 +5796,66 @@ Anthropic SDK 的类型按候选相对路径摸 undici-types，rc.2 起两处都
 
 收尾：`yarn check` 全绿（82 个测试文件 / 854 通过 / 13 跳过，闭包 202 节点、许可证 544 包）。
 
+### 真机复验（2026-08-23 夜，开发版一轮跑完）
+
+**那笔天天收的税自己没了**：rc.2 的 `credentials-local` 就是写出 `version: 1` + `refs:`
+这个形状的版本，还带一次性迁移（`dsh-credentials-local/lib/index.js:150,686`：缺 version
+时报的是「把现有条目挪到 `refs:` 下、值一个都不用改」，读到旧平铺文档会自己迁并记一条日志）。
+安装版和开发版从此同代，不用再手工摊平。
+
+**起法有一处变了**：`?dsh-desktop-mode=compatibility` 那条浏览器路子在 rc.2 断了——
+平台层抽成 `electron-platform` + preload 注入，纯浏览器拿不到 `dsh-desktop-platform`，
+直接落恢复页（实测报 `invalid or missing dsh-desktop-platform null`）。要挂 CDP 就绕开
+`lib/bin.js`（它 `spawn(electron, [main.js])`，不转 argv），直接
+`node_modules\electron\dist\electron.exe lib\main.js --remote-debugging-port=9223`。
+渲染器自己带的查询串是 `?dsh-desktop-mode=advanced&dsh-desktop-platform=win32`。
+
+量到的（CDP，非肉眼）：
+
+| 验什么 | 真机读数 |
+|---|---|
+| 启动 | 无错，`errors` 探针 0 命中；宿主在 `127.0.0.1:43120` |
+| 账号插件 | 侧栏 `yw_zhoucongjie` / `$59.15`；账户页 累计 $40.90 / 请求 5,203 / 前往管理中心 / 退出登录 |
+| 补丁一（conversation） | Hero 是「桌面版」，不是「预览版」 |
+| 补丁二（settings-general） | 「账户」排在「通用设置」之上，图标 path `M11.0307 5.46369…`（与侧栏账号行同款），齿轮是另一条 |
+| 补丁三（settings-models） | 476 条候选**一条没预勾**；搜 `seedream` → 5 条；点全选只勾这 5 条、按钮变「添加所选 (5)」；取消退出没落库 |
+| 对话链路 | 新会话发一条，6.9 秒回，输入 11.3K tok / 输出 2 tok |
+| 我们的附件入口 | `附带文件` 按钮在位 |
+
+**补丁四（agent-preset 跟随会话）这轮没验到**：那条 `sync()` 只在切到「预设与当前显示不同」
+的会话时才现形，手头会话的预设都是 Default，构造一个要先造预设再造会话，留给下一轮。
+守卫测试与 bundle 标记都在（`package.spec.ts`）。
+
+### 顺带查清的两处「上游已经做了」
+
+**一、`preload` 回来了，`files/stage.ts` 那条理由过期了。** 那个模块开头整段解释「为什么把字节
+走一趟而不是传路径」，落点是「DSH 窗口 `sandbox: true` 且没有 preload，`webUtils.getPathForFile`
+够不着，要拿到路径就得 fork 上游」。rc.2 自己加了 `src/preload.ts`，`contextBridge` 暴露
+`__DSH_DESKTOP_FILE_PATH__.getPathForFile(file)`（契约在 `src/file-path-bridge-contract.ts`，
+上游自己用它做工作区文件夹拖放，`src/client/workspace-folder-drop.ts:64`），
+真机上 `window.__DSH_DESKTOP_FILE_PATH__.getPathForFile` 是 function。
+所以桌面部署下**可以直接拿到真路径、跳过暂存拷贝**；浏览器部署仍然没有路径可交，
+那条兜底还得留。**这段注释现在是过期证据，改动时一并更新。**
+
+**二、`@file` 引用是原生的了。** `dsh-file-reference` 给宿主口子
+（`ctx.fileReferences.list(agent, query, signal)` + 远程 `fileReferences/list`），
+`dsh-client-ui-reference` 给浏览器端补全，`dsh-file-reference-local` 是实现——**按会话 cwd 建
+有界索引**，`maxResults 20` / `maxEntries 10000` / 默认排除 `.git` 与 `node_modules`，
+工具结果事件会让索引失效。真机验通：在输入框敲 `@` 就列出会话 cwd 下的目录，`@a` 会模糊排序。
+它和我们那条路的分工是清楚的：**工作区内的文件走它**（白送，且带 `FILE_REFERENCE_PROMPT`
+那段引导），**工作区外的文件仍然只有我们的按钮 / 拖放**（它明说「浏览器端不能自己扫盘」，
+provider 也只认 cwd 那棵树），而「模型读不了文档时换一个能读的模型」那半仍然只有我们有——
+`application/pdf` 在 rc.2 全部包里**零命中**，附件层白名单还是 png / jpeg / webp / gif 四个。
+
+**三、模型能力事实仍然不下发给渲染层。** 但宿主侧这一版有权威读数了：
+`ctx.llm.resolveModelInfo(provider, model).inputModalities`，宿主发送前用它拦
+（`dsh-host-apiproxy/lib/types/api-proxy.js:2105` → `MODEL_DOES_NOT_SUPPORT_IMAGES`）。
+下发给浏览器的 `modelCatalogModelSchema` 仍然只有 `id` / `name` / `description?` / `reasoning?`
+（`sessions.schema.d.ts:113`）。而且它的事实源是 pi-ai 那份按厂商切的目录，
+**没有 openlux 这一路**，所以对我们那 476 条模型它返回 `undefined`（那行判断写的是
+`!== undefined && !includes('image')`，未知一律放行）。结论不变：这条事实得我们自己的宿主端点递。
+
 ### 还没做完的
 
-**真机起开发版验一轮**，包括那笔每天都在收的税：安装版 2.0.2 会把
-`~/.dsh/.credentials.yaml` 迁成嵌套格式，得先摊平。
+1. **agent-preset 那个补丁的真机现形**（要先造一个预设与当前显示不同的会话）。
+2. **`files/stage.ts` 按新的 preload 桥重估**：桌面部署能省掉暂存拷贝那一跳。
