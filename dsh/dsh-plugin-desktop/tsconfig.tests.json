@@ -9,7 +9,13 @@
     // here, so a wider root only affects which files tsc will accept.
     "rootDir": "..",
     "noEmit": true,
-    "emitDeclarationOnly": false
+    "emitDeclarationOnly": false,
+    // Reaching into that workspace also reaches its installed tarballs, whose
+    // `.d.ts` files name packages the leaf never imports — the same closure the
+    // account workspace's own tsconfig already declines to check, for the same
+    // reason. Only `.d.ts` interiors are skipped; every source file here, ours
+    // and the plugin's, stays fully checked against what they declare.
+    "skipLibCheck": true
   },
   "include": ["scripts/**/*.ts", "src/*.ts", "tests/**/*.ts", "tests/**/*.tsx"],
   "exclude": [
