@@ -1,6 +1,6 @@
 /** Headless artifact smoke for profile-local and launcher-owned Cordis plugins. */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,6 +16,7 @@ import { prepareDesktopProfile } from '../lib/profile.js'
 
 const BIN_NAME = 'dsh-plugin-desktop-loader-smoke'
 const THIRD_PARTY_NAME = 'dsh-desktop-loader-smoke-plugin'
+const THIRD_PARTY_DEPENDENCY_NAME = 'dsh-desktop-loader-smoke-dependency'
 const RUNNER_ENVIRONMENT_NAMES = new Set([
   'ELECTRON_RUN_AS_NODE',
   'NPM_CONFIG_RUNTIME',
@@ -50,17 +51,31 @@ try {
     environment: process.env,
   })
   const prepared = prepareDesktopProfile(undefined, home)
-  const thirdPartyDir = join(prepared.profile.dir, 'node_modules', THIRD_PARTY_NAME)
+  const thirdPartyLink = join(prepared.profile.dir, 'node_modules', THIRD_PARTY_NAME)
+  const thirdPartyDir = join(home, 'linked-plugins', THIRD_PARTY_NAME)
+  const thirdPartyDependencyDir = join(home, 'profiles', 'node_modules', THIRD_PARTY_DEPENDENCY_NAME)
+  mkdirSync(join(prepared.profile.dir, 'node_modules'), { recursive: true })
   mkdirSync(thirdPartyDir, { recursive: true })
+  mkdirSync(thirdPartyDependencyDir, { recursive: true })
+  writeFileSync(join(thirdPartyDependencyDir, 'package.json'), JSON.stringify({
+    name: THIRD_PARTY_DEPENDENCY_NAME,
+    version: '0.0.0',
+    type: 'module',
+    exports: './index.js',
+  }) + '\n')
+  writeFileSync(join(thirdPartyDependencyDir, 'index.js'), 'export const marker = "profile dependency"\n')
   writeFileSync(join(thirdPartyDir, 'package.json'), JSON.stringify({
     name: THIRD_PARTY_NAME,
     version: '0.0.0',
     type: 'module',
     exports: './index.js',
+    dependencies: { [THIRD_PARTY_DEPENDENCY_NAME]: '0.0.0' },
   }) + '\n')
   writeFileSync(join(thirdPartyDir, 'index.js'), [
     "import { delimiter } from 'node:path'",
+    `import { marker } from '${THIRD_PARTY_DEPENDENCY_NAME}'`,
     'export function apply(ctx) {',
+    "  if (marker !== 'profile dependency') throw new Error('linked plugin did not resolve its profile dependency')",
     `  const expected = ${JSON.stringify(pnpmRuntime.pathDir)}`,
     '  const actual = (process.env.PATH ?? \'\').split(delimiter)[0]',
     '  if (actual !== expected) throw new Error(`third-party plugin received ${actual} instead of packaged pnpm PATH ${expected}`)',
@@ -72,6 +87,7 @@ try {
     '}',
     '',
   ].join('\n'))
+  symlinkSync(thirdPartyDir, thirdPartyLink, 'junction')
   releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
   const profileRequire = createRequire(prepared.bareModuleBaseUrl)
   const desktopManifest = fileURLToPath(new URL('../package.json', import.meta.url))
@@ -103,6 +119,7 @@ try {
     prepared.rootConfig,
     [{ insert: [
       { id: 'desktop-shell', name: 'dsh-plugin-desktop' },
+      { id: 'community-market', name: 'dsh-community-market' },
       { id: 'third-party-smoke', name: THIRD_PARTY_NAME },
     ] }],
     (host) => {
@@ -133,12 +150,16 @@ try {
   await runtime.mountScheduled()
 
   const desktopEntry = ctx.loader.resolve('include:desktop-shell')
+  const marketEntry = ctx.loader.resolve('include:community-market')
   const thirdPartyEntry = ctx.loader.resolve('include:third-party-smoke')
   if (desktopEntry?.options.name !== 'dsh-plugin-desktop') {
     throw new Error('launcher-owned desktop plugin did not activate through its bare package name')
   }
   if (thirdPartyEntry?.options.name !== THIRD_PARTY_NAME) {
     throw new Error('profile-local third-party plugin did not activate')
+  }
+  if (marketEntry?.options.name !== 'dsh-community-market') {
+    throw new Error('community market Host plugin did not activate through its bare package name')
   }
   if (mountedSpec?.mode !== 'compatibility') {
     throw new Error(`desktop plugin produced an unexpected shell mode: ${String(mountedSpec?.mode)}`)

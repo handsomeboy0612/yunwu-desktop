@@ -28,7 +28,13 @@ let nativeThemeSource = 'system'
 const trayItems = []
 
 try {
-  writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: advanced\n')
+  writeFileSync(join(home, 'settings.yaml'), [
+    'dsh-desktop:',
+    '  mode: advanced',
+    'agent-presets:',
+    '  default: minimal',
+    '',
+  ].join('\n'))
   const prepared = prepareDesktopProfile('1', home, 'win32')
   const hostServicePluginDir = join(
     prepared.profile.dir,
@@ -68,6 +74,7 @@ try {
   releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
   const runtime = {
     platform: 'win32',
+    locale: 'en',
     updates: {
       isPackaged: false,
       canDownload: true,
@@ -85,6 +92,7 @@ try {
     },
     async mountScheduled() {
       if (mountedSpec === undefined) throw new Error('desktop shell was not registered')
+      runtime.setLocalePreference(mountedSpec.readLocalePreference())
       nativeThemeSource = mountedSpec.readThemeSource()
     },
     show() {},
@@ -99,6 +107,7 @@ try {
       }
     },
     openTerminal() {},
+    setLocalePreference(preference) { runtime.locale = preference ?? 'en' },
     setThemeSource(source) { nativeThemeSource = source },
     async requestRestart() {},
     prepareToQuit() {},
@@ -121,6 +130,9 @@ try {
         nodeShimPath: pnpmRuntime.nodeShimPath,
         clearEnvironmentPath: pnpmRuntime.clearEnvironmentPath,
         dshBootstrapPath: fileURLToPath(new URL('../lib/desktop-cli.js', import.meta.url)),
+        installRecoveryStatePath: join(home, 'plugin-install-recovery', 'state.json'),
+        generationId: 'profile-smoke-generation',
+        externalMarketInstallEnabled: prepared.market.effective === 'dsh-market',
       })
       await host.plugin(DesktopProfileService, {
         current: {
@@ -153,13 +165,32 @@ try {
     || ctx.desktopProfiles.current.dir !== prepared.profile.dir) {
     throw new Error('assembled desktop profile service has the wrong active identity')
   }
+  const agentPresets = ctx.get('agentPresets')
+  if (agentPresets === undefined) {
+    throw new Error('assembled Windows profile is missing the agent preset roster')
+  }
+  const presetIds = (await agentPresets.list()).map(preset => preset.id)
+  if (presetIds.includes('minimal') || !presetIds.includes('standard')) {
+    throw new Error(`assembled Windows profile exposes unexpected presets: ${presetIds.join(', ')}`)
+  }
+  if (agentPresets.defaultId !== 'standard') {
+    throw new Error(`assembled Windows profile selected unsupported default ${agentPresets.defaultId}`)
+  }
+  const legacyPreset = await agentPresets.resolve('minimal')
+  if (legacyPreset.id !== 'minimal') {
+    throw new Error(`assembled Windows profile remapped legacy preset to ${legacyPreset.id}`)
+  }
   const hostServiceProbe = ctx.get(HOST_SERVICE_PROBE_KEY)
   if (hostServiceProbe?.current?.name !== 'desktop'
     || hostServiceProbe.current.dir !== prepared.profile.dir
     || hostServiceProbe.pnpm?.serviceName !== 'desktopPnpm'
     || hostServiceProbe.pnpm.lookupRun !== 'function'
     || hostServiceProbe.pnpm.run !== 'function'
-    || hostServiceProbe.pnpm.runPlugin !== 'function') {
+    || hostServiceProbe.pnpm.runPlugin !== 'function'
+    || hostServiceProbe.pnpm.installPlugin !== 'function'
+    || hostServiceProbe.pnpm.recoveredInstallReceiptIds !== 'function'
+    || hostServiceProbe.pnpm.acknowledgeRecoveredInstall !== 'function'
+    || hostServiceProbe.pnpm.rollbackPluginInstall !== 'function') {
     throw new Error(
       `profile-local Host service plugin produced an unexpected probe: ${JSON.stringify(hostServiceProbe)}`,
     )
@@ -204,7 +235,7 @@ try {
   if (response.status !== 200) {
     throw new Error(`assembled Web root returned HTTP ${String(response.status)}`)
   }
-  const bootMatch = html.match(/window\.__DSH_BOOT__ = (\{.*?\})<\/script>/u)
+  const bootMatch = html.match(/(?:window\.__DSH_BOOT__|globalThis\["__DSH_BOOT__"\]) = (\{.*?\})<\/script>/u)
   if (bootMatch?.[1] === undefined) {
     throw new Error('assembled Web root is missing window.__DSH_BOOT__')
   }

@@ -22,15 +22,18 @@ const spec: DesktopShellSpec = {
     templatePath: '/tmp/tray-iconTemplate.png',
     bluePath: '/tmp/tray-icon-blue.png',
   },
+  readLocalePreference: () => undefined,
   readThemeSource: () => 'system',
   requestQuit: () => {},
   requestModeChange: async () => {},
 }
 
+const preload = '/tmp/preload.cjs'
+
 describe('compatibility BrowserWindow options', () => {
   it('preserves the native frame and enables renderer isolation', () => {
     const icon = {} as NativeImage
-    const options = compatibilityWindowOptions(spec, icon, 'darwin')
+    const options = compatibilityWindowOptions(spec, icon, 'darwin', preload)
 
     expect(options).toEqual(expect.objectContaining({
       title: '',
@@ -41,6 +44,7 @@ describe('compatibility BrowserWindow options', () => {
       show: false,
       icon,
       webPreferences: {
+        preload,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -64,7 +68,7 @@ describe('compatibility BrowserWindow options', () => {
   })
 
   it('uses the native Windows caption while hiding the application menu', () => {
-    const options = compatibilityWindowOptions(spec, {} as NativeImage, 'win32')
+    const options = compatibilityWindowOptions(spec, {} as NativeImage, 'win32', preload)
 
     expect(options.title).toBe('DeepSeek Harness Desktop')
     expect(options.autoHideMenuBar).toBe(true)
@@ -75,12 +79,13 @@ describe('compatibility BrowserWindow options', () => {
       { ...spec, mode: 'advanced' },
       {} as NativeImage,
       'darwin',
+      preload,
     )).toThrow('unsupported compatibility window mode advanced')
   })
 
   it('uses hidden-inset transparent vibrancy on macOS advanced windows', () => {
     const advanced = { ...spec, mode: 'advanced' as const }
-    const options = advancedWindowOptions(advanced, {} as NativeImage, 'darwin')
+    const options = advancedWindowOptions(advanced, {} as NativeImage, 'darwin', preload)
 
     expect(options).toEqual(expect.objectContaining({
       titleBarStyle: 'hiddenInset',
@@ -90,7 +95,7 @@ describe('compatibility BrowserWindow options', () => {
       vibrancy: 'sidebar',
       visualEffectState: 'followWindow',
     }))
-    expect(desktopWindowOptions(advanced, {} as NativeImage, 'darwin')).toEqual(options)
+    expect(desktopWindowOptions(advanced, {} as NativeImage, 'darwin', preload)).toEqual(options)
   })
 
   it('uses native Windows controls, Mica, shadow, and rounded corners in advanced mode', () => {
@@ -98,6 +103,7 @@ describe('compatibility BrowserWindow options', () => {
       { ...spec, mode: 'advanced' },
       {} as NativeImage,
       'win32',
+      preload,
     )
 
     expect(options).toEqual(expect.objectContaining({
@@ -119,6 +125,7 @@ describe('compatibility BrowserWindow options', () => {
       { ...spec, mode: 'advanced' },
       {} as NativeImage,
       'linux',
+      preload,
     )).toThrow('supported on macOS and Windows')
   })
 })
