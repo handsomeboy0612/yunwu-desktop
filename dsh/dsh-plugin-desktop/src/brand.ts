@@ -23,10 +23,16 @@ export const PRODUCT_NAME = 'OpenLux Desktop'
 export const WINDOW_TITLE = 'OpenLux'
 
 /**
- * Sidebar brand row label. The row reads the same as the window title on
- * purpose: it is the same fact seen from inside the page.
+ * Sidebar brand row label: the name that reads as prose beside the mark.
+ *
+ * The row is spelled in two pieces because upstream's art is: a lettered name
+ * followed by a filled tag naming the edition ("deepseek" + `HARNESS`). Keeping
+ * that shape means the row still reads as one wordmark rather than a sentence.
  */
-export const WORDMARK_TEXT = WINDOW_TITLE
+export const WORDMARK_TEXT = 'OpenLux'
+
+/** The filled tag beside the name, standing where upstream's edition tag does. */
+export const WORDMARK_BADGE = 'Agent'
 
 /**
  * Loopback route serving the brand mark to the Web surface. The Host reads the
