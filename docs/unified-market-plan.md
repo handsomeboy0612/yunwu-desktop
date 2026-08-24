@@ -54,6 +54,9 @@
 | skill | 994 | 10 | **0** | — |
 | connector | **3** | 2 | 0 | — |
 
+> 这张表是 08-24 那天的盘点，留着是为了看清起点。连接器那行已经不是这样了：
+> 阶段四导入之后是 19 条，分类 0 个（见 §5.2 与 §5.3）。
+
 - 技能的 icon 是空的，不是"没走我们图床"——两个导入器
   （`import_skill_repos.go`、`import_expert_center.go:733` 那段 upsert）**从来没写过 Icon 字段**。
   专家的头像是转存过的，策略见 `expert_avatar.go` 的文件头注释（一律转存、幂等靠上一轮结果）。
@@ -309,6 +312,33 @@
 bridge 的 `Config` 表里没有工具过滤这个旋钮（只有 transport / headers / 超时 / 重连），
 参考产品是靠端点自家的 `?includeTools=` 查询参数解决的，那是各家服务端的功能、不通用。
 按用户拍板先上架，真嫌吵就从目录里删掉它。
+
+## 5.3 连接器不归类：分类 chips 撤掉（2026-08-25）
+
+**参考产品的连接器列表没有分类。** 解包读它的界面串（`app.asar` 里那份压缩包，i18n 键
+按前缀捞）：连接器那一屏只有搜索框与「自定义连接器」，一个分类名都没有；分类是我们阶段四
+自己加的，19 条摊进 6 个类、每类两三条，chips 占掉一整行却几乎筛不掉什么。
+
+**改的是服务端一处，界面一行没动。** 落库那行 `CategoryId` 恒为 0（`connectorItem()`），
+`ensureConnectorCategories()` 整个删掉。界面自己就收了，因为两道守卫本来就在：
+快照里的分类被 `visibleClientCategories`（`controller/desktop_market_client.go:172`）按
+「至少挂着一个已上架条目」过滤，连接器一条都不挂 → `categories` 是空数组 →
+`MarketSection` 的 `categories.length > 0` 不成立；详情页那格也有 `categoryName !== ''`。
+
+**明确写 0，而不是「空值让位于已有值」。** `upsertItem` 对 `DescriptionZh` 是让位的
+（免得重跑清掉翻译），照抄那个姿势的话，库里已经挂着 dev/search 的那三条永远不变，
+这个决定在老库上就等于没生效。代价是运营若手动给连接器分过类会被重跑清掉——分类是我们
+自己加的字段、不是运营的编排，认下它。留在库里的那两条空分类客户端已经看不见了，
+要清是运营在管理端删。
+
+**真机兑账**（本机 admin-server :3000 → 测试库 `jishu_test`，跑 `IMPORT_CONNECTORS=1`）：
+
+| 验什么 | 结果 |
+|---|---|
+| 快照 | 连接器 19 条，全部 `category_id=0`；`categories` 从 2 条变 **0 条** |
+| 连接器 tab（CDP 读 DOM） | 19 张卡，没有「全部分类」，6 个旧分类名一个不剩 |
+| 别的 tab 没被连带 | 技能 994 张卡 chips 在（效率办公/数据处理/…），专家 407 张卡 chips 在（腾讯专区/…）+ 专家/专家团二级筛选也在 |
+| Go 单测 | `TestConnectorsCarryNoCategory` 钉住落库那行的 0；`TestShippedConnectorManifestsAreUnchanged` 证明 manifest 逐字节没变（分类从来不在 manifest 里） |
 
 ## 6. 明确不做
 
