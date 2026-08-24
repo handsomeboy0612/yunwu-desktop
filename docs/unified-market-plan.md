@@ -217,7 +217,7 @@
 | 一 | 顶部 tab 框架 + 技能 tab（目录 / 色块头像 / 安装 / 本地导入） | 技能装进 `$DSH_HOME/skills` 后不重启就出现在 `/` 名录里 |
 | 二 | 连接器 tab（目录 / 连接 / 断开 / 自定义 / 工具列表） | `ctx.get('loader').create()` 真能在运行时挂起 mcp-client 并出工具 |
 | 三 | 我的专家子页 | 无（都是已有数据）。2026-08-24 已改成「我创建的」+ 创建走创造模式，最近召唤搬到输入框，见 §2.4 |
-| 四 | 后台连接器导入器 | 每条候选都要能真连上再上架 |
+| 四 | 后台连接器导入器 | 每条候选都要能真连上再上架。2026-08-25 完成，19 条，见 §5.2 |
 
 ## 5. 验收判据（每条都要真机可复现）
 
@@ -273,11 +273,50 @@
 看不到 provider。**读不准就不显示**——计数行退回报「已装 N 个技能」，措辞也从「生效」改成「已装」。
 等有了 scope 能读的时候再换，那时候顺带把「这条被顶掉了」标到卡片上。
 
+## 5.2 阶段四：连接器目录，19 条，每条都连过（2026-08-25）
+
+代码在 `admin-server/service/desktop_market/import_connectors.go`，触发是
+`IMPORT_CONNECTORS=1`（先探活再写）或 `=nocheck`（没有外网的私有化环境）。
+`SEED_DESKTOP_MARKET` 调的是同一张表——目录只留一份，避免重蹈「自撰专家 vs 专家中心」
+那次两张同名卡片的覆辙。
+
+**上架门槛按 §4 的要求逐条兑现**，用的是桌面端自己那套 bridge，不是读文档挑的：
+
+| 这一类 | 怎么验的 | 结果 |
+|---|---|---|
+| 免鉴权 5 条 | 真挂起来列工具 | deepwiki 3 / cloudflare-docs 2 / huggingface 4 / kdocs 258 / lingxing 59 |
+| 在架的 3 条 stdio | 走 `npx` 真拉包起进程 | context7 2 / filesystem 14 / tavily 5，3.6~4.2 秒 |
+| 网页授权 11 条 | 发现 + 动态注册 + PKCE + 生成授权地址，客户端元数据与线上逐字一致 | 全部 S256、scope 由 SDK 按 SEP-835 从资源元数据推出 |
+
+最后那一下「用户点同意」代替不了，除此之外整条无人值守的半程都验过了。
+
+**验完被剔掉的，各有各的原因**（都记进代码文件头，免得下一个人再试一遍）：
+
+- **GitHub / Figma**：动态注册被拒（Figma 直接 `403 Forbidden`），要去对方后台预注册应用。
+- **QQ 邮箱**：动态注册回 `redirect_uri does not match any trusted platform`——它不接受
+  127.0.0.1 回环回调，而桌面端的回调只能是回环（RFC 8252）。
+- **Asana / Atlassian / invideo**：端点走 sse，内核只收 stdio 与 streamable-http。
+- **令牌拼在 URL 里的那类**（gildata、盈米）：manifest 的注入只做 header 与 env，
+  没有 URL 模板替换，硬上会把 `${TOKEN}` 原样发出去。
+
+**撞出来的一件事。** 目录重构时把 `mcpName` 一律写成「取 slug」，于是 `tavily-search` 的
+命名空间从 `tavily` 变成 `tavily-search`。它不报错，只是让模型看到的工具全部改名，老会话里
+那句「用 `mcp__tavily__tavily_search` 查一下」突然指向不存在的工具。修法是 `mcpName` 独立成
+字段、缺省取 slug，在架的三条钉死；`TestShippedConnectorsKeepTheirNamespace` 把它钉住了
+（去掉那行 pin 确认过测试转红）。
+
+**一条已知的粗糙处。** 金山文档一条 258 个工具、领星 59 个，装上即全量进每个会话的工具列表。
+bridge 的 `Config` 表里没有工具过滤这个旋钮（只有 transport / headers / 超时 / 重连），
+参考产品是靠端点自家的 `?includeTools=` 查询参数解决的，那是各家服务端的功能、不通用。
+按用户拍板先上架，真嫌吵就从目录里删掉它。
+
 ## 6. 明确不做
 
 - 不并入插件市场（理由见 §0）。
 - 不重做已装专家的管理（内核自带一整套）。
-- 不做 OAuth 连接器（WorkBuddy 那批是腾讯自家服务）。
+- ~~不做 OAuth 连接器~~ —— 已经做了（见 §5.2 与 `market/connector-oauth.ts`）。
+  当初的判断「WorkBuddy 那批是腾讯自家服务」是错的：82 条里指向的是各家公开端点，
+  60 条要 OAuth，其中大多数支持动态注册，不需要我们去逐家申请 client_id。
 - 不做专家创作与上架（`myExperts.created.*` 的创建 / 修改 / 分享 / 上架）：
   创作要一套编辑器 + 一条后台投稿通道，是独立一期。
 - 不给 994 条技能批量抓图（上游参考实现自己就不给技能配图）。
