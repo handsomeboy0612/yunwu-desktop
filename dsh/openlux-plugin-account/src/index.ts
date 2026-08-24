@@ -40,6 +40,12 @@ import { stageFile } from './files/stage.ts'
 import { readCatalog, type Catalog, type CatalogType } from './market/catalog.ts'
 import { readExpertManifest, type ConsoleAccess } from './market/console.ts'
 import { installPreset, readInstallTarget, type InstallOutcome, type InstallRequest, type InstallTarget } from './market/install.ts'
+import { importLocalSkill, installSkill, readSkillTarget, removeSkill } from './market/skill-install.ts'
+import {
+  installConnector, openCustomFile, readConnectorRequirement, readConnectorTarget,
+  restoreConnectors, syncCustomConnectors, uninstallConnector,
+} from './market/connector-install.ts'
+import type { ConnectorRequest } from './market/wire.ts'
 import { registerImageAskTool } from './media/ask-tool.ts'
 import { registerDocumentAskTool } from './media/doc-tool.ts'
 import { IMAGE_READ_ENDPOINT } from './media/name.ts'
@@ -50,6 +56,7 @@ import { registerVideoTool } from './media/video-tool.ts'
 import { imageCapableModels } from './media/vision.ts'
 import { ROUTE, syncModels, type SyncOutcome } from './models/sync.ts'
 import { registerToolReality } from './persona/tool-reality.ts'
+import { registerSearchProvider } from './web/search/provider.ts'
 
 /**
  * Logical channel owned by this plugin. The browser addresses it as
@@ -86,6 +93,14 @@ export interface Config {
 interface RuntimeModelDefaults {
   imageModel: string | undefined
   videoModel: string | undefined
+  /**
+   * Models web search may spend a turn on, in the console's own order.
+   *
+   * A list rather than one name because that is what the console has always
+   * promised for this one purpose — first entry first, next entry when it does
+   * not work out — and `web/search/provider.ts` is what finally honours it.
+   */
+  searchModels: readonly string[]
 }
 
 /**
@@ -152,6 +167,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const modelDefaults: RuntimeModelDefaults = {
     imageModel: config.imageModel,
     videoModel: config.videoModel,
+    searchModels: [],
   }
 
   // Installs run one at a time. They stage inside the same preset root and
@@ -201,6 +217,25 @@ export function apply(ctx: Context, config: Config = {}): void {
     return () => stop.abort()
   })
 
+  // Connectors the user connected on an earlier launch. They are loader entries
+  // rather than files, so nothing else brings them back; and they are mounted
+  // through the same call a fresh connect uses, which is the one path measured
+  // to work (`market/connector-install.ts`). Serialised with the installs so a
+  // restore cannot interleave with a connect arriving from the gallery.
+  ctx.effect(() => {
+    void serialize(async () => {
+      await restoreConnectors(ctx)
+      // And the user's own file, which is the whole truth for what is in it —
+      // nothing else would bring those back either.
+      await syncCustomConnectors(ctx)
+    })
+    // Nothing to abort: `create` is not cancellable, and a half-mounted entry
+    // would be worse than one extra mount. Disposal leaves the entries up —
+    // they are siblings of this plugin, not children, and a hot reload adopts
+    // them by id instead of duplicating them.
+    return () => {}
+  })
+
   // The same origin and the same key serve the model-facing side of the
   // account: drawing and filming are billed to whoever is signed in here.
   const access = { baseUrl, apiKey: () => apiKey(ctx) }
@@ -225,6 +260,16 @@ export function apply(ctx: Context, config: Config = {}): void {
   // kernel deliberately does not carry (`media/documents.ts`). Same reason for
   // having no `model` option: the pick is per call, off the delivered list.
   registerDocumentAskTool(ctx, { access })
+
+  // Web search is the fourth model-facing capability that has to pick a model
+  // this key can actually use, and the one the console's delivered priority list
+  // was written for (`web/search/provider.ts`). Deferred like the system prompt
+  // below: a composition may mount no `web` seam at all, and an account face is
+  // still useful there.
+  ctx.inject(['web'], scope => registerSearchProvider(scope, {
+    access,
+    models: () => modelDefaults.searchModels,
+  }))
 
   // The sentence about those tools belongs next to the tools themselves, and it
   // is stated once at runtime rather than written into each persona — see
@@ -295,6 +340,61 @@ async function route(
 
     case 'market.install':
       return await marketInstall(ctx, marketAccess(ctx, baseUrl), serialize, payload, signal)
+
+    // The skill partition's own "what is already there". Not folded into
+    // `market.target`: that one answers for the preset roster, which can be
+    // unauthorable, while skills land in a plain watched directory that always
+    // exists in principle. Two owners, two answers.
+    case 'market.skills':
+      return { ok: true, value: await readSkillTarget() }
+
+    // A skill directory the user picked on their own disk («从本地添加技能»).
+    // The renderer sends a path rather than bytes because the shell's preload
+    // resolves one for any dropped or picked file since 0.1.1-rc.2.
+    case 'market.skillImport':
+      return { ok: true, value: await marketSkillImport(ctx, serialize, payload, signal) }
+
+    case 'market.skillRemove':
+      return { ok: true, value: { removed: await removeSkill(slugOf(payload)) } }
+
+    // The connector partition's own "what is already there", plus whether this
+    // deployment can mount anything at all.
+    case 'market.connectors':
+      return { ok: true, value: await readConnectorTarget(ctx) }
+
+    // What one connector will ask for before it can connect. Its own call
+    // because the answer is in the manifest, which the snapshot withholds.
+    case 'market.connectorRequirement':
+      return {
+        ok: true,
+        value: await readConnectorRequirement(ctx, marketAccess(ctx, baseUrl), slugOf(payload), signal),
+      }
+
+    // Start / stop one MCP server. The kernel has no `mcp set` and no browser
+    // half for this, so the entry is ours to mount; see
+    // `market/connector-install.ts` for why it is the loader and not a file.
+    case 'market.connectorInstall':
+      return {
+        ok: true,
+        value: await serialize(() => installConnector(
+          ctx, marketAccess(ctx, baseUrl), connectorRequestOf(payload), signal,
+        )),
+      }
+
+    case 'market.connectorUninstall':
+      return {
+        ok: true,
+        value: { removed: await serialize(() => uninstallConnector(ctx, slugOf(payload))) },
+      }
+
+    // The user's own servers, which live in a file they edit — WorkBuddy's shape
+    // for the same button. Two calls, and neither takes a command from the
+    // renderer: open the file, and re-read it.
+    case 'market.connectorCustomOpen':
+      return { ok: true, value: await openCustomFile(ctx) }
+
+    case 'market.connectorCustomSync':
+      return { ok: true, value: await serialize(() => syncCustomConnectors(ctx)) }
 
     // The opening questions one expert publishes. Separate from the catalog
     // because the manifest is a longtext column the snapshot withholds, and
@@ -453,6 +553,16 @@ async function marketInstall(
   payload: unknown,
   signal?: AbortSignal,
 ): ReturnType<ConnectionRpcHandler> {
+  const skillRequest = installRequestOf(payload)
+  // Skills do not go through the roster at all: they land in the kernel's user
+  // skill root, which is a watched directory rather than a service, so a
+  // deployment without `agentPresets` can still install one.
+  if (skillRequest?.type === 'skill') {
+    return {
+      ok: true,
+      value: await serialize(() => installSkill(ctx, access, skillRequest, signal)),
+    }
+  }
   const presets = ctx.get('agentPresets')
   if (presets === undefined) {
     const refused: InstallOutcome = {
@@ -476,6 +586,56 @@ async function marketInstall(
     }
   }
   return { ok: true, value: await serialize(() => installPreset(ctx, presets, access, request, signal)) }
+}
+
+/**
+ * Import a skill directory the user picked, off the wire.
+ *
+ * Serialized with the installs for the reason they are serialized with each
+ * other: both write into a skill root the kernel is watching, and two writers
+ * racing there is how a half-written directory becomes a live skill.
+ * @param ctx - host context.
+ * @param serialize - the channel's install queue.
+ * @param payload - the request body; `path` is the chosen directory.
+ * @param signal - caller cancellation.
+ * @returns the outcome; a bad pick is a refusal, not an error.
+ */
+async function marketSkillImport(
+  ctx: Context,
+  serialize: Serializer,
+  payload: unknown,
+  signal?: AbortSignal,
+): Promise<InstallOutcome> {
+  const path = (payload as { path?: unknown } | null)?.path
+  if (typeof path !== 'string' || path.trim() === '') {
+    return { kind: 'refused', reason: 'invalid-id', message: '没有拿到要导入的技能目录。' }
+  }
+  return await serialize(() => importLocalSkill(ctx, path.trim(), signal))
+}
+
+/**
+ * Read a connect request off the wire.
+ *
+ * The renderer names a catalog slug and, when the connector asks for one, a
+ * secret. It never names a command: what gets spawned is read from the console's
+ * manifest host-side, for the same reason the download URL is
+ * (`market/console.ts` — a main process that spawns what a renderer named is
+ * the same sink as one that fetches what a renderer named).
+ */
+function connectorRequestOf(payload: unknown): ConnectorRequest {
+  const row = (payload as Partial<ConnectorRequest> | null) ?? {}
+  return {
+    slug: typeof row.slug === 'string' ? row.slug.trim() : '',
+    ...typeof row.name === 'string' ? { name: row.name } : {},
+    ...typeof row.version === 'string' ? { version: row.version } : {},
+    ...typeof row.token === 'string' ? { token: row.token } : {},
+  }
+}
+
+/** Read a skill or connector slug off the wire, empty when the payload has none. */
+function slugOf(payload: unknown): string {
+  const value = (payload as { slug?: unknown } | null)?.slug
+  return typeof value === 'string' ? value.trim() : ''
 }
 
 /**
@@ -660,6 +820,13 @@ async function syncCatalog(
       if (outcome.delivery.defaultVideoModel !== undefined
         && outcome.delivery.defaultVideoModel !== modelDefaults.videoModel) {
         modelDefaults.videoModel = outcome.delivery.defaultVideoModel
+        defaultsChanged = true
+      }
+      // Search takes the list as it arrives, including empty: an operator who
+      // cleared the box means "go back to whatever the route can search with",
+      // and the provider reads that as no preference rather than as a refusal.
+      if (JSON.stringify(outcome.delivery.searchModels) !== JSON.stringify(modelDefaults.searchModels)) {
+        modelDefaults.searchModels = outcome.delivery.searchModels
         defaultsChanged = true
       }
     }

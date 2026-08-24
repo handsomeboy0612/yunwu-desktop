@@ -40,6 +40,7 @@
 
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
+import type { ReferenceInsert, TokenSpan } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 
 /** What one summon carries. */
 export interface SummonRequest {
@@ -65,7 +66,7 @@ interface ConversationFace {
 }
 
 /** The composer verbs reached from outside a slot component. */
-interface SessionComposer {
+export interface SessionComposer {
   /** The single draft write path (the machine mirrors it into the persisted chat store). */
   setDraft(text: string): void
   /**
@@ -74,7 +75,20 @@ interface SessionComposer {
    * path". The kernel's own notice carries either level (`InputNotice`).
    */
   notify(level: 'info' | 'error', text: string): void
-  readonly state: { getSnapshot(): { draft: string } }
+  /**
+   * Place one inline reference occurrence over a draft range — the verb behind
+   * the `@` completion's chips, which the file button uses to show an
+   * attachment as a chip instead of a path (`file-reference.ts`).
+   *
+   * The span is compared against the live `draftRev` before anything is
+   * written, and `false` means exactly that check failed: the draft moved under
+   * us and nothing happened.
+   * @param reference - the occurrence's owner, id, and display projections.
+   * @param span - the range to replace, stamped with the revision it was read at.
+   * @returns whether the machine applied it.
+   */
+  insertReference(reference: ReferenceInsert, span: TokenSpan): boolean
+  readonly state: { getSnapshot(): { draft: string; draftRev: number } }
 }
 
 /**

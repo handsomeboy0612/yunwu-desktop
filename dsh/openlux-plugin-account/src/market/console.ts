@@ -144,6 +144,73 @@ export async function readExpertManifest(
 }
 
 /**
+ * One connector's MCP configuration, as the console stores it.
+ *
+ * The console does not validate this at all — it is a `longtext` column copied
+ * verbatim from the admin form, checked only for being non-empty at publish
+ * time (`controller/desktop_market_admin.go`). So every field is treated as
+ * unknown here, and the shape is asserted where it is used.
+ *
+ * The field names are the old shell's, because the rows in the database were
+ * written for it (`src/shared/types.ts`, `ConnectorManifest`): `server` is the
+ * object that used to be handed to `openclaw mcp set`, which is why it is
+ * stdio's `command`/`args`/`env`/`cwd` or http's `url`/`transport`/`headers`.
+ */
+export interface ConnectorManifest {
+  /** MCP namespace; becomes `serverName` for the bridge. */
+  readonly mcpName: string
+  readonly server: Readonly<Record<string, unknown>>
+  readonly auth?: {
+    readonly mode?: string
+    readonly inject?: string
+    readonly key?: string
+    readonly prefix?: string
+    readonly label?: string
+  }
+}
+
+/**
+ * Read one connector's manifest.
+ *
+ * Unlike an expert's, an unreadable one is fatal to the connect: the manifest
+ * *is* the connector — there is no artifact behind it (the seed writes these
+ * rows with a nil archive, `service/desktop_market/seed.go`).
+ * @param ctx - host context.
+ * @param access - console origin and token reader.
+ * @param slug - the connector.
+ * @param signal - caller cancellation.
+ * @returns the manifest, with its own fields unvalidated.
+ * @throws ConsoleError when the row, the JSON, or the two required fields are missing.
+ */
+export async function readConnectorManifest(
+  ctx: Context,
+  access: ConsoleAccess,
+  slug: string,
+  signal?: AbortSignal,
+): Promise<ConnectorManifest> {
+  const item = await read<{ manifest?: unknown }>(
+    ctx, access, `items/connector/${encodeURIComponent(slug)}`, 'GET', signal,
+  )
+  let parsed: unknown
+  try {
+    parsed = typeof item.manifest === 'string' ? JSON.parse(item.manifest) : item.manifest
+  } catch {
+    throw new ConsoleError(`连接器 ${slug} 的 MCP 配置不是合法 JSON。`)
+  }
+  const row = parsed as Partial<ConnectorManifest> | null
+  const mcpName = typeof row?.mcpName === 'string' ? row.mcpName.trim() : ''
+  if (mcpName === '') throw new ConsoleError(`连接器 ${slug} 的配置里没有 mcpName。`)
+  if (typeof row?.server !== 'object' || row.server === null || Array.isArray(row.server)) {
+    throw new ConsoleError(`连接器 ${slug} 的配置里没有 server。`)
+  }
+  return {
+    mcpName,
+    server: row.server,
+    ...typeof row.auth === 'object' && row.auth !== null ? { auth: row.auth } : {},
+  }
+}
+
+/**
  * Flatten console-supplied text into a deduplicated list of non-empty strings.
  * @param raw - a string, or a nested array of them (anything else is dropped).
  * @param limit - how many to keep.

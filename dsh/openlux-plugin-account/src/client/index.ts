@@ -37,6 +37,9 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
 // Type-only: the rail's two types, for the face the file button is handed.
 import type { ComposerAttachment, DraftAttachmentId } from '@deepseek-ai/dsh-client-ui-conversation/client'
+// Type-only: merges the trigger registry's `ctx.inputTriggers`, which owns the
+// file-reference source registered below.
+import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import { ACCOUNT_SECTION_ID, ACCOUNT_SECTION_ORDER, AccountSection } from './AccountSection.tsx'
 import type { AccountSectionInjected } from './AccountSection.tsx'
 import { ACCOUNT_TRIGGER_PRIORITY, AccountTrigger } from './AccountTrigger.tsx'
@@ -55,11 +58,21 @@ import { MARKET_LAUNCHER_ID, MARKET_LAUNCHER_ORDER, MarketLauncher } from './Mar
 import { MARKET_OVERLAY_ID, MARKET_OVERLAY_ORDER, MarketOverlay } from './MarketOverlay.tsx'
 import type { MarketOverlayInjected } from './MarketOverlay.tsx'
 import { createMarketViewStore } from './market-view-store.ts'
+import {
+  HiddenPresetRow, HiddenPresetSection, PRESET_ROW_ID, PRESET_ROW_ORDER, PRESET_ROW_PRIORITY,
+  PRESET_SECTION_ID, PRESET_SECTION_ORDER, PRESET_SECTION_PRIORITY,
+} from './HiddenPresetSeats.tsx'
+import { PRESET_CHIP_PRIORITY, PresetChip } from './PresetChip.tsx'
+import type { PresetChipInjected } from './PresetChip.tsx'
+import { PRESET_SETTINGS_NS, PresetRoster } from './preset-roster.ts'
 import { modelChoice, watchModelChoice } from './selection.ts'
 import { SIGN_IN_ORDER, SIGN_IN_STEP_ID, SignInStep } from './SignInStep.tsx'
 import type { SignInStepInjected } from './SignInStep.tsx'
 import { AccountStore } from './store.ts'
 import { composerFor, SummonController, type SummonRequest } from './summon.ts'
+import { appendFileReference, fileReferenceSource } from './file-reference.ts'
+import { installFileChipStyle } from './file-chip-style.ts'
+import { installFooterRowStyle } from './footer-row-style.ts'
 
 export { ACCOUNT_SECTION_ID, AccountSection } from './AccountSection.tsx'
 export type { AccountSectionInjected } from './AccountSection.tsx'
@@ -179,12 +192,37 @@ export function apply(ctx: ClientContext): void {
   // the button's own label — the strip is the louder of the two, not the only one.
   let notice: ((sessionId: SessionId, level: 'info' | 'error', text: string) => void) | undefined
 
+  // The chip verb rides along on the same scope, because it is the same face:
+  // an attachment shows up as one inline reference over the draft rather than a
+  // path in prose (`file-reference.ts`). Unfilled, the button writes the path
+  // as it always did — which is also what a failed CAS falls back to, so the
+  // two paths are the same code either way.
+  let attach: ((sessionId: SessionId, path: string) => boolean) | undefined
+
   ctx.inject(['sessions'], (scope: ClientContext) => {
     scope.effect(() => {
       notice = (sessionId, level, text) => { composerFor(scope, sessionId)?.notify(level, text) }
-      return () => { notice = undefined }
+      attach = (sessionId, path) => appendFileReference(composerFor(scope, sessionId), path)
+      return () => {
+        notice = undefined
+        attach = undefined
+      }
     }, 'openlux-files: composer notices')
   })
+
+  // Serialization owner for those chips: at submit time each occurrence's range
+  // is replaced by *its own source's* model form, and an occurrence whose source
+  // is not registered blocks the send instead of degrading
+  // (`ui-input-trigger`'s `serializeReference`). So this registration is not
+  // decoration — it is what turns `@deck_342.pptx` back into the absolute path
+  // the model can open.
+  ctx.inject(['inputTriggers'], (scope: ClientContext) => {
+    scope.effect(() => scope.inputTriggers.registerSource(fileReferenceSource), 'openlux-files: file reference source')
+  })
+
+  // And the pill they are drawn as. Attribute selectors over the mirror layer,
+  // which is all that layer can carry (`file-chip-style.ts` measures why).
+  ctx.effect(() => installFileChipStyle(), 'openlux-files: file chip style')
 
   // The rail's pictures, reached the same way: `conversation` is the root
   // singleton that owns the draft-image registry, and the input state carries
@@ -250,6 +288,7 @@ export function apply(ctx: ClientContext): void {
     inject: (sessionId): AttachFileInjected => ({
       callHost,
       notify: (level, text) => { notice?.(sessionId, level, text) },
+      reference: path => attach?.(sessionId, path) ?? false,
       selection: () => modelChoice(ctx, sessionId),
       watchSelection: listener => watchModelChoice(ctx, sessionId, listener),
       railImages: ids => rail?.draftImages(ids) ?? [],
@@ -257,7 +296,75 @@ export function apply(ctx: ClientContext): void {
     }),
   }, AttachFileButton))
 
+  // The hero's preset seat. The kernel's own occupant is a dropdown of every
+  // composition the deployment has, which puts `标准模式` / `PTC模式` /
+  // `创造模式` in front of the user as if they were a question; those three are
+  // how this product is assembled. So this registration takes the seat at a
+  // lower priority — the kernel's documented override knob for an occupied
+  // single slot, the same one the account row uses — and draws WorkBuddy's
+  // shape instead: nothing at all on the default, one dismissible chip when a
+  // summoned expert is running (`PresetChip.tsx` cites both sides).
+  const roster = new PresetRoster(connection)
+
+  // The roster's default can move under us — writing it is a settings write, not
+  // a preset call, so nothing in the roster RPC reports it. The chip's whole rule
+  // is «say nothing on the default», so a stale default makes it name a preset
+  // the user is already on. The kernel's own seat solves this by listening to the
+  // host's settings broadcast for exactly this namespace, and this is that same
+  // subscription (`ui-agent-preset`: `remote.$on('settings/document-updated')`
+  // filtered to `agent-presets`, then `seat.load()`).
+  ctx.inject(['remote'], (scope: ClientContext) => {
+    scope.effect(
+      () => scope.remote.$on('settings/document-updated', ns => {
+        if (ns !== PRESET_SETTINGS_NS) return
+        void roster.load()
+      }),
+      'openlux-market: roster follows the default',
+    )
+  })
+
+  ctx.slots.inject('conversation.hero.agentPreset', () => ctx.slots.register({
+    name: 'conversation.hero.agentPreset',
+    priority: PRESET_CHIP_PRIORITY,
+    locale: MARKET_NS,
+    inject: (): PresetChipInjected => ({
+      hooks: { presetRoster: roster },
+      read: () => { void roster.load() },
+      clear: (sessionId) => { void backToDefault(sessionId) },
+    }),
+  }, PresetChip))
+
+  /**
+   * Take one session off its expert and back onto the default composition.
+   * @param sessionId - the session the chip was drawn for.
+   * @returns once the switch settled, or its refusal reached the composer.
+   */
+  async function backToDefault(sessionId: SessionId): Promise<void> {
+    const refused = await roster.clear(sessionId)
+    // The kernel refuses a session that has already run a turn. The chip only
+    // exists on the new-session screen, so this is a race (a turn started while
+    // the pointer was travelling) rather than a shape the user can aim at.
+    if (refused !== undefined) notice?.(sessionId, 'error', refused)
+  }
+
   const marketView = createMarketViewStore()
+
+  // The two settings seats that exposed Agent presets, taken and left blank —
+  // no page, no nav row, no way to change the default. `HiddenPresetSeats.tsx`
+  // carries the reasoning; publishing no `label` is what keeps the nav quiet.
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: PRESET_SECTION_ID,
+    order: PRESET_SECTION_ORDER,
+    priority: PRESET_SECTION_PRIORITY,
+  }, HiddenPresetSection))
+  ctx.slots.inject('settings.general.item', () => ctx.slots.register({
+    name: 'settings.general.item',
+    id: PRESET_ROW_ID,
+    order: PRESET_ROW_ORDER,
+    priority: PRESET_ROW_PRIORITY,
+  }, HiddenPresetRow))
+
   const marketFace = (): MarketOverlayInjected => ({
     callHost,
     language: () => (ctx.locale.getSnapshot().active === 'en' ? 'en' : 'zh'),
@@ -272,6 +379,10 @@ export function apply(ctx: ClientContext): void {
     locale: MARKET_NS,
     store: marketView,
   }, MarketLauncher))
+
+  // The foot is a single nowrap row upstream, and the cordis dock joins it
+  // whenever a session registers a plugin — which an authoring session does.
+  ctx.effect(() => installFooterRowStyle(), 'openlux-market: footer row')
 
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',

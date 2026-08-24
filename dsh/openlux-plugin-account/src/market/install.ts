@@ -74,7 +74,7 @@ export type {
  * same reason. Kept verbatim from `lib/index.js:101`; step 5 is what notices if
  * it ever drifts.
  */
-const PRESET_ID = /^[a-z0-9][a-z0-9-]*$/
+export const PRESET_ID = /^[a-z0-9][a-z0-9-]*$/
 
 /**
  * The directory installs are written to, derived as the kernel derives it.
@@ -130,10 +130,10 @@ export const PROVENANCE_FILE = 'openlux-market.json'
  * The previous 8 MB refused exactly that one skill, which is why
  * `humanize-ppt-team` installed with four of its five skills.
  */
-const MAX_DOWNLOAD_BYTES = 24 * 1024 * 1024
+export const MAX_DOWNLOAD_BYTES = 24 * 1024 * 1024
 
 /** Longer than an account call: this is a file transfer, not a form post. */
-const DOWNLOAD_TIMEOUT_MS = 60_000
+export const DOWNLOAD_TIMEOUT_MS = 60_000
 
 /** What an installed preset came from, as recorded next to its composition. */
 export interface MarketProvenance {
@@ -200,6 +200,10 @@ async function describe(presets: AgentPresets, root: string | undefined): Promis
     return {
       id: preset.id,
       trust: preset.trust,
+      // The roster reads `preset.yml` itself, so display text costs nothing
+      // here and spares the gallery a catalog lookup it cannot always make.
+      ...preset.name === undefined ? {} : { name: preset.name },
+      ...preset.description === undefined ? {} : { description: preset.description },
       ...preset.broken === undefined ? {} : { broken: preset.broken },
       ...provenance?.itemId === undefined ? {} : { itemId: provenance.itemId },
       ...provenance?.version === undefined ? {} : { version: provenance.version },
@@ -575,7 +579,7 @@ function assertNoProvenance(entries: readonly ArchiveEntry[]): void {
  * @param entries - members from {@link readTarGz}, whose paths are relative.
  * @param destination - the staging directory, created here.
  */
-async function writeEntries(entries: readonly ArchiveEntry[], destination: string): Promise<void> {
+export async function writeEntries(entries: readonly ArchiveEntry[], destination: string): Promise<void> {
   await mkdir(destination, { recursive: true })
   for (const entry of entries) {
     const target = join(destination, entry.path)

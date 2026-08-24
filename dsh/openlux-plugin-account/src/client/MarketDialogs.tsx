@@ -15,8 +15,8 @@
  */
 
 import type { CSSProperties, ReactNode } from 'react'
-import { Button, Modal, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { CatalogItem, InstallOutcome } from '../market/wire.ts'
+import { Button, Input, Modal, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { CatalogItem, CustomConnectorSync, CustomOpen, InstallOutcome } from '../market/wire.ts'
 import { describe } from './MarketCard.tsx'
 import type { MarketKey } from './market-locales.ts'
 
@@ -222,10 +222,185 @@ export function MarketConfirm(props: MarketConfirmProps): ReactNode {
   )
 }
 
+/** Which sentence a success gets; the three partitions land in three places. */
+function installedBodyKey(partition: 'expert' | 'skill' | 'connector'): MarketKey {
+  if (partition === 'skill') return 'installedSkillBody'
+  return partition === 'connector' ? 'connectedBody' : 'installedBody'
+}
+
+/** What the token dialog needs. */
+export interface ConnectorTokenProps {
+  /** The connector being connected, absent when the dialog is closed. */
+  readonly item: CatalogItem | undefined
+  /** What the manifest calls the secret, when it says. */
+  readonly label?: string
+  readonly value: string
+  readonly busy: boolean
+  readonly t: T
+  readonly onChange: (value: string) => void
+  readonly onCancel: () => void
+  readonly onConfirm: () => void
+}
+
+/**
+ * Collect the one secret a connector needs.
+ *
+ * A dialog rather than a field on the card, for the reason the install
+ * confirmation is a dialog: this is the moment the user hands over a credential,
+ * and it says which connector is about to receive it and where it is kept. The
+ * value is `password`-typed and never echoed back by the host.
+ * @param props - the connector, the field, and the two actions.
+ * @returns the dialog, or null when nothing is being connected.
+ */
+export function ConnectorToken(props: ConnectorTokenProps): ReactNode {
+  const { item, label, value, busy, t, onChange, onCancel, onConfirm } = props
+  if (item === undefined) return null
+
+  return (
+    <Modal
+      open
+      onClose={onCancel}
+      title={t('connectorTokenTitle')}
+      closeLabel={t('connectorTokenCancel')}
+      footer={(
+        <div style={styles.footer}>
+          <Button variant="ghost" disabled={busy} onClick={onCancel}>
+            {t('connectorTokenCancel')}
+          </Button>
+          <Button
+            variant="primary"
+            disabled={busy || value.trim() === ''}
+            data-testid="openlux-market-token-confirm"
+            onClick={onConfirm}
+          >
+            {busy ? t('connecting') : t('connectorTokenConfirm')}
+          </Button>
+        </div>
+      )}
+    >
+      <div style={styles.body}>
+        <span style={styles.note}>{t('connectorTokenBody', { name: item.name })}</span>
+        <Input
+          value={value}
+          type="password"
+          autoFocus
+          placeholder={label ?? t('connectorTokenLabel')}
+          data-testid="openlux-market-token-input"
+          onChange={event => onChange(event.target.value)}
+          onKeyDown={event => {
+            if (event.key === 'Enter' && value.trim() !== '' && !busy) onConfirm()
+          }}
+        />
+      </div>
+    </Modal>
+  )
+}
+
+/** What the custom-connector panel needs. */
+export interface CustomConnectorProps {
+  readonly open: boolean
+  /** The last re-read, absent until one has happened. */
+  readonly sync?: CustomConnectorSync
+  readonly busy: boolean
+  /** What the OS did with the file, absent until the opener was pressed. */
+  readonly handoff?: CustomOpen['did']
+  readonly t: T
+  readonly onOpenFile: () => void
+  readonly onReload: () => void
+  readonly onClose: () => void
+}
+
+/**
+ * The user's own MCP servers.
+ *
+ * Two buttons and a list of complaints, because the servers themselves are
+ * managed in a file the user edits — WorkBuddy's «自定义连接器» opens the MCP
+ * config in its host editor and shows no cards for what is in it either. What
+ * this adds over the bare file is the part a text editor cannot tell you:
+ * whether what you wrote actually started, and what it said if it did not.
+ * @param props - the last re-read and the three actions.
+ * @returns the dialog, or null while closed.
+ */
+export function CustomConnector(props: CustomConnectorProps): ReactNode {
+  const { open, sync, busy, handoff, t, onOpenFile, onReload, onClose } = props
+  if (!open) return null
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={t('customTitle')}
+      closeLabel={t('closeMarket')}
+      footer={(
+        <div style={styles.footer}>
+          <Button
+            variant="ghost"
+            disabled={busy}
+            data-testid="openlux-market-custom-open"
+            onClick={onOpenFile}
+          >
+            {t('customOpen')}
+          </Button>
+          <Button
+            variant="primary"
+            disabled={busy}
+            data-testid="openlux-market-custom-reload"
+            onClick={onReload}
+          >
+            {busy ? t('customReloading') : t('customReload')}
+          </Button>
+        </div>
+      )}
+    >
+      <div style={styles.body}>
+        <span style={styles.note}>{t('customBody')}</span>
+        {/*
+          The path is always worth showing — it is what the user needs whatever
+          the OS did — but the two lesser outcomes each need a sentence, or the
+          button looks like it did nothing. Revealed is not a failure, so it is
+          not coloured like one.
+        */}
+        {handoff === 'revealed' && (
+          <span style={styles.note} data-testid="openlux-market-custom-revealed">
+            {t('customOpenRevealed')}
+          </span>
+        )}
+        {handoff === 'nothing' && (
+          <span style={styles.refusal} data-testid="openlux-market-custom-openfailed">
+            {t('customOpenFailed')}
+          </span>
+        )}
+        {(handoff !== undefined || sync !== undefined) && (
+          <span style={styles.path} data-testid="openlux-market-custom-path">
+            {sync?.path ?? ''}
+          </span>
+        )}
+        {sync !== undefined && (
+          <span style={styles.note} data-testid="openlux-market-custom-live">
+            {t('customLive', { count: sync.live })}
+          </span>
+        )}
+        {sync?.problems.map(problem => (
+          <span key={problem} style={styles.refusal} data-testid="openlux-market-custom-problem">
+            {problem}
+          </span>
+        ))}
+      </div>
+    </Modal>
+  )
+}
+
 /** What the outcome dialog needs. */
 export interface MarketOutcomeProps {
   readonly item: CatalogItem | undefined
   readonly outcome: InstallOutcome | undefined
+  /**
+   * Which partition installed, because "where it went and what to do next" is
+   * the whole content of a success and the two answers differ: a preset is
+   * picked when starting a session and managed on the kernel's own page, while a
+   * skill is loaded by the model on its own and lives in a watched directory.
+   */
+  readonly partition?: 'expert' | 'skill' | 'connector'
   readonly t: T
   readonly onClose: () => void
 }
@@ -236,7 +411,7 @@ export interface MarketOutcomeProps {
  * @returns the dialog, or null when there is nothing to report.
  */
 export function MarketOutcome(props: MarketOutcomeProps): ReactNode {
-  const { item, outcome, t, onClose } = props
+  const { item, outcome, partition = 'expert', t, onClose } = props
   if (item === undefined || outcome === undefined) return null
   const refused = outcome.kind === 'refused'
 
@@ -244,7 +419,9 @@ export function MarketOutcome(props: MarketOutcomeProps): ReactNode {
     <Modal
       open
       onClose={onClose}
-      title={refused ? t('refusedTitle') : t('installedTitle')}
+      title={refused
+        ? t('refusedTitle')
+        : t(partition === 'connector' ? 'connectedTitle' : 'installedTitle')}
       closeLabel={t('installedDone')}
       footer={(
         <div style={styles.footer}>
@@ -257,7 +434,9 @@ export function MarketOutcome(props: MarketOutcomeProps): ReactNode {
       <div style={styles.body} data-testid="openlux-market-outcome">
         {outcome.kind === 'installed' && (
           <>
-            <span style={styles.note}>{t('installedBody', { name: item.name, path: outcome.path })}</span>
+            <span style={styles.note}>
+              {t(installedBodyKey(partition), { name: item.name, path: outcome.path })}
+            </span>
             {/* Named only when some skill did not come down: a partial install is
                 still an install, and the persona will keep advertising the skill
                 that is missing, so the gap has to be visible here rather than

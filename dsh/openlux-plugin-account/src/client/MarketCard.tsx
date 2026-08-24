@@ -51,6 +51,31 @@ export interface MarketCardProps {
    * the whole of what this surface can do, and a done row is done.
    */
   readonly summonable: boolean
+  /**
+   * Undo the install, when this partition has an undo.
+   *
+   * Presets do not: the kernel's own Agent-presets page owns their lifecycle,
+   * and a second remover would be a second answer to "what is installed". A
+   * skill has no such page — it is a directory the kernel watches — so the only
+   * place that can offer removal is the surface that put it there.
+   */
+  readonly onRemove?: () => void
+  readonly removeLabel?: string
+  /**
+   * What the four states are called, when this partition does not call them
+   * install / installing / installed / broken.
+   *
+   * A connector is connected, not installed, and its unhealthy state is "did not
+   * connect on this launch" rather than "the kernel cannot load it". Passing the
+   * words in keeps one card shape for all three partitions without the card
+   * having to know which one it is drawing.
+   */
+  readonly words?: {
+    readonly primary: string
+    readonly busy: string
+    readonly done: string
+    readonly unhealthy: string
+  }
 }
 
 const styles = {
@@ -118,14 +143,14 @@ export function describe(item: CatalogItem, language: 'zh' | 'en'): string {
  * @returns the card.
  */
 export function MarketCard(
-  { item, state, language, t, onOpen, onPrimary, summonable }: MarketCardProps,
+  { item, state, language, t, onOpen, onPrimary, summonable, onRemove, removeLabel, words }: MarketCardProps,
 ): ReactNode {
   const [imageFailed, setImageFailed] = useState(false)
   const remote = item.icon.startsWith('http://') || item.icon.startsWith('https://')
   // One label for both halves of the flow: with a conversation to land in, an
   // uninstalled row installs on the way to the session, so saying "install"
   // would name the step instead of the outcome.
-  const label = summonable ? t('summon') : t('install')
+  const label = words?.primary ?? (summonable ? t('summon') : t('install'))
   const healthy = state.kind === 'installed' && state.broken === undefined
   const busy = state.kind === 'installing'
 
@@ -173,13 +198,13 @@ export function MarketCard(
       <div style={styles.foot}>
         <span style={styles.downloads}>
           {healthy
-            ? t('installed')
+            ? words?.done ?? t('installed')
             : (item.downloads > 0 ? t('downloads', { count: item.downloads }) : '')}
         </span>
 
         {state.kind === 'installed' && state.broken !== undefined && (
           <Tooltip label={state.broken} side="top">
-            <span style={styles.broken}>{t('brokenInstalled')}</span>
+            <span style={styles.broken}>{words?.unhealthy ?? t('brokenInstalled')}</span>
           </Tooltip>
         )}
 
@@ -187,6 +212,25 @@ export function MarketCard(
           <Tooltip label={state.reason} side="top">
             <span style={styles.installed}>{label}</span>
           </Tooltip>
+        )}
+
+        {/*
+          An unhealthy row keeps its undo. That is the case where undo matters
+          most: a connector whose command is gone did not connect this launch,
+          and the only way out of the list must not be editing a file.
+        */}
+        {state.kind === 'installed' && onRemove !== undefined && removeLabel !== undefined && (
+          <Button
+            variant="ghost"
+            size="sm"
+            data-testid={`openlux-market-remove-${item.slug}`}
+            onClick={event => {
+              event.stopPropagation()
+              onRemove()
+            }}
+          >
+            {removeLabel}
+          </Button>
         )}
 
         {(state.kind === 'ready' || busy || (healthy && summonable)) && (
@@ -202,7 +246,7 @@ export function MarketCard(
               onPrimary()
             }}
           >
-            {busy ? t('preparing') : label}
+            {busy ? words?.busy ?? t('preparing') : label}
           </Button>
         )}
       </div>

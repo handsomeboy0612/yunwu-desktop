@@ -1,5 +1,5 @@
 /**
- * The composer's file button: any file in, a path into the draft.
+ * The composer's file button: any file in, a chip in the draft.
  *
  * ## Why the composer needed one at all
  *
@@ -27,9 +27,14 @@
  * second arm only: it exists because the bytes travel, and a referenced file
  * does not travel.
  *
- * The path goes in as inline code because that is how a path reads in prose,
- * and because the persona already tells the model that a path in the user's
- * message is a local file it may open (`persona/tool-reality.ts`).
+ * What the *model* receives is that path as inline code, because that is how a
+ * path reads in prose and because the persona already tells the model that a
+ * path in the user's message is a local file it may open
+ * (`persona/tool-reality.ts`). What the *user* sees is a chip carrying the
+ * file's name — the composer's own reference form, minted through the same
+ * verb the `@` completion uses, with the path restored at submit time by our
+ * codec (`client/file-reference.ts`). Three attachments used to fill three
+ * lines with `D:\work\…` and push the question out of the box.
  *
  * ## Why the button owns the whole gesture
  *
@@ -100,6 +105,7 @@ import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-cli
 import type { ComposerAttachment, DraftAttachmentId } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { FILE_STAGE_ENDPOINT, FILE_VISION_ENDPOINT, MAX_STAGED_BYTES } from '../files/name.ts'
 import { diskPathOf } from './file-path-bridge.ts'
+import { fileReferenceText } from './file-reference.ts'
 import type { AccountHostCaller } from './types.ts'
 
 /** Slot id; also the DOM marker. */
@@ -154,6 +160,16 @@ export interface AttachFileInjected {
    * they have to go hunting for is indistinguishable from silence.
    */
   notify: (level: 'info' | 'error', text: string) => void
+  /**
+   * Put one staged file into this session's draft as a reference chip.
+   *
+   * `false` only when the composer face was never filled — a composition
+   * without the session services — in which case the path goes in as the text it
+   * always was. A chip that cannot be placed *inside* that face already falls
+   * back there itself (`client/file-reference.ts`), because that arm can read
+   * the live draft and this one cannot.
+   */
+  reference: (path: string) => boolean
   /**
    * This session's current model selection, or undefined when nothing has
    * loaded it yet.
@@ -221,19 +237,20 @@ function sizeText(bytes: number): string {
 }
 
 /**
- * Append one path to a draft.
+ * Append one path to a draft, for a composition that cannot mint chips.
  *
  * A path is its own line: the user's question and a file reference are two
  * different thoughts, and a path that wraps into prose stops looking like a
- * path.
+ * path. Same string the chip serializes to, so what the model reads does not
+ * depend on which arm ran.
  * @param draft - the current draft.
  * @param path - the staged file's absolute path.
  * @returns the next draft.
  */
 function withPath(draft: string, path: string): string {
-  const reference = `\`${path}\``
-  if (draft === '') return reference
-  return draft.endsWith('\n') ? `${draft}${reference}` : `${draft}\n${reference}`
+  const text = fileReferenceText(path)
+  if (draft === '') return text
+  return draft.endsWith('\n') ? `${draft}${text}` : `${draft}\n${text}`
 }
 
 /**
@@ -246,7 +263,7 @@ export function AttachFileButton(
     & PropsLocale<'openlux.files'>
     & InjectFace<AttachFileInjected>,
 ): ReactNode {
-  const { input, inputActions, callHost, notify, selection, watchSelection, railImages, releaseRailImage, t } = props
+  const { input, inputActions, callHost, notify, reference, selection, watchSelection, railImages, releaseRailImage, t } = props
   const picker = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
   const [problem, setProblem] = useState<string | null>(null)
@@ -287,14 +304,26 @@ export function AttachFileButton(
       notify('error', text)
     }
     // The draft is a point-in-time snapshot off the owner share, so the running
-    // value is threaded through this loop rather than re-read per file.
+    // value is threaded through this loop rather than re-read per file. Only the
+    // text arm needs it, and that arm is all-or-nothing per composition — a
+    // missing composer face means no chip ever lands — so the two can never
+    // interleave and leave this stale.
     let draft = draftAt.current
+    /**
+     * Put one path in front of the user, in whichever form this composition can
+     * carry.
+     * @param path - the staged file's absolute path.
+     */
+    const place = (path: string): void => {
+      if (reference(path)) return
+      draft = withPath(draft, path)
+      inputActions.setDraft(draft)
+    }
     const staged: File[] = []
     for (const file of files) {
       const onDisk = diskPathOf(file)
       if (onDisk !== undefined) {
-        draft = withPath(draft, onDisk)
-        inputActions.setDraft(draft)
+        place(onDisk)
         staged.push(file)
         continue
       }
@@ -320,8 +349,7 @@ export function AttachFileButton(
         refuse(t('unreadable'))
         continue
       }
-      draft = withPath(draft, result.value.path)
-      inputActions.setDraft(draft)
+      place(result.value.path)
       staged.push(file)
     }
     return staged

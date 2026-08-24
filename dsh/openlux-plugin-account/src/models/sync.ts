@@ -21,9 +21,21 @@
  * ({@link ./profiles.ts}) — the layer this shell was missing, and the reason
  * `deepseek-v4-flash` was written as text-only while it reads images fine.
  *
- * Two neighbouring sections are written from the same snapshot: the search
- * chain, and the install default ({@link applyDefaultModel} — narrowly, because
- * that one belongs to the user).
+ * One neighbouring section is written from the same snapshot: the install
+ * default ({@link applyDefaultModel} — narrowly, because that one belongs to the
+ * user).
+ *
+ * The search chain used to be written here too, into `web-search-deepseek`'s
+ * `models`. That was a dead write: the section's schema carries a singular
+ * `model` and nothing in that package ever reads a list
+ * (`dsh-web-search-deepseek/lib/index.js:239-247`), so the console's priority
+ * list sat in the settings file and every search ran on the composition's pinned
+ * model. The list now reaches its consumer directly — the delivered snapshot is
+ * handed to our own search provider (`web/search/provider.ts`), which is what
+ * finally honours the ordering and the degradation the console page promises. An
+ * inert `models` key left in a settings file by an older build is harmless and
+ * is not migrated away: the schema ignores unknown keys, and rewriting another
+ * plugin's section to tidy up would be a worse trade than the litter.
  *
  * **A round that cannot read the console changes nothing about membership.** An
  * unreachable console means the delivered list is *unknown*, not empty, and
@@ -49,7 +61,6 @@ import { fetchModelOverrides, type ModelOverrides } from './profiles.ts'
  * settings document", `bundle/base/cordis.patch.yml`).
  */
 const PI_AI_NS = settingsNamespace('llm-pi-ai')
-const SEARCH_NS = settingsNamespace('web-search-deepseek')
 /**
  * The section deciding which model a new session starts on.
  *
@@ -117,21 +128,6 @@ interface SettingsLike {
   get(ns: typeof PI_AI_NS): unknown
   describe(options?: { redactSecrets?: boolean }): readonly { ns: string; user?: unknown }[]
   mutate(ns: typeof PI_AI_NS, ops: readonly SettingsOp[]): Promise<void>
-}
-
-function stringList(value: unknown): readonly string[] {
-  return Array.isArray(value) ? value.filter(item => typeof item === 'string') as string[] : []
-}
-
-async function applySearchDelivery(
-  settings: SettingsLike,
-  delivery: DeliveredModelConfig | undefined,
-): Promise<boolean> {
-  if (delivery?.configured !== true || delivery.searchModels.length === 0) return false
-  const current = stringList((settings.get(SEARCH_NS) as { readonly models?: unknown } | undefined)?.models)
-  if (JSON.stringify(current) === JSON.stringify(delivery.searchModels)) return false
-  await settings.mutate(SEARCH_NS, [{ op: 'set', path: ['models'], value: [...delivery.searchModels] }])
-  return true
 }
 
 /** The two fields of the default-model section this module reads. */
@@ -347,14 +343,6 @@ export async function syncModels(
     }
   }
 
-  let searchChanged = false
-  try {
-    searchChanged = await applySearchDelivery(settings, delivery)
-  } catch (error: unknown) {
-    // Search is another settings namespace. A malformed/late-mounted section
-    // must not prevent the chat list and media defaults from applying.
-    ctx.logger.warn(`openlux: search model delivery could not be applied (${error instanceof Error ? error.message : String(error)})`)
-  }
   const reportedDelivery = delivery === undefined ? {} : { delivery }
 
   let ids: readonly string[] | undefined
@@ -375,7 +363,7 @@ export async function syncModels(
 
   if (ids === undefined && written.length === 0) {
     return {
-      changed: searchChanged,
+      changed: false,
       skipped: hasKey ? 'no-pool' : 'no-key',
       ...reportedDelivery,
     }
@@ -399,7 +387,7 @@ export async function syncModels(
   // the case the console list above answers outright: it names the models and
   // carries their category, so no column has to be guessed from.
   if (membership.length === 0) {
-    return { changed: searchChanged, skipped: 'empty-result', ...reportedDelivery }
+    return { changed: false, skipped: 'empty-result', ...reportedDelivery }
   }
 
   const next = membership.map(entry => described(entry, overrides))
@@ -412,8 +400,8 @@ export async function syncModels(
     await settings.mutate(PI_AI_NS, [{ op: 'set', path: ['providers', ROUTE, 'models'], value: next }])
   }
   // After the list is written, so the seed can only name a row that is in it,
-  // and caught like the search section: another namespace failing must not undo
-  // a list this round already applied.
+  // and caught rather than thrown: another namespace failing must not undo a
+  // list this round already applied.
   let defaultChanged = false
   try {
     defaultChanged = await applyDefaultModel(settings, delivery, next)
@@ -422,7 +410,7 @@ export async function syncModels(
   }
   if (!listChanged) {
     return {
-      changed: searchChanged || defaultChanged,
+      changed: defaultChanged,
       skipped: 'unchanged',
       models: next.length,
       ...reported,

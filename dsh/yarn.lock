@@ -1473,7 +1473,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@deepseek-ai/dsh-client-ui-agent-preset@npm:0.1.1-rc.2":
+"@deepseek-ai/dsh-client-ui-agent-preset@npm:^0.1.1-rc.2":
   version: 0.1.1-rc.2
   resolution: "@deepseek-ai/dsh-client-ui-agent-preset@npm:0.1.1-rc.2"
   peerDependencies:
@@ -1486,22 +1486,6 @@ __metadata:
     "@deepseek-ai/dsh-client-ui-settings": ^0.1.1-rc.2
     "@deepseek-ai/dsh-invariants": ^0.1.1-rc.2
   checksum: 10c0/f7b1ff143ccf602acd083ac444248ea3de062f2b21b53f922eb74b86daf6cf8568a9b63ec4ef14883ea3f95f5e46591fdf0f632da9b1d355f07a5a592dbfb215
-  languageName: node
-  linkType: hard
-
-"@deepseek-ai/dsh-client-ui-agent-preset@patch:@deepseek-ai/dsh-client-ui-agent-preset@npm%3A0.1.1-rc.2#./patches/dsh-client-ui-agent-preset@0.1.1-rc.2.patch::locator=deepseek-harness-desktop%40workspace%3A.":
-  version: 0.1.1-rc.2
-  resolution: "@deepseek-ai/dsh-client-ui-agent-preset@patch:@deepseek-ai/dsh-client-ui-agent-preset@npm%3A0.1.1-rc.2#./patches/dsh-client-ui-agent-preset@0.1.1-rc.2.patch::version=0.1.1-rc.2&hash=ef47ce&locator=deepseek-harness-desktop%40workspace%3A."
-  peerDependencies:
-    "@deepseek-ai/cordis": ^4.0.1
-    "@deepseek-ai/dsh-api-remotes": ^0.1.1-rc.2
-    "@deepseek-ai/dsh-client-connection": ^0.1.1-rc.2
-    "@deepseek-ai/dsh-client-locale": ^0.1.1-rc.2
-    "@deepseek-ai/dsh-client-runtime": ^0.1.1-rc.2
-    "@deepseek-ai/dsh-client-ui-conversation": ^0.1.1-rc.2
-    "@deepseek-ai/dsh-client-ui-settings": ^0.1.1-rc.2
-    "@deepseek-ai/dsh-invariants": ^0.1.1-rc.2
-  checksum: 10c0/51cdbd150828b07c3f758a051c43ebee2a88c5c732d681648ce2b593e43eac743eb2429f15dcf5d8cfeb047f1d614a4893aa9c9c30e51e576471e7e5a4326bfc
   languageName: node
   linkType: hard
 
@@ -1904,7 +1888,7 @@ __metadata:
 
 "@deepseek-ai/dsh-client-ui-settings-general@patch:@deepseek-ai/dsh-client-ui-settings-general@npm%3A0.1.1-rc.2#./patches/dsh-client-ui-settings-general@0.1.1-rc.2.patch::locator=deepseek-harness-desktop%40workspace%3A.":
   version: 0.1.1-rc.2
-  resolution: "@deepseek-ai/dsh-client-ui-settings-general@patch:@deepseek-ai/dsh-client-ui-settings-general@npm%3A0.1.1-rc.2#./patches/dsh-client-ui-settings-general@0.1.1-rc.2.patch::version=0.1.1-rc.2&hash=291061&locator=deepseek-harness-desktop%40workspace%3A."
+  resolution: "@deepseek-ai/dsh-client-ui-settings-general@patch:@deepseek-ai/dsh-client-ui-settings-general@npm%3A0.1.1-rc.2#./patches/dsh-client-ui-settings-general@0.1.1-rc.2.patch::version=0.1.1-rc.2&hash=d62164&locator=deepseek-harness-desktop%40workspace%3A."
   dependencies:
     "@deepseek-ai/schemastery": "npm:^3.18.1"
     clsx: "npm:^2.0.0"
@@ -1918,7 +1902,7 @@ __metadata:
     "@deepseek-ai/dsh-client-ui-sidebar": ^0.1.1-rc.2
     "@deepseek-ai/dsh-invariants": ^0.1.1-rc.2
     "@deepseek-ai/dsh-settings": ^0.1.1-rc.2
-  checksum: 10c0/bfb3b19b5c009c7318d906d83e729578d06dd2def520c3d3dbc07ba726eee8d3ed995cffa1c1408a48af8c90c3ddb4f41e69ca5cd9c81aacfd98b346b6ec7873
+  checksum: 10c0/563ea2f6481f31c07cac99b3597e1e8226cceb2672d4e2ddaf6a39ea71b2e151bd04add8d4435461deac2e4cf4d9f2ee8904fbba92c9074a89c606374bdcfa2b
   languageName: node
   linkType: hard
 
@@ -11688,6 +11672,7 @@ __metadata:
     "@deepseek-ai/dsh-client-locale": "npm:0.1.1-rc.2"
     "@deepseek-ai/dsh-client-runtime": "npm:0.1.1-rc.2"
     "@deepseek-ai/dsh-client-ui-conversation": "npm:0.1.1-rc.2"
+    "@deepseek-ai/dsh-client-ui-input-trigger": "npm:0.1.1-rc.2"
     "@deepseek-ai/dsh-client-ui-layout": "npm:0.1.1-rc.2"
     "@deepseek-ai/dsh-client-ui-primitives": "npm:0.1.1-rc.2"
     "@deepseek-ai/dsh-client-ui-settings": "npm:0.1.1-rc.2"
@@ -11706,6 +11691,7 @@ __metadata:
     "@deepseek-ai/dsh-system-prompt": "npm:0.1.1-rc.2"
     "@deepseek-ai/dsh-timeout": "npm:0.1.1-rc.2"
     "@deepseek-ai/dsh-tools": "npm:0.1.1-rc.2"
+    "@deepseek-ai/dsh-web": "npm:0.1.1-rc.2"
     "@earendil-works/pi-ai": "npm:0.82.1"
     "@types/node": "npm:24.10.1"
     "@types/react": "npm:^18"
@@ -11722,6 +11708,7 @@ __metadata:
     "@deepseek-ai/dsh-client-locale": 0.1.1-rc.2
     "@deepseek-ai/dsh-client-runtime": 0.1.1-rc.2
     "@deepseek-ai/dsh-client-ui-conversation": 0.1.1-rc.2
+    "@deepseek-ai/dsh-client-ui-input-trigger": 0.1.1-rc.2
     "@deepseek-ai/dsh-client-ui-layout": 0.1.1-rc.2
     "@deepseek-ai/dsh-client-ui-primitives": 0.1.1-rc.2
     "@deepseek-ai/dsh-client-ui-settings": 0.1.1-rc.2
@@ -11737,6 +11724,7 @@ __metadata:
     "@deepseek-ai/dsh-system-prompt": 0.1.1-rc.2
     "@deepseek-ai/dsh-timeout": 0.1.1-rc.2
     "@deepseek-ai/dsh-tools": 0.1.1-rc.2
+    "@deepseek-ai/dsh-web": 0.1.1-rc.2
     "@earendil-works/pi-ai": 0.82.1
     react: 18.3.1
   languageName: unknown

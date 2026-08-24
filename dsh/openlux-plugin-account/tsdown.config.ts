@@ -18,6 +18,14 @@ export default defineConfig([
     dts: false,
     clean: false,
     sourcemap: true,
+    // This half runs in the Electron main process, where `electron` is a module
+    // the runtime provides. It is not in this package's dependencies, so the
+    // bundler resolves it from the hoisted tree and inlines the npm package —
+    // whose whole job is to print the path of the binary, with no `shell` on it.
+    // The result was a button that silently did nothing. The kernel's own
+    // preload build keeps it external for the same reason
+    // (`dsh-plugin-desktop/tsdown.config.ts:102`).
+    external: ['electron'],
   },
   {
     name: `${PACKAGE_NAME}/client`,

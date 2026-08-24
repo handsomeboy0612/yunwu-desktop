@@ -30,3 +30,4 @@
 # docs/dsh-kernel-migration.md 里,脚本本身不入库。
 .tmp-e2e/
 .tmp-probe/
+.tmp-wb3/

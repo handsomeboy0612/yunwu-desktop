@@ -1151,6 +1151,77 @@ docx→报清楚 mime、file_id→拒），加真机：
 
 ---
 
+### 第 8 步：附件在输入框里变成 chip（2026-08-24 落地并真机验通）
+
+前七步把「什么文件都能进来」做通了，但**用户看到的还是三行 `D:\work\…`**——自己正在写的那句话
+被路径顶出输入框。WorkBuddy 同样是「路径 + 工具」，可它输入框里是一排 tag，所以这一步只改「给人
+看的那一面」，**给模型的那一面一个字节都没动**。
+
+**先查参考实现（`app.asar` 里解出渲染层源码）**：WorkBuddy 的
+`chat-input/editor/components/input-context.tsx` 里 `InputContextTag` 是 Slate 的 inline 节点，
+样式在同名 `.module.scss`（打包进 `renderer/assets/src-0zJL21yZ.css`）：`background:#f2f2f2`
+（暗色 `rgba(255,255,255,.08)`）、`border-radius:6px`、`padding:2px 6px`、13px/500 近黑字，
+图标按扩展名分色（`file-type-resolver.ts` 一个后缀一个图标组件），**hover 时图标位变成关闭按钮**。
+
+**再查内核有没有现成的**——有，而且就是同一个东西：`@` 补全铸出来的就是 chip。两条缝
+（都在 `ui-input-trigger` / `ui-conversation`）：
+
+- `SessionInput.insertReference(reference, span)`，即 `@` 那条流水线自己派的
+  `slash/input-insert-reference`；`span` 带 `draftRev` 做 CAS，读旧了就不落。
+- `InputTriggerSource.codec.serialize`，提交时按 occurrence 的**归属源**把它那段替换成模型形；
+  **源没注册的 occurrence 会挡住发送**，不是降级。
+
+所以我们只加了两样：一个 `openlux-file` 源（不出候选，只负责把 ref 序列化回反引号绝对路径）和
+按钮里「铸 occurrence 而不是塞文本」。**样式只搬能搬的那一半**，判据是真机量出来的
+（CDP，2026-08-24）：输入框的 `<textarea>` 自己的字是全透明的（`color: rgba(0,0,0,0)`），
+可见的字全由镜像层 `div.uV2eYG_backdrop` 画，两者共享盒子/字体/内边距——
+
+| WorkBuddy 有 | 我们搬了吗 | 为什么 |
+|---|---|---|
+| 底色 `#f2f2f2` | 搬了（`--dsw-alias-interactive-bg-hover`，实测 `rgba(38,49,72,.06)`） | 只是画，不动字距 |
+| `border-radius:6px` | 搬了（4px，字距贴合下 6px 显胖） | 同上 |
+| 纵向 `padding:2px` | 搬了 | 行盒外侧作画，不移动任何字 |
+| 横向 `padding:6px`、字重 500 | **没搬** | 会改镜像层的字宽而 textarea 不知道，光标和选区会和看到的字错位 |
+| hover 变关闭按钮 | **没搬** | 镜像层是 `pointer-events:none` + `aria-hidden`，它是画不是控件；删 chip 走退格/撤销，跟内核自己的 `@file` 一致 |
+| 近黑字 + 按扩展名分色图标 | **没搬**（保留内核蓝 `rgb(65,118,230)`） | 这条输入框里所有引用都是这个蓝；把其中一族改成黑会让人以为是两种东西。分色图标要改上游 `ReferenceIcon`，是笔要长期背的补丁账 |
+
+**真机（Electron + CDP，三个文件：xlsx / pptx / png）**：
+
+| 验什么 | 结果 |
+|---|---|
+| 草稿里用户看到的 | `@test-tracking-refund-batch-review.xlsx @deck_342.pptx @yellow_dog_red_scarf_bw.png`，三个 chip 都带文件图标、底色、圆角，`data-invalid` 为假 |
+| 发出去的那条消息 | 三个**反引号绝对路径**，与改前逐字节相同；草稿清空说明**没被挡**，即 codec 确实接管了序列化 |
+| 模型真拿到了吗 | 模型把三份占位文件都打开了，逐个报出真实内容（`dummy xlsx for chip probe`、30 字节、带 UTF-8 BOM）和「扩展名是 .xlsx 但其实是文本」——路径可用 |
+| `@` 菜单有没有被空源污染 | 只有内核自己的两组（`文件与文件夹` / `Session 对话`，70 行），我们那组不出现（空组会被 `MenuView` 丢掉） |
+| 前面有字时的分隔 | 内核只在引用**后面**补空格，所以铸之前自己补一个前导空格，否则会读成 `看看这三个文件@deck…` |
+
+**chip 不跨重启，这条决定了 `clipboardText` 写什么（2026-08-24 真机发现并改掉）**：内核不持久化
+occurrence，它把草稿存成**剪贴板投影**——每段引用替换成该 occurrence 的 `clipboardText`
+（`ui-conversation` 的 `projectClipboard`，剪贴板和会话存储共用同一条）。所以重启（以及任何一次
+重挂）回来，草稿是一段平文本。最初 `clipboardText` 给的是裸路径，于是恢复出来的是空格连起来的
+裸路径——**只要有一个文件名带空格就再也分不出边界**（`C:\Users\me\My Documents\a.xlsx C:\b.pptx`），
+而这段文本正是下一次发送会原样送出的东西。改成和 `serialize` 同一个形（反引号路径）之后真机复验：
+带空格的 `my docs\quarterly report.xlsx` 加一个普通文件，重启后草稿是
+`` `…\my docs\quarterly report.xlsx` `…\deck_342.pptx` ``，与发送形逐字节一致。代价是复制 chip
+拿到的是带反引号的路径，粘到 shell 里要自己去掉——人一眼看得见并且能改，比 agent 悄悄打开一条
+错路径便宜。
+
+**被拒就重读重试，不要拿旧快照算草稿（同日发现并改掉）**：`insertReference` 拿 `draftRev` 做 CAS，
+返回 `false` 表示别人先动了草稿、这次什么都没写。真机撞到过一次：一批两个文件只落了一个 chip，
+另一个凭空消失——当时那个视图正在恢复上一轮的草稿，也就是有第二个写者。原来的反应是直接回落成文本，
+而手里的快照已旧，算出来的草稿会盖掉别的东西。现在被拒先重读重试一次（写都没发生，重试不会重复插入），
+两次都被拒才回落成文本，且回落时重读实时草稿。`tests/file-reference.spec.ts` 里两条钉住这件事。
+
+留下的取舍：**chip 上只有文件名，路径在界面上看不见了**（`title` 是内核按 label 写的，不是我们
+能塞的）。这就是 WorkBuddy 的行为，也是几份附件之后输入框还能读的原因，而且路径没丢——复制 chip
+和重启恢复拿到的都是那条路径，模型拿到的也是。
+
+门：`tests/file-reference.spec.ts` 七条，钉住「序列化出来必须是反引号绝对路径」（chip 把这条藏起来了，
+一旦改了界面看着还全对，agent 却开始找不到文件）、「不出候选」、「前导空格」、「CAS 被拒时回落成
+原来的整行文本」。
+
+---
+
 ## 五、不做什么
 
 - **不在本机做文件解析 / OCR。** 三个参考实现里只有 WorkBuddy 装的那套技能这么做，它依赖本机

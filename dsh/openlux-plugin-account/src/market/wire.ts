@@ -155,6 +155,32 @@ export type RefusalReason =
   | 'no-download-url'
   /** The console's digest no longer matches what the gallery showed. */
   | 'catalog-stale'
+  /**
+   * The bytes arrived but could not be written where they belong.
+   *
+   * Its own reason because it is the one refusal the user can act on by
+   * retrying: on Windows a directory under an active watcher — which the skill
+   * root always is — can refuse an operation while another process holds a
+   * handle, and that is a moment, not a verdict.
+   */
+  | 'write-failed'
+  /** A connector's manifest is missing, unparseable, or names no MCP server. */
+  | 'bad-manifest'
+  /** The connector declares token auth and the gallery sent none. */
+  | 'needs-token'
+  /**
+   * The connector's authorization cannot be completed by this client.
+   *
+   * `oauth` is the case: the old kernel ran the whole flow (`mcp login`), while
+   * the bridge we mount takes static headers and env only
+   * (`dsh-mcp-client` README, Config table). Refusing is honest; mounting a
+   * server that will answer 401 to every call is not.
+   */
+  | 'unsupported-auth'
+  /** The manifest asks for a transport the bridge does not speak (e.g. `sse`). */
+  | 'unsupported-transport'
+  /** This deployment has no writable plugin tree to mount into. */
+  | 'not-mountable'
 
 /** How many of an expert's bundled skills came down with it. */
 export interface SkillTally {
@@ -182,6 +208,16 @@ export type InstallOutcome =
 export interface InstalledPreset {
   readonly id: string
   readonly trust: string
+  /**
+   * Display name from the preset's own metadata, absent when it published
+   * none — the roster's own field, which is what the kernel's preset selector
+   * shows. Carried so a card can name an expert without the catalog: the
+   * "my experts" page lists what is on disk, including rows whose catalog
+   * entry is gone or was never there.
+   */
+  readonly name?: string
+  /** One line on what this expert is for, when its metadata published one. */
+  readonly description?: string
   /** The kernel's own health verdict, verbatim when it has one. */
   readonly broken?: string
   /** Catalog item, when this row was installed by us rather than by hand. */
@@ -189,6 +225,153 @@ export interface InstalledPreset {
   readonly version?: string
   /** Opening questions recorded at install time, so a summon needs no network. */
   readonly prompts?: readonly string[]
+}
+
+/** One skill sitting in the kernel's user skill root. */
+export interface InstalledSkill {
+  /** Directory name, which is also the catalog slug when we installed it. */
+  readonly slug: string
+  /** `name` from the front matter, else the directory name. */
+  readonly name: string
+  /** Whether this one arrived through the gallery rather than by hand. */
+  readonly managed: boolean
+  readonly version?: string
+}
+
+/**
+ * Where standalone skills land, and what is already there.
+ *
+ * Separate from {@link InstallTarget} because the two answer different
+ * questions from different owners: presets come from the roster service and can
+ * be unauthorable, while the skill root is a plain directory the kernel scans
+ * (`dsh-skill-filesystem`, user root, watched) and is therefore always
+ * writable. The list is every directory in that root, ours or not, because what
+ * the model sees is the whole root — and that count is what a user about to add
+ * one more is entitled to see (the catalog is rendered per skill, so it is paid
+ * for on every request).
+ */
+export interface SkillTarget {
+  readonly root: string
+  readonly installed: readonly InstalledSkill[]
+}
+
+/**
+ * One connector the user has connected.
+ *
+ * The record is ours because the kernel keeps none: a live MCP server is a
+ * loader entry and nothing more, so "which of these did the user connect, and
+ * from what catalog row" has no other home. The old shell kept the same list
+ * for the same reason (`src/main/market/connector-installer.ts`: 「MCP 配置落在
+ * 内核 openclaw.json…故用 market-connectors.json 单独登记」), the difference
+ * being that ours also carries the server config, because our own record is
+ * what re-mounts it on the next launch.
+ */
+export interface InstalledConnector {
+  /** Catalog slug, which is what a card is marked against. */
+  readonly slug: string
+  /** MCP namespace; the model's tools are `mcp__<serverName>__*`. */
+  readonly serverName: string
+  readonly name: string
+  readonly version?: string
+  /** ISO timestamp, for a stable order in the list. */
+  readonly connectedAt: string
+  /** Whether the entry is mounted in the running app right now. */
+  readonly live: boolean
+  /** Why it is not mounted, when it is not. */
+  readonly failure?: string
+  /**
+   * The command or endpoint this runs.
+   *
+   * For the rows no catalog entry describes: one the user pasted, and one the
+   * console has since dropped from the shelf. Without it such a row could show
+   * nothing but its own name.
+   */
+  readonly summary?: string
+}
+
+/** What is connected, and whether this deployment can connect anything. */
+export interface ConnectorTarget {
+  /**
+   * Whether connectors can be mounted at all.
+   *
+   * False in a deployment with no writable plugin tree — a browser build, or a
+   * host whose loader is read-only. The gallery then shows the shelf without
+   * install buttons rather than failing one press at a time.
+   */
+  readonly mountable: boolean
+  readonly installed: readonly InstalledConnector[]
+  /**
+   * How many of the user's own servers are live.
+   *
+   * A count rather than rows: the user's connectors are managed in their own
+   * config file, the way WorkBuddy's are, so the gallery offers one button to
+   * that file instead of cards it could not honestly edit.
+   */
+  readonly custom: number
+}
+
+/**
+ * What handing the user's own connector file to the OS did.
+ *
+ * Three-way rather than a boolean because the middle case is common and needs
+ * its own sentence: on a machine with no application associated with `.json`,
+ * the file gets revealed in its folder instead of opened.
+ */
+export interface CustomOpen {
+  readonly path: string
+  readonly did: 'opened' | 'revealed' | 'nothing'
+}
+
+/** What one re-read of the user's own connector file did. */
+export interface CustomConnectorSync {
+  readonly live: number
+  /** One line per server that would not start, or per parse failure. */
+  readonly problems: readonly string[]
+  /** The file itself, shown so it can be found without the opener. */
+  readonly path: string
+}
+
+/** One connect, as asked for by the gallery. */
+export interface ConnectorRequest {
+  /** Catalog slug; the manifest is read host-side from it. */
+  readonly slug: string
+  readonly name?: string
+  readonly version?: string
+  /** The secret, when the manifest declares `auth.mode: 'token'`. */
+  readonly token?: string
+}
+
+/**
+ * One connect from a pasted config rather than the shelf.
+ *
+ * WorkBuddy's equivalent button opens the MCP config file in the editor it is
+ * hosted in; with no editor to open, the same payload arrives as text — the
+ * server object MCP servers publish in their own READMEs.
+ */
+export interface CustomConnectorRequest {
+  /** The server object, or a `{ mcpServers: { <name>: … } }` wrapper. */
+  readonly json: string
+  /** MCP namespace; when absent, read from the pasted wrapper's key. */
+  readonly serverName?: string
+  /** Display name for the row; defaults to the namespace. */
+  readonly name?: string
+}
+
+/**
+ * What the gallery must know before it can offer a connect.
+ *
+ * Read from the manifest, which the snapshot withholds — so this is a separate
+ * round trip, made when the user opens a connector rather than for the whole
+ * shelf.
+ */
+export interface ConnectorRequirement {
+  readonly slug: string
+  /** `none` connects on one press; `token` needs a field; `oauth` is refused. */
+  readonly mode: 'none' | 'token' | 'oauth'
+  /** What to call the field, from the manifest (`auth.label`). */
+  readonly label?: string
+  /** Why this connector cannot be connected at all, when it cannot. */
+  readonly refusal?: string
 }
 
 /** Where installs land, and what is already there. */

@@ -1,5 +1,5 @@
 diff --git a/lib/client.js b/lib/client.js
-index 59d01801f9f410d30c76af000710aa51ea98bfda..8549ac2f87b4afd0120115505a71df97c8d9981e 100644
+index 59d01801f9f410d30c76af000710aa51ea98bfda..f22f50718eac10c3eb22f8af9b46449fbbf9f90b 100644
 --- a/lib/client.js
 +++ b/lib/client.js
 @@ -71,6 +71,14 @@ window.__ModuleLoader__.load({
@@ -17,3 +17,29 @@ index 59d01801f9f410d30c76af000710aa51ea98bfda..8549ac2f87b4afd0120115505a71df97
  			if (id === "models") return (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconDataOutline16, {
  				className: SettingsRoot_module_css_default.navIcon,
  				size: 16
+@@ -499,12 +507,23 @@ window.__ModuleLoader__.load({
+ 						if (version !== rowsVersion || revision !== rowsRevision) {
+ 							rowsVersion = version;
+ 							rowsRevision = revision;
+-							rows = ctx.slots.entries("settings.section").map((e) => ({
++							// 左边这排导航原本读的是 entries()——插槽机制自己的注释说那是
++							// 「inspection surface」，原始注册清单，被顶掉的那条也在里面；而右边
++							// 正文走的是 renderSlot(..., { only: active })，即每格选优。于是外部插件
++							// 按合约「复用出厂 id 顶掉那一格」之后，正文换成了我们的页，导航却多留
++							// 一条内核的标签，点进去还是我们的页。改成 entriesOfSlot() 就是让导航
++							// 与正文同一个投影（每个 id 一格，priority 最低的那条渲染）。
++							//
++							// 再滤掉没有标签的格：这一格有主，但主人没打算露面。设置页的导航只有
++							// 标签可点，空标签就是一颗没有名字的按钮，比多一行更糟。占坐位画空
++							// 因此等于「这一页从设置里消失」——我们的三个内置模式就是这么收掉的。
++							// 升级时这里是一个方法名加一次 filter 的重排。
++							rows = ctx.slots.entriesOfSlot("settings.section").map((e) => ({
+ 								/* v8 ignore next -- list-slot registration requires id (SlotCore rejects an entry without one) */
+ 								id: e.options.id ?? "",
+ 								order: e.options.order ?? 0,
+ 								label: (0, _deepseek_ai_dsh_client_ui_slots.resolveSlotLabel)(e.options.label) ?? ""
+-							})).sort((a, b) => a.order - b.order);
++							})).filter((row) => row.label !== "").sort((a, b) => a.order - b.order);
+ 						}
+ 						return rows;
+ 					},

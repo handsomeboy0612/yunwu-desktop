@@ -432,7 +432,7 @@ DSH 侧逐条实测：
 | 模型真能调到吗 | **能，最后一公里已通** | 换 `llm-pi-ai` 路由后（见「中转分片错位」一节），V4-Pro / V4-Flash 各一次 `mcp__ywprobe__ping`，**首次即成**，探针进程侧 `tools/call ping` 对得上，口令原样返回，各 9 秒。此前卡住的不是 MCP，是 `llm-deepseek` 撞中转分片错位 |
 | 要不要装包 | **不要** | `$DSH_HOME/profiles/node_modules/@deepseek-ai/dsh-mcp-client` 随 bundle 依赖树就在，早于我们任何安装动作 |
 | 往哪儿写 | `$DSH_HOME/profiles/<档>/cordis.patch.yml` | 文件头自己写着「Your patch layer for this dsh profile, applied after every bundle layer」，允许 `!!js`，默认是空数组 `[]`。**这是用户拥有、运行时可写的组合文件，等价于 `mcp set` 的落点** |
-| 改了能不能免重启生效 | **不能** | 应用运行中写入，等 16 秒探针进程没被拉起；重启后立刻拉起。`mcp-client` README 说的 HMR 指的是 loader 侧热替换，desktop 档的这个文件不在监听范围内。**`mcp reload` 没有对应物** |
+| 改了能不能免重启生效 | **写文件不能；调 loader 能**（见下方 2026-08-24 更正） | 应用运行中写入，等 16 秒探针进程没被拉起；重启后立刻拉起。`mcp-client` README 说的 HMR 指的是 loader 侧热替换，desktop 档的这个文件不在监听范围内 |
 | 有没有现成界面 | **没有，而且上游是故意的** | `mcp-client` 无浏览器半侧；插件设置页只渲染插件自己注册的手写卡片（WebSearch / Bash / AgentLoop 三张），不枚举命名空间；就算写了卡片，命名空间还得进 `apiproxy` 里写死的 `WEB_SETTINGS_NAMESPACES`；preset 那条路上游明说「浏览器不再编辑任何组装文本」 |
 
 **所以连接器这条这样做**：界面沿用我们本来就要保留的市场页，安装 = 往 profile 用户层写一行、
@@ -440,8 +440,73 @@ DSH 侧逐条实测：
 
 1. **生效要重启。** openclaw 是 `mcp reload` 立即生效，DSH 得重启应用。
    装完提示「重启后生效」是最省的做法；想做到即时，得自己找 loader 的重载入口，属于未验的活。
+   —— **这一条 2026-08-24 作废，见下。**
 2. **OAuth 型要自己走。** openclaw 有 `mcp login` 内核代劳，`mcp-client` 只认静态
    `headers` / `env`，授权那一趟得我们自己跑完再把 token 写进配置。
+
+#### 更正：那个「未验的活」是 `loader.create`，一行，免重启（2026-08-24 真机）
+
+上面那条「装完要重启」错在**只试了写文件这一条路**。`mcp reload` 在 DSH 里的对应物不是
+另一个文件，是 loader 服务本身：`ctx.get('loader').create({ name: '@deepseek-ai/dsh-mcp-client',
+config }, null)` 当场把一个条目挂进活的插件树，`remove(id)` 当场摘掉。
+
+| 验什么 | 结果 |
+|---|---|
+| 免重启挂上 | 自写的零依赖 stdio 探针**在 create 返回前**就收到 `initialize` + `tools/list` |
+| 模型当场看得见 | 已经开着的会话里追问工具清单，`mcp__ywprobe__ping` 就在里面，没刷新页面 |
+| 摘干净 | `remove` 后子进程退出，`Get-CimInstance` 数到 0 |
+| `npx` 在 Windows 起不起得来 | 起得来，`@upstash/context7-mcp` 真装真连 |
+
+代价是**它不持久**：loader 的 `write()` 落在 `cordis.yml`，而 `profile.ts:627` 每次启动
+把这个文件重写成 `[]`。所以登记表是我们自己的 `$DSH_HOME/openlux-connectors.json`
+（`0600`，因为要装令牌），启动时按表逐个 `create` 回来。这样重启后连接器还在，
+而且**装的那一刻就能用**，不用请用户重启。
+
+还有一个默认值必须翻过来：`dsh-mcp-client` 的 `failOnStartupError` 默认 `false`，
+意思是连不上的服务器**照样激活**——没有工具，也不会重连（它的重连守卫只管连上过又断的）。
+对后台集成这个默认讲得通，对一个写着「连接」的按钮讲不通，所以我们建配置时显式设成 `true`：
+连不上就当场拒绝、不写登记；启动恢复时连不上就把那行标成「未连上」，理由挂在卡片上。
+
+真机走完的路径（2026-08-24）：免令牌连（context7）、带令牌连（tavily，令牌落在
+`env.TAVILY_API_KEY`）、重启后两个都自动回来、断开后进程退干净、命令不存在的那条
+显示「未连上」且仍可断开。剩下的 OAuth 型照旧明确拒绝——`mcp-client` 只认静态凭据这条没变。
+
+#### 令牌不落我们的登记表，落内核凭据库
+
+上面那句「登记表 `0600`，因为要装令牌」当天就作废了：内核自己有凭据缝
+（`dsh-credentials` 的 `CredentialProvider`，本地实现 `dsh-credentials-local` 写
+`~/.dsh/.credentials.yaml`），别的插件存 API key 走的就是它。所以登记表里只存一个引用名
+`OPENLUX_MCP_<SLUG>`，值在挂载那一刻 `resolve` 回来；断开时连引用一起 `unset`。
+真机验的是三件事：连上后令牌**只**在 `.credentials.yaml` 里、`openlux-connectors.json`
+和 `cordis.yml` 里都搜不到；重启后能从凭据库取回来接着连；断开后凭据库里那条没了。
+
+#### 自定义连接器 = 用户自己的一个文件（2026-08-24 真机验完）
+
+WorkBuddy 的「自定义连接器」是一颗按钮，打开它宿主编辑器里的 MCP 配置文件
+（`adapter.openMcpConfig` → 一条 VS Code 命令），它自己的面板里**没有**这些服务器的卡片。
+所以要对齐的形状是「编辑自己的配置文件」，不是「填一张表」。这也是唯一能保住货架那条路
+已有性质的形状：**渲染进程从不指名一条要 spawn 的命令**——粘贴框会把 `{command, args}`
+从浏览器半侧递给主进程，而这个渲染进程显示的是模型输出。落点
+`$DSH_HOME/openlux-connectors.custom.json`，格式就是各家 README / Claude Desktop /
+Cursor 那个 `mcpServers`（`servers` 也认，内核文档那么拼）。
+
+真机验完的六条：从文件挂起（重启后探针收到 `initialize from dsh-mcp-client` + `tools/list`）、
+改完按「重新读取」增量生效（还在清单里的服务器 pid 不变，**不会被拆了重挂**）、
+从文件里删掉就当场卸下（子进程 `stdin ended`、计数归零）、
+JSON 写坏了原样透出解析器的行列号、缺 `command` 又缺 `url` 的那条按服务器名点出来、
+以及「打开配置文件」真的把文件交给了系统。
+
+**两个咬过人的细节，都是「界面装得像做了事」那一类：**
+
+1. **`import('electron')` 会被打包器内联成 npm 包那个壳。** 我们插件的宿主半侧跑在
+   Electron 主进程里，`electron` 本该是运行时给的模块；但它不在这个包的 dependencies 里，
+   tsdown 就从提升上来的 `node_modules` 解析、把**打印二进制路径**那个 shim 打进产物——
+   `shell` 是 undefined，于是按钮**静默什么都不做**。改法是 `external: ['electron']`
+   （内核自己的 preload 构建同一个理由，`dsh-plugin-desktop/tsdown.config.ts:102`）。
+2. **`openPath` 失败不抛异常，返回一句话。** 这台机器 `.json` 没有真正的打开关联，
+   于是它返回错误字符串而不是 throw；只判 catch 的写法会把失败当成功。现在三态返回
+   `opened | revealed | nothing`：打不开就退到 `showItemInFolder`（不依赖关联），
+   面板按三态各说一句话。
 
 ### 字标是唯一一处真冲突
 
@@ -521,8 +586,9 @@ WorkBuddy 的作用降为**判据来源**：某个交互该长什么样、某条
 - **用户没法给 AI 发图。** 代码分支照内核形状写了，卡在模型清单：`dsh-host-apiproxy` 按
   `inputModalities` 拒收，而 profile 里两个模型都是 `input: [text]`，所以窗口里根本没有
   附件入口。**清单里进一个能收图的模型这条自动就活**，同时模型话术里现在不许提"让用户发一张"。
-- **连接器（MCP）装完要重启才生效。** openclaw 是 `mcp reload` 立即生效，DSH 没有对应物；
-  "装完提示重启"是最省的做法，想做到即时得自己找 loader 重载入口，属于未验的活。
+- ~~**连接器（MCP）装完要重启才生效。**~~ **2026-08-24 已补齐，不再是缺口。**
+  对应物不是另一个文件而是 loader 服务本身（`ctx.get('loader').create`），装完当场可用，
+  登记表自己存、启动恢复，正文见「更正：那个『未验的活』是 `loader.create`」。
 - **视频内联播放**是第二步增强（`ui-media` 插件），第一步"白嫖现成产出行"已落地，不是欠账。
   查证之后这条有了前置条件与形状（正文见「产物预览：主线在 DSH 客户端，缺的是一条文件通道」）：
   **客户端没有通用的读本地文件字节通道**，只有图片附件那一条，所以第一件事是照 WorkBuddy 的
@@ -5902,8 +5968,580 @@ provider 也只认 cwd 那棵树），而「模型读不了文档时换一个能
 （默认就是 compatibility，不写值比写值更诚实），重启后 URL 变成
 `?dsh-desktop-mode=compatibility`、`advanced-shell` 那份 CSS 不再注入，品牌层与登录态照旧。
 
+### 搜索的下发降级搬回来了（2026-08-24 落地并真机验通）
+
+老壳有这套、新客户端没有，而且**不是坏了，是从来没接上**。对账的三处：
+
+- 老壳的降级在自研 provider 里，清单落 openclaw 的 `tools.web.search.yunwu.models`
+  （`src/main/config-writer.ts:649`，值 = 用户勾的带联网 tag 的对话模型 + 三条 gemini 兜底），
+  逐个试是真的（`resources/yunwu-video-plugin/index.mjs:3880-3924`，429 退避 3 秒 ×2、90 秒超时）。
+- 交付页那格 `search_models` **两个时代都没有消费者**：老壳压根不看它（全仓 `search_models` 零命中），
+  新客户端把它写进 `web-search-deepseek.models`，而那个包的 schema 只有单数 `model`
+  （`lib/index.js:239-247`），列表躺在 settings 里没人读。
+- 所以真机上那条 `models: [gpt-4o-mini]` 是纯装饰，搜索一直跑 cordis 里钉死的 claude-haiku。
+
+**动手前打了两发直连，判据被读数推翻了一半**（这一步不能省，老壳那套判据照搬会全错）：
+
+| 传输 | 2026-08-24 真机读数 | 产物 |
+|---|---|---|
+| Claude 族 + 原生 `web_search_20250305`（Messages）| haiku 200/2.4s、sonnet 200/7.0s、opus 200/7.3s，各 10 条 | url + title + `page_age` |
+| `gpt-5-search-api` 族（completions）| 200/8.7s（6 条 annotations）、`-2025-10-14` 200/7.4s（11 条）| url + title，真实站点 |
+| `*-search-preview` 族 | **整族已废弃**：`has been deprecated`（且被裹在 HTTP 429 里）| 无 |
+| gemini + `googleSearch` 工具 | flash-lite 200/4.6s（14 链接）、2.5-flash 200/5.9s（15）| 只有 Google grounding 重定向裸 URL，无标题 |
+| `deepseek-v4-flash` + 同一个原生工具 | 200/4.7s，只有一个 text 块 | **静默不检索、照样收钱** |
+
+两条结论直接决定了实现形状：**平台的「联网」tag 不能当判据**（6 条带 tag 的里 4 条已废弃，
+而今天真能检索的 claude 与 gemini 都没有这个 tag），改按 `supported_endpoint_types` 认领；
+**「答了话」不等于成功**，一次尝试必须交出至少一条来源，否则算失败降级——这条是老壳缺的，
+上游那家反而早就写着（「absence of those blocks is an error rather than a prose-scraping
+fallback」）。
+
+落地是 `openlux-plugin-account/src/web/search/`：三条传输各自认领目录行，清单顺序为
+「下发（照后台顺序，认不出传输的丢掉并 warn） → 传输质量序 claude → openai → gemini →
+各传输内部量过的名字」，一次搜索最多试 3 个候选（每次都是一笔模型账），全被限流才等 3 秒重跑一轮。
+`cordis.patch.yml` 的 `web` 行把 `searchProvider` 指到 `openlux-search`，上游那家仍挂着当退路；
+`models/sync.ts` 里那条写死路的 `applySearchDelivery` 删掉，下发清单直接进内存给 provider 读。
+
+**没有复用上游那个 provider 类**，虽然一开始就是那么写的：它把 `mapAnthropicResponse` 只导到
+`lib/types/`、包根没有出口，走 `DeepSeekSearchProvider` 类倒是能跑，但会把它的 peer
+`@deepseek-ai/dsh-launch-environment` 拖进我们工作区（`nmHoistingLimits: workspaces`，
+装机时同样解析不到，`yarn` 当场就警告了），而且状态码在委托里丢了。为二十行 JSON 遍历换一条依赖边
+不值——所以形状照它、代码自己写，它那三条判断（无结果块即失败、snippet 从 `citations[]` 按 url 取、
+按 url 去重）在注释里逐条记了出处。
+
+三层复验，全部真机：
+
+| 层 | 判据 | 结果 |
+|---|---|---|
+| 排序（import 真代码 + 线上目录）| 下发优先、不能检索的丢掉、兜底按传输质量、目录乱序不影响 | 18/18；目录 476 行里认领出 34 条候选 |
+| provider 端到端（真令牌真计费）| 四组：无下发 / 下发不能检索的 / 下发能检索的 / 第一项已废弃 | 11/11。第一项废弃那组降到第二项（废的那条只花 0.75s） |
+| 真 app（Electron + CDP 发一句「联网查 Anthropic 8 月最新模型」）| 接缝选中我们、工具真跑 | 日志 8 行 `openlux: 检索用 claude-haiku-4-5-20251001（claude-native），10 条来源` |
+
+`package.spec.ts` 里加了守卫：`searchProvider: openlux-search` 必须在、
+`deepseek-official` 必须不在、provider 注册的 id 必须与它对得上——上游那行写的是
+`deepseek-official`，下次 subtree 合并正是会把它悄悄换回去的事件，而症状是「搜索照样能用」，
+没人会去看。
+
+## 出厂默认改成无边框壳（2026-08-24 落地并真机验通）
+
+内核自带这一档，不用我们造：`dsh-plugin-desktop` 有 `compatibility`（保留系统标题栏）与
+`advanced` 两套窗口，Windows 上 advanced 是 `titleBarStyle: 'hidden'` + `titleBarOverlay` +
+mica + 圆角（`src/window-options.ts:86-101`），macOS 是 `hiddenInset` + 红绿灯定位 + vibrancy
+（`:75-84`），设置页第一栏就有开关「增强模式」（`client/DesktopSettingsSection.tsx:449-454`），
+`applies: 'restart'`（`src/index.ts:167`），Linux 直接拒绝（`:169`）。
+界面锚点这次指向 advanced：WorkBuddy 自己就是无边框——顶栏是它自绘的（图标 + 名字 +
+编辑/窗口/帮助 与三个窗口按钮同一行、白底），左栏贯通到顶（真机截它的窗口比过）。
+
+**`cordis.patch.yml` 里那行 `mode` 不是开关，改它没有任何效果。** 启动器每次准备 profile 时都用
+设置文档里的值把这一行覆盖掉（`src/profile.ts:720` 读文件、`:868-876` 回写 `desktop-shell` 行的
+`config.mode`），所以出厂默认其实躺在一个常量里。这一条是踩过才知道的：先改了 yml、什么都没变。
+
+**真正的默认值是一对，必须一起改，否则会误重启。** 插件启动后订阅设置，
+`next.mode !== config.mode` 就调 `requestRestart()`（`src/index.ts:262-282`）；而
+`settings.register` 只在提交时通知、注册时不通知（`dsh-settings/lib/index.js:311-344`），
+所以不一致不会开机死循环，但用户改 `logLevel` 那一刻会莫名重启。落地形状：
+`DEFAULT_DESKTOP_SHELL_MODE` 提到 `src/runtime.ts`（两边共用的模块），投影与 settings schema
+都吃它，`cordis.patch.yml` 那行同步成 `advanced` 并写清它会被覆盖；
+`package.spec.ts` 加守卫钉住「常量 = 组合行声明 = schema 默认」，下次 subtree 合并改回去会红。
+`Config`（行 schema）的默认值仍留 `compatibility`：桌面路径里它永远被启动器覆盖，而
+`verify-loader-boot.mjs` 正靠它做无启动器冒烟。
+
+真机代价，都是这台 Win10（19045）上量的，不是推的：
+
+| 项 | compatibility | advanced | 说明 |
+|---|---|---|---|
+| 侧栏底色 | `#F9FAFB` | `#FFFFFF` | advanced 故意把侧栏填色设成透明等系统画 mica（`client/styles.ts:15`），Win10 没这个材质、代码也没做版本守卫（`electron-platform.ts:41-43`），于是与会话区之间只剩 1px 描边 |
+| 圆角 / 毛玻璃 | 系统边框 | 无 | `roundedCorners` / `backgroundMaterial` 都是 Win11 的 |
+| 拖窗口 | 系统标题栏整条 | 只有会话区上方 32px（右侧 138px 留给系统按钮，`window-chrome.ts:11-14`）| 实测：从侧栏顶部拖，窗口 `87,80` 不动；从会话区上方拖，`87,80 → -41,52`。win32 的侧栏没有拖动条，mac 才有（`styles.ts:23`）|
+| 模态打开时 | 可拖 | 整条标题栏 no-drag | `styles.ts:42-45` 有意为之，不是 bug（第一次拖不动就是踩这个）|
+
+不受影响的三处都真机验过：市场浮层照样出（`shell.overlay` 由 `AdvancedFrame.tsx:117-119` 渲染，
+增强模式下点开看过遮罩与卡片）、品牌行两个模式都装（`client/index.ts:40-41` 自带注释）、
+12 个补丁没有一个碰窗口层或根布局。另外 advanced 会让窗口材质跟随 `ui-theme`
+（`electron-shell-generation.ts:70`），compatibility 不做这件事。
+
+复验：删掉 `~/.dsh/settings.yaml` 里的覆盖后重启，渲染层 URL 是
+`?dsh-desktop-mode=advanced&dsh-desktop-platform=win32`，窗口没有原生标题栏、侧栏到顶、
+会话恢复正常。门全过：`dsh-plugin-desktop` 876 项测试、`typecheck`、`check:layout`、
+`verify:loader`、`verify:profile`。Linux 没有打包目标（只有 `dist:mac` / `dist:win` /
+`dist:win-portable`），真在 Linux 上跑会被上游那句 validate 明确顶回来。
+
 ### 还没做完的
 
-暂时没有挂着的项。下一轮要动附件这块时，注意「引用原地文件」与「暂存拷贝」的一个语义差别：
-引用跟着用户后来的编辑一起变、文件被删就失效，拷贝不会——WorkBuddy 与上游 `@file` 都是引用语义，
-所以这是对齐，不是缺陷。
+- 侧栏顶部那条拖动区没补（用户说先不管）。想补的话形状照 mac 那半边：给
+  `.dshDesktopSidebarSurface` 加一条 `-webkit-app-region: drag` 的 `::before`，注意里面的按钮
+  已经被 `styles.ts:40` 那条通用规则设成 no-drag。
+- Win10 上侧栏底色的兜底没做（拿不到 mica 就给回显式底色）。判据是「Win11 上不能变样」，
+  所以要么按 `process.getSystemVersion()` 分档，要么等 Electron 侧能问出 mica 是否生效。
+- 交付页那格仍然是自由文本，运营可以填一个不能检索的模型（本机现在填的就是 `gpt-4o-mini`）。
+  客户端会跳过并 warn，所以是运营侧的静默无效，不是用户侧故障。最省的补法与出图那格同形：
+  保存时后端多校一句能力，不用新界面。
+- 上一轮的附件提醒仍然成立：「引用原地文件」与「暂存拷贝」的语义差别（引用跟着用户后来的编辑变、
+  文件删了就失效），WorkBuddy 与上游 `@file` 都是引用语义，所以这是对齐不是缺陷。
+
+## 「我的专家」只剩最近使用：已装那半没有主人问题（2026-08-24 真机验通）
+
+> **同日已被本文末尾那节取代**：这里「留最近使用」的依据是 WorkBuddy 的
+> `myExperts.recent.hint` 文案，后来解包核对组件发现**那半它根本没上线**。
+> 下面关于「已装列表不该有」和「最近不记账」的两条结论仍然成立并沿用；
+> 「这页装什么」以末节为准。
+
+**要回答的问题**：市场里那颗「我的专家」应该装什么。第一版做成了「最近使用 + 已安装」双子 tab，
+被用户当场问回来：「虽然我们安装落盘但是我们可以不给用户看这些呀」。
+
+查参考实现的结论支持用户：
+
+- **WorkBuddy 根本没有「已安装专家」这个概念**。它的 `expertAPI.summon` 是
+  `host.session.prepare({ context: { expert } })` —— 召唤只是给会话挂一份专家上下文，专家不落盘
+  （`references/experts-and-teams.md` 早就记过这条）。它那页的两半是「最近使用」和「我创建的」，
+  第二半配一颗 `+ 创建专家`，按下去是 `host.session.prepare({ context: { skill: { name:
+  "expert-manager", displayText: "创建专家" } } })` —— 一个特殊专家 + 一段模板提示词，就是用户图二
+  里输入框那颗 `@expert-manager` 药丸。
+- **我们这边「已装列表」已经有主人**：内核设置里的 Agent 预设段本来就把名录分成「内置 / 自定义」，
+  删除、复制、设默认、加载失败徽标全在那儿（`ui-agent-preset/lib/client.js:37,64-66,915-919`）。
+  我们的专家落盘成预设是 DSH 组装会话的方式，是管道事实，不是读者要看的东西。
+
+所以这页只留「最近使用」，上限 3 个（照 WorkBuddy 自己那句 `myExperts.recent.hint:
+"仅展示最近使用的 3 个专家"`）。「我创建的」那半留空位没有拿替代品填：内核确实带了
+`创造模式`（cordis 预设，自述「用于创建自定义 Agent preset」），形状和 WorkBuddy 的创建流一样，
+但没人要，就不做。
+
+**最近使用不记账**。客户端本来就有：`SessionSummary` 每行带 `agentPreset` / `updatedAt` /
+`origin`（`dsh-client-runtime/.../sessions/service.d.ts:30-61`），`summon.ts` 早就在读同一个快照。
+所以推导是一次读，不是一本流水（`client/recent.ts`）：按 `updatedAt` 倒序去重、跳过 `subagent`
+行（成员的组装是 leader 挑的，不是用户挑的）、再和盘上 `trust === 'user'` 的名录求交（内核页删掉
+的预设不画成死卡片）。自己记账会在两处漂：删了还在列，以及用户从 hero 药丸切的预设看不见。
+
+宿主侧只多带了两个字段：`InstalledPreset` 现在带内核名录自己的 `name` / `description`
+（`install.ts:describe`），卡片因此不用回头查目录 —— 手放进去的预设、以及目录里已经下架的条目，
+都还能有名字。
+
+**真机判据（app15，9223）**：市场 → 我的专家 → 顶栏 tab 与搜索都收起、只剩「返回 + 我的专家」；
+第一次进是空态（这台机器从没有会话跑过 user 预设，不是机制不通）；从卡片按「召唤」→ 浮层关闭、
+输入框预填到该专家的开场问题（走 sidecar，不发请求）；回到这页，「最近使用」当场出现它；重启
+之后仍在（会话表是持久的）。单测 5 条钉住排序 / 去重 / 排除成员 / 无预设行 / 空表
+（`tests/recent-experts.spec.ts`）。
+
+### 顺带查清：设置面板的导航是壳私有的
+
+一开始的计划里有「管理跳内核 Agent 预设页」。做不了，也不该做：`settings.section` 的
+registrant 只拿到 `close`，`openSection(id)` 只发给 onboarding 协调者
+（`ui-settings/lib/types/client/contract/slots.d.ts:148-160`）。壳自己拥有模态可见性与导航。
+所以页面里连"跳过去"的按钮都不该有，一句话点名位置就够。
+
+### 还没定：模式下拉里混着专家
+
+`conversation.hero.agentPreset` 是 `kind: 'single'` / `scope: 'root'`（`ui-conversation/.../contract/slots.d.ts:229-233`），
+座位的实现直接读 `api.agentPresets.list({})` 全量，插件层没有配置旋钮，预设元数据也没有隐藏位
+（`agent-presets/lib/types/metadata.d.ts:22-33` 只有 name/description/order）。真机看过那个菜单：
+平铺 6 行、没有「内置 / 自定义」分组头，3 个模式和 3 个专家混在一起（默认选中确实已经是标准模式）。
+装到 20 个专家时那个下拉就变成专家列表了。要藏只有一条路：按 `settings.trigger` 那套影子替换
+（priority 低于内核）自己接管这个座位，代价是自己维护一颗选择器，且每次升内核都要跟。等决定。
+
+## 模式下拉整个撤掉：座位换成「非默认才出现」的可叉 chip（2026-08-24 真机验通）
+
+上一节问错了方向。用户要的不是「把专家从下拉里筛掉」，而是**那三个内置模式本来就不该给用户看**
+（`标准模式` / `PTC 模式` / `创造模式` 是这个产品怎么组装的，不是一道题）；专家另给一个显示入口，
+不需要时叉掉就回默认。
+
+**WorkBuddy 的原形（asar 原文，`.tmp-wb3/scan.cjs` 扫的）**——它输入区是**一族 chip**，共用一个
+`chip_base`，每个都是「没选就不存在、选了能叉掉」：
+
+| 它的键 | 文案 | 形状 |
+|---|---|---|
+| `input.expertChip.clear` | 取消选中专家 {name} | 组件第一句 `if (!selectedExpert) return null`；`displayName = profession \|\| name \|\| id` |
+| `input.modeChip.clear` | 退出{mode}模式 | 模式也是这个形状，**不是常驻下拉** |
+| `input.connectorChip.*` | 已连接的应用 | 同一族 |
+
+「取消」在它后端是一等状态，不是「没选」：`switchExpert` 的注释写着 `expertId: "ex_xxx"` → 切到该专家、
+**`expertId: ""` → 取消专家（回默认 agent）**。模式的**选择**离输入区很远——在欢迎页两张大卡片
+（`welcome.mode.coding` / `welcome.mode.working`，各带 subtitle + description）。
+
+**为什么不打补丁：这个座位是内核公开给插件的。** 三处正面证据：
+
+- 内核自己的 slot 目录写着 `key: conversation.hero.agentPreset` / `kind: single` /
+  `occupants: ["client-ui-agent-preset AgentPresetSeat"]` / **`replaceRisk: "shadows-shipped-ui"`**，
+  并且 `standardProps` 里白送 `useSessions` 与 `useWorkspaces`，`example` 就是一段插件注册代码
+  （`dsh-cordis-client-runner/lib/client.js:2447-2464`）。
+- 裁决规则在 `SlotCore`：`register` 撞车时报错文案是 *register at a different priority to shadow it
+  (lowest renders)*，`entriesOfSlot` 按 priority 取每个 cell 第一个活着的条目
+  （`dsh-client-ui-slots/lib/index.js:69,164-186`）。同 priority 是**响的失败**，不是静默覆盖。
+- 我们已经这么干过一次：账户行就是用 `priority: -1` 顶掉 `settings.trigger` 的（`AccountTrigger.tsx`）。
+
+所以这条改动**零补丁**：`patches/` 不动，升内核不用重过；内核继续拥有名录 RPC、拒绝规则、
+`agent-preset/selected` 广播、会话开跑后那条只读的头部标签，以及设置页整栏「Agent 预设」。
+
+**落点**：`openlux-plugin-account/src/client/PresetChip.tsx` + `preset-roster.ts`。判据是
+**非默认才画**，不是按 trust——内置的「创造模式」也该出声，否则会话跑在别的组合上而界面沉默。
+名字取 `agentPresets.list` 的 `name`（认不出的 id 就画 id，并照内核 `sync()` 那样自愈重读一次名录）；
+× 走 `agentPresets.select(默认 id)`，被拒就落到那条会话自己的 notice 条（内核只拒已开跑的会话，
+而这颗 chip 只活在新会话屏上，所以那是竞态，不是用户能瞄准的形状）。
+
+**三个模式没被删，只是搬回它们该在的地方**：设置页第四栏原样保留。真机读过那一栏：
+标准/PTC/创造三行「内置」+ 三位「自定义」+ 一个「用「创造模式」创作自定义预设」入口。
+（这一节写完的第二天这栏就整个撤了，见下面「设置里不再有 Agent 预设页」。）
+
+**真机五条（CDP，`.tmp-wb3/hero.cjs` / `summon-hero.cjs` / `creator.cjs`）**：
+
+| 验的事 | 结果 |
+|---|---|
+| 默认态 | hero 上一个 chip 都没有，`button[class*="_seat"]` 计数 **0**——内核那颗下拉真的没渲染；剩下的两个菜单是工作区与模型，本来就该在 |
+| 召唤 | 市场专家 tab 点「召唤」→ 覆盖层关、开场问题预填、座位出现 `超级独董会 ×`，`aria-label` 是「退出「超级独董会」」 |
+| 重启 | 杀进程重开，会话还记着那位专家，chip 原样在 |
+| 叉掉 | 点 × → chip 消失。这一步能当证据是因为**我们不做乐观隐藏**：render 由会话行推导，chip 消失等于 RPC 真的接受了切回默认 |
+| 内核那条路没断 | 设置页「用「创造模式」创作自定义预设」按下去 → 弹窗关、新会话起、chip 写着「创造模式」。说明 `seat.stage()` + `apply()` 不受影子替换影响——它们注册在 `scope.effect` 里，跟 slot 注册是两回事 |
+
+**两个坑记下来**：
+
+1. **`Pill` 的静态分支丢 `...rest`**：`onClick` 缺席时它渲染 `span` 且**不展开** rest
+   （`ui-primitives/lib/index.js:1424-1436`），所以 `data-testid` / `title` 挂在 Pill 上到不了 DOM——
+   第一次真机就是这样：× 的 label 读到了，chip 本体的 testid 是 null。标记要挂内层。
+2. **客户端那面 `api` 不带 agent-preset 域的类型**（wire 面是宿主端组装的），直接调会得到隐式 any
+   并被 `noImplicitAny` 拦下。照 `summon.ts` 的做法就地写结构类型，别去补包依赖。
+
+**两件顺手定下的边界**（2026-08-24，别当成漏项）：
+
+1. **叉掉之后不清输入框**：召唤时预填的开场问题留着。那行字用户可能已经改过，删掉比留着更冒犯；
+   而且那句话本身仍然问得出去。要清也只能清「一字未动仍是我们写的那句」，收益不值这条分支。
+2. **hero 上不放「召唤专家」入口**：WorkBuddy 欢迎页有专家中心入口，我们的入口在侧栏底部那颗市场
+   按钮，够用。座位在默认态就该是空的——那正是这次改动要的结果。
+
+## 设置里不再有 Agent 预设页：坐位占着、画空、导航那行一起消失（2026-08-24 真机验通）
+
+先走过一段弯路，记下来当反例。上一节把 hero 的下拉撤掉之后，设置页第四栏「Agent 预设」还在，
+里面平铺着三个内置模式和已装专家，点卡片就改整机默认。于是我照「复用出厂 id 顶掉那一格」的
+办法把它换成了自己的「专家」页：只列 `trust === 'user'`、每张卡带「打开它的文件 / 删除」、
+底部两个出口、再加一条「默认被挪走了 → 恢复默认」的修复行。写完、编过、真机也跑通了。
+
+**然后被驳回，而且驳得对**：用户完全不需要这一页。参考册里那句话本来就写着——
+`references/experts-and-teams.md:47`：**「无——WorkBuddy 压根没有『已安装专家』这个列表」**，
+老壳给的答案也不是管理页，而是**启动期拿市场快照对一次账，不在架且没任务在用的直接清掉本地
+登记**（2026-08-12 真机 42 → 30 条）。「装过的专家要能删」是我们的实现问题（我们的专家会落盘
+成内核预设），不是用户的需求。我把落盘这件事翻译成了一个页面，那是开发者视角。
+
+### 不能只删我们的页
+
+只删我们的注册，内核那页就回来——三个模式重新露脸，而且点卡片直接改默认。所以坐位还得占着，
+只是**画空**：`HiddenPresetSeats.tsx` 里两个返回 `null` 的组件，用内核自己的 id
+（`settings.section` 的 `agent-presets`、`settings.general.item` 的 `agent-preset`）以
+`priority: -1` 注册。list 槽按 id 分格、每格取 priority 最低的那条渲染，所以「有主但不画」
+就等于这一格空着。
+
+差的最后一步在导航：壳的左栏用 `entries()` 读原始注册清单，正文用 `renderSlot(..., { only })`
+按格选优——两个投影不一致，于是**正文换成了我们的、导航却多留一条内核的标签，点进去还是我们的页**。
+`ui-slots` 自己的注释把 `entries()` 称作 inspection surface，所以这是上游的不一致，不是注册写错。
+`dsh-client-ui-settings-general` 我们本来就有一份补丁（账户页那个图标），这一行叠上去：
+
+```
+- rows = ctx.slots.entries("settings.section").map(...).sort(...)
++ rows = ctx.slots.entriesOfSlot("settings.section").map(...).filter((row) => row.label !== "").sort(...)
+```
+
+两处改动各有分工：`entriesOfSlot` 让导航与正文同一个投影（顶掉一格不会多一行）；`filter` 让
+**没打算露面的占位格连行都不画**——设置导航只有标签可点，空标签就是一颗没有名字的按钮，比多一行更糟。
+补丁守卫（`tests/package.spec.ts`）跟着钉了这两个标记，升级时它们是「一个方法名 + 一次 filter」的重排。
+
+### 删除入口一个都不留
+
+**没有删除按钮**是这次的结论，不是漏项。真要清，照老壳那条做**启动期静默对账**（下架且没在用的
+自己清掉），零界面。已记成待办。改默认的两个入口（设置页、通用设置那行）都被盖住之后，只有手改
+`~/.dsh/settings.yaml` 能动它——而手改的人也能手改回来，所以那条「恢复默认」的修复行也一起撤了。
+
+### 顺手验到的一件好事：chip 真的跟着默认走
+
+为了验修复行，手改 `settings.yaml` 把默认写成 `cordis`。**没重启**，hero 上那颗 chip 当场改口
+说「标准模式」——因为这一版给 `PresetRoster` 订阅了 `settings/document-updated`（内核自己的座位
+也是靠这条广播知道默认变了）。这正好证明了那颗 chip 的判据是「非默认才画」而不是「非内置才画」：
+默认一旦挪走，跑在标准模式上的会话是该出声的。
+
+### 真机判据（app15，9223；`.tmp-wb3/nav-dump.cjs` / `market-root.cjs` / `hero.cjs`）
+
+| 验的事 | 结果 |
+|---|---|
+| 设置导航 | 账户 / 通用设置 / 模型 / 插件 / 插件市场 —— 「Agent 预设」和我那页「专家」都不在了；全 DOM 扫 `Agent ?预设` 命中 **0** |
+| 通用设置 | 权限 / 语言 / 外观 / 繁忙时 Enter 四行，选默认预设那行没了 |
+| 市场 | 专家 / 技能 / 连接器三 tab 与卡片照旧；「我的专家」空态 → 召唤「笔记课代表」→ 当场出现在最近使用 |
+| chip | 召唤后写「笔记课代表 ×」，`kernelSeat` 计数 0；按 × 回默认、chip 消失 |
+| 收尾 | 测试用的 `agent-presets: default` 从 `settings.yaml` 撤回；预填的草稿清掉 |
+
+删掉的代码：`ExpertsSection.tsx`（14 KB）、`experts-store.ts`（13 KB）、`tests/experts-page.spec.ts`、
+21 条 `experts*` 文案、`CREATOR_PRESET`（那颗「自己做一个」按钮是这一页带来的，页没了它也没主了；
+要不要照 WorkBuddy 做「创建专家」仍然是个待定项）。市场两句文案里「装过的专家在设置的『专家』页
+删除」也改回「不想用了在这条会话上叉掉，下次还能召唤」。
+
+### 顺带退掉一份补丁：`agent-preset` 那 14 行没有消费者了（2026-08-24 验后删）
+
+hero 座位换成我们的 chip 之后，`dsh-client-ui-agent-preset` 那份补丁就成了死代码。它给内核的
+`seat` store 加了个 `sync()`，让**切会话之后显示能跟上**——而 `seat.store` 全包只注入一处
+（`lib/client.js:1631`，`conversation.hero.agentPreset`），正是被我们顶掉的那一格。另外三处注册
+读的是别的 store：会话头部那条只读标签和通用设置那行读 `controller.store`（1592 / 1639），
+设置页读 `section.store`（1686）。这个包也没把 store 做成服务（`ctx.set` / `provide` 零命中），
+所以没有跨插件消费者。补丁只加 `sync()`，`stage()` / `apply()`（创作那条链）是上游原样的。
+
+**删之前验，不是删之后验**（这一轮先手滑改坏过一次 `package.json`，所以顺序值得写下来）：
+先确认 22 条 resolution 无重复、JSON 有效、`git diff` 只少那两行；再 install；再看装好的产物与
+`~/.dsh/profiles` 那份都不含 `seat.sync()`；最后真机。现在 `patches/` 11 份、`patch:` 型
+resolution 21 条。
+
+**真机四条（app15，9223）**：
+
+| 验的事 | 结果 |
+|---|---|
+| 召唤 | chip = 「笔记课代表」，`kernelSeat` 0 |
+| 在新会话屏之间切 | 逐条切过 4 个会话，默认的都不画 chip，没有残影 |
+| 已开跑的会话 | `hero` 整行**不存在**（有轨迹的会话不画新会话屏），所以 chip 无处可画是设计如此；头部条读到「好 · 笔记课代表 · Session log」——内核那条只读标签点名正确，它走的是 `controller.store` |
+| 守卫 | `package.spec.ts` 43 条过，其中新加一条断言「resolutions 里不再出现 agent-preset」，附上为什么退的那段话 |
+
+**留了个绊线**：那条断言的注释写明「座位只在有人渲染它的时候才值得修」。哪天我们不再顶那个座位，
+补丁要连着这条断言一起回来。
+
+**顺带记一个白跑的路子**：想从盘上取「这条会话跑的是哪个组合」的真相——取不到。
+`~/.dsh/sessions/*/session.jsonl.zstd` 里 `agentPreset` 只记**创建那一刻**的值（spawn 出来的子会话
+因此带得对，用户会话一律是 `standard`），`storages/session_projcache.json` 里这个字段零命中。
+要看当前预设，读界面（chip / 头部标签）或问 `agentPresets.list`，别读盘。
+
+## 下次怎么升：两层两种做法（2026-08-24 把上次的痕迹读回来写清）
+
+**外壳那一层用 subtree 合并，不手抄、更不全仓全拉。** 上次的痕迹还在：
+
+```
+2ecc74b25d  Squashed 'dsh/' changes from 684f456eab..9d18856dde
+972f0d37d9  并上游外壳 2.0.2：内核 0.1.0-rc.6 跳到 0.1.1-rc.2
+1555c1fb50  合并内核升级（并回主线）
+```
+
+那句 `changes from 684f456eab..9d18856dde` 是机制而不是注释：`git subtree` 下次读它当基点，
+**只回放上游的新变化**。手抄（照上游 diff 往我们树里敲）会丢掉这个基点，之后每次升级都会在同样的
+行上重新冲突一遍；全仓全拉则直接抹掉我们自己的源码。所以顺序是：更新上游克隆 → `git subtree pull
+--prefix=dsh dsh-upstream <新 tag> --squash` → 按「守住的分岔」那张表逐处裁决冲突。
+
+**内核包那一层才是「照抄」**：改版本号、装、然后把补丁在新产物上重打（见上面「四个补丁对 rc.2
+重打」那节的七步）。上次的工作量分布是：合并本身基本机械，重打补丁才是主要成本。
+
+**升级前的一件家务**：`dsh-upstream` 指的是本地克隆 `D:/work/yunwu-jihe/deepseek-harness-desktop`，
+它的 `master` 现在停在 `684f456eab`——**比我们上次并进来的 `9d18856dde` 还旧**。所以拿它当基线量
+分岔会得出「每个文件都差」的假象（`dsh-community-market/src/index.ts` 在那棵树上只有 1 行，我们这边
+93 行）。升级前先 fetch 它，或者把 remote 指到 GitHub。
+
+**两条让下次更便宜的习惯**（都有这一轮的证据）：新代码尽量落在 `openlux-plugin-account`
+（上游没有这个路径，87 个文件零冲突面）；界面改动**先找 slot 影子替换、再考虑 `yarn patch`**
+——hero 那颗 chip 零补丁，接管设置页整栏也只花了一行导航投影，而补丁是每次升级都要重打的那部分。
+
+## 品牌名被升级冲掉了：rc.2 把品牌拆成三个 slot（2026-08-24 真机验通）
+
+侧栏第一行升级后又写着 `deepseek HARNESS`。**不是补丁掉了，是钩子失效了**——我们那套换品牌的
+做法是 CSS 认上游 SVG 的比例盒（`button:has(> svg[viewBox="0 0 182 24"])`），而 rc.2 把品牌art
+拆成了两块：`BrandWordmark` 多了 `includeMark` 开关，只画名字的那份**盒子裁成
+`viewBox="26 0 156 24"`**（前 26px 是让给独立 mark 的）。选择器没命中，界面就静静回到官方字样。
+
+**旋钮在上游手里已经备好了，我们之前没有。** rc.2 新增了三格 + 一个填格子的插件：
+
+| 格 | 声明处 | owner props |
+|---|---|---|
+| `sidebar.brand.mark` | `dsh-client-ui-sidebar/lib/types/client/contract/slots.d.ts:19-23` | `{ size: number }` |
+| `sidebar.brand.name` | 同上 `:28-32` | 空（占位者自己管内容和宽度）|
+| `conversation.hero.brand.mark` | `dsh-client-ui-conversation/.../slots.d.ts:219-223` | `{ size, className? }` |
+
+合约原话是 *"deployments may replace the shell's fish fallback without replacing the surrounding
+controls"*，出厂占位者是 `dsh-client-ui-brand-official`（`lib/client.js:37-41`，三格都按默认
+priority 注册）。所以换品牌 = 两个组件 + 一个更低的 priority，**零补丁**，折叠状态机、新会话按钮、
+hero 标题都不用碰。
+
+做法（`dsh-plugin-desktop/src/client/Brand.tsx` + `client/index.ts`）：`BrandMark` 用 `<img>` 指
+`/openlux/brand-mark.png`（宿主那半是 `web-brand.ts`，没变），`BrandName` 照上游那块图的形状分两段
+——名字 `OpenLux` + 填色小牌 `Agent`，牌子站在 `HARNESS` 原来的位置。牌底用
+`--dsw-alias-label-primary`、牌字用 `--dsw-alias-label-primary-inverted`，真机读出来是
+`#0f1115` / `#fff`，都是主题给的值而不是我们的兜底，所以深浅色跟着翻。删掉了
+`client/brand-styles.ts`（那 20 行 CSS 连同它的两个 viewBox 常量）。
+
+真机三个态（`.tmp-wb3/brand-shots.cjs`）：展开=mark+名字+牌子、收起=只剩 mark、新会话=hero 那颗
+也是我们的；三态里 `0 0 23.16 17.04` / `26 0 156 24` / `0 0 182 24` **一处都不剩**。量出来的几何：
+mark 24×24 @(16,24)、`OpenLux` 74×24 @(48,24)、`Agent` 42×16 @(128,28)。
+
+### 旧守卫为什么没拦住：它断言的是「图还在」，不是「坐位是我们的」
+
+`tests/web-brand.spec.ts` 原来读前端产物、断言 `0 0 182 24` 这个字面量还在，本意正是防上游重画。
+它**升级后依然全绿**：`BrandWordmark` 带 mark 的那份仍然是 182×24，字符串在产物里，只是侧栏不再
+画那一份。**读产物证明「art 存在」，证明不了「art 在用」。** 换成读注册：三格都 `slots.inject` +
+`slots.register`、priority 为负、词标不含 `deepseek|harness`。这条比原来的强，因为坐位没了会直接
+编译不过（slot key 是类型），priority 撞了是响的失败。
+
+### 顺手补一处升级带进来的漏网
+
+`dsh-plugin-desktop/package.json` 的 `build.win.artifactName` 是 2.0.2 合并时新增的键，值是上游的
+`DSH-Desktop-${version}-${arch}-Portable.${ext}`——便携包会带着上游名字发出去。改成从
+`INSTALLER_STEM` 拼，`tests/package.spec.ts` 里那条断言也跟着改成拼的（原来写的是字面量，正是
+它让这个键悄悄留在了上游值上）。
+
+### 任务栏那颗图标：是开始菜单里一个野快捷方式在挡（2026-08-24 真机定案）
+
+同一轮报的「windows 任务栏图标还是 Electron 的」，跟这次升级无关，也跟我们的代码无关。图标文件
+一直是我们的蓝色 A（`build/app-icon.png`），接线跨升级一字未动
+（`src/index.ts:155-158` → `electron-shell-generation.ts:64`，空图会抛错，所以它确实加载了），
+`icon` 也确实进了两条窗口分支（`window-options.ts:30`、`:66`）。
+
+真凶是 `%AppData%\Microsoft\Windows\Start Menu\Programs\Electron.lnk`：一个指着我们 dev 那份
+`node_modules\electron\dist\electron.exe` 的快捷方式，`IconLocation` 是 `,0`（继承目标）。
+**Windows 会把正在跑的 exe 匹配到开始菜单里的同目标快捷方式，然后拿那个快捷方式的图标和名字画
+任务栏按钮**，于是窗口自带的图标根本没机会露脸。把这个 .lnk 移走、重启应用，任务栏立刻变成我们
+的 A。它的 mtime 是当天，文件里没有 `ai.openlux.desktop` 字样，也不是我们或内核写的
+（源码与 `@deepseek-ai/*` 里都没有 `writeShortcutLink`）——来源不明的野文件，**再出现就照这条删**。
+
+> 取证办法记一笔：CDP 只能截页面，截不到任务栏。用 `System.Windows.Forms.Screen` 拿
+> `Bounds.Height - WorkingArea.Height` 当任务栏高度，`Graphics.CopyFromScreen` 抠那一条，
+> 再 NearestNeighbor 放大 8 倍——40px 的图标缩在缩略图里根本分不出原子和 A，放大了才能定案。
+
+同一轮试错里被真机否掉的四条（别再买）：
+
+| 试过什么 | 结果 |
+| --- | --- |
+| `setAppUserModelId` 只在 `app.isPackaged` 调（原以为 AUMID 找不到快捷方式才退回 exe 图标） | 没变，且白丢 dev 下的通知归属 |
+| 创建后再补 `window.setIcon(icon)` | 没变 |
+| 先把 1024² 缩到 256 再 `setIcon`（怕 Windows 取不到小尺寸） | 没变 |
+| 加 `rcedit` 依赖，把 `build/app-icon.png` 打进 dev 的 `electron.exe` 资源 | 没变；随后用**缓存里原版未改的** `electron.exe` 一跑也是我们的 A，反证任务栏画的是**窗口图标**、不是进程镜像。依赖已撤，`electron.exe` 已从 `%LocalAppData%\electron\Cache` 还原 |
+
+`ie4uinit.exe -show` 清图标缓存、以及把打过图标的 exe 复制到 Windows 从没见过的新路径再启动，也都
+排除了「缓存」这条解释。最后落地的净代码改动是**零**：产品代码全部回滚，只删了那个野 .lnk。
+
+> 排查时先分清窗口：本机同时开着官方安装版（窗口标题 `DeepSeek Harness Desktop`）和我们的 dev
+> （标题 `OpenLux`），两个都会加载 `~/.dsh` 那份 profile，所以**官方那个窗口里也有我们的市场按钮
+> 和账户行**。`Get-Process | Where MainWindowTitle` 一条命令就能分开，别对着截图猜。
+
+## 「我的专家」改成它上线的那一块，最近召唤搬去输入框（2026-08-24 真机验通）
+
+上一节（6082 行那条）把这页做成了「只剩最近使用」，理由是 WorkBuddy 的 `myExperts.recent.hint`。
+**那条理由是错的**：解包核对组件后，`MyExpertsPanel` 只渲染 `CreatedExpertsPanel` 一个孩子
+（`renderer__assets__use-inspiration-share-code-receiver-*.js`，`my-experts-panel.tsx` 那段），
+`RecentExpertsPanel` 这个符号在整个 renderer 里**不存在**，`myExperts.recent.*` 只出现在语言包里、
+零消费者。**语言包里有文案 ≠ 功能上线**，判据必须落到「有没有组件消费它」——
+判定「某个键有没有人用」时注意：WorkBuddy 把语言包**内联**进了业务 chunk，
+所以 `rg -l <key>` 命中业务文件也可能只是命中了那份内联字典，要看命中处是
+`"key": "值"` 还是调用实参。
+
+改成它真正上线的形状，三件：
+
+| 改的 | 依据（都在 WorkBuddy 源码里） | 我们怎么做到同一个结果 |
+|---|---|---|
+| 页面 = 我创建的 | `CreatedExpertsPanel`：空态是图标 + `created.emptyTitle` + `emptyHint` + `+ 创建专家`；非空是工具条（专家/专家团 计数 tab + 搜索）+ 网格，**创建卡在网格最后一格** | `MyExperts.tsx`：`trust === 'user'` 且**没有** `openlux-market.json`（`install.ts:PROVENANCE_FILE` → `InstalledPreset.itemId`）。两条判据都是现成的，协议零改动 |
+| 创建 | `handleCreateExpert`：`goHome()` + `createExpertMode$.next({ defaultPrompt: target === "team" ? …Team… : void 0 })`——**专家不预填提示词** | `summon({ preset: 'cordis', prompt: '' })`。`cordis` 是内核出厂的创造模式（`@deepseek-ai/dsh/config/agent-presets/cordis/preset.yml`），内核自己的创建入口也是硬编码这个 id |
+| 最近召唤 | 在**输入框模式选择器**的「召唤专家」行下挂二级菜单 `ExpertSubmenu`：`最近召唤` 标题 + 列表 + 分隔 + `召唤其它专家`，且 `hasSubmenu = recentExperts.length > 0 \|\| hasExpert` | 我们没有模式选择器（那个下拉是刻意占空的），挂在 `conversation.input.left`（文件按钮那排，内核给常驻小控件的坐位）。`Menu` 原语正好有 `label` 抬头 / `footer` 钉行 / `side:'top'`。**没有最近专家就整颗不画** |
+
+### 真机撞出来的内核事实：一个 store 句柄只能挂一个 scope
+
+第一次接线时给输入框那颗也声明了 `store: marketView`（想直接拿 `actions.open()` 开市场），
+应用**起不来**，加载器把插件整个拒了：
+
+```
+failed to apply loader entry …(openlux-plugin-account): store handle mounted under
+"sidebar.footer.action" (scope "root") is already mounted under scope "session" —
+one handle, one scope
+```
+
+`sidebar.footer.action` 是 root 域，`conversation.input.left` 是会话域，同一个句柄跨不了。
+插件体也拿不到那个已挂实例：`StoreHandle.create()` 的注释写明它是「framework machinery and
+tests only」，且**不去重**（`ui-slots/lib/types/store.d.ts:72-79`），调它只会多造一个互不相干的实例。
+所以走这个文件本来就在用的写法——常驻的那一面把动词借出来（`MarketOverlay.publishOpen`，
+和 `notice` / `attach` / `summon` 同一形状），会话域那颗按注入的 `openMarket()` 调用。
+
+### 真机判据（9223，截图在 `.tmp-wb3/`）
+
+- 市场 → 我的专家：顶栏收起、只剩「‹ 全部专家 · 我的专家」，空态四件套齐全（本机没人用创造模式
+  造过专家，所以是真空态，不是没渲染）。
+- 按「+ 创建专家」：浮层关闭 → 落到空会话 → hero 挂「创造模式」chip → 输入框**空的**，
+  占位词是内核自己的「描述你想要构建的内容」。
+- 召唤一位已装专家后，输入框左排**当场多出**那颗按钮；菜单读回
+  `最近召唤 / 腾讯HR数智专家 / 召唤其它专家`；按「召唤其它专家」市场浮层打开（验的就是上面那条
+  publishOpen 通路）。
+- 连续召唤第二位后菜单只剩第二位——**这是对的**：召唤复用同一条空会话，
+  推导是「每个预设最新的那条会话」，第一位已经没有会话在跑了。
+- 门：`openlux-plugin-account` typecheck 绿；`dsh-plugin-desktop` typecheck 绿、
+  `vitest run` 88 文件 907 条全绿，其中新增 `tests/my-experts.spec.ts` 5 条钉两个判据
+  （纯函数放在 `client/expert-rows.ts`，不放组件里——`.tsx` 一进 runner 就把 primitives 的
+  `.module.css` 拖进来，报 `Unknown file extension ".css"`）。
+
+### 这版没做的三件（不是漏，是划出去了）
+
+专家团 tab（名录里没有 team 标记，建团还要一段自造提示词）；查看 / 修改 / 打开文件夹；
+**删除**——内核那两个设置坐位是我们刻意占空的（`experts-and-teams.md` 第 47 条），
+市场装的由启动期对账清理；但创造模式一旦真造出专家，删除就成了**没有主人的动作**，
+这是这次改动暴露出来的已知缺口，下次动这块先解决它。
+
+## 端到端造一位专家：真机跑完之后修正的四件事（2026-08-24 夜）
+
+上面那节的三条真机判据只验到「按钮按下去落在创造模式的空会话」，没有真的造出一位专家。
+补跑一整轮（DeepSeek V4 Flash，18 分 11 秒，50 步，输入 3M token），落出
+`~/.dsh/.agent-presets/excel-weekly-expert/`：`agent.cordis.yml` 18.8 KB +
+`preset.yml` + 自带技能 `skills/weekly-report-workflow/`（SKILL.md 加四份 references）。
+市场 →「我的专家」当场认它，四位市场装的一个都不混进来。跑通的同时撞出四件事。
+
+### 一、创造模式**要**预填那句模板——上一节表里那行是错的
+
+上一节记「专家不预填提示词」，依据是调用点 `defaultPrompt: target === "team" ? …Team… : void 0`。
+少看了一层：接住这个 payload 的创建模式自己兜底——
+
+```js
+const defaultPrompt = isEditMode
+  ? getEditExpertPrompt(payload.editExpert.id, locale)
+  : payload.defaultPrompt ?? getDefaultCreateExpertPrompt(locale)
+```
+
+`void 0` 是「不覆盖」，不是「不填」。`getDefaultCreateExpertPrompt(locale)` 就是
+「帮我创建一个 XXX 专家，擅长 XXXXX。我的经验是：[请补充你的行业背景、相关经验]」
+（en 版同址）。已按原文收进 `market-locales.ts:minePrompt`，创建按钮改成
+`summon({ preset: 'cordis', prompt: t('minePrompt') })`。
+
+**教训和上一节的「语言包有文案 ≠ 功能上线」是同一条的反面**：调用点传 undefined
+也 ≠ 没有默认值，得跟到接收端。
+
+### 二、最近召唤撤了：它在 WorkBuddy 里比我们做的深两层
+
+`ExpertSubmenu` 是活代码没错，但渲染点在**模式选择器下拉内部**
+（`mode_selector.expertSection`，`!onSummonExpert && recentExperts.length === 0` 时整段不画），
+要先展开下拉、再 hover「召唤专家」才出来。我们把那个下拉整个撤了，于是做成输入框上一颗
+常驻按钮——**比原版显眼得多，这不叫对齐**。用户「我没有看见 workbuddy 有最近召唤呀」
+是准确观察。已删 `ExpertQuickPick.tsx`、`recent.ts`、`recent-experts.spec.ts`
+和 `MarketOverlay.publishOpen` 那条 publish/subscribe 通路（没有消费者了，一起走）。
+
+上一节记的 store 单 scope 事实仍然成立，留着；只是当前没有代码用它。
+
+### 三、沙盒审批：一次一放，不改会话模式，也够不到别的专家
+
+会话默认 Workspace Write，写 `~/.dsh` 一律拒（`Error: [sandbox: file access denied
+under workspace-write mode]`），每写一个文件都要弹一次
+「escalate sandbox to danger-full-access: …」。粒度是**单次调用**：
+`ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`
+（`dsh-user-approval/lib/types/types.d.ts`），会话底栏跑完仍是 Workspace Write。
+本轮实测四位老专家 mtime 全没动（`18:07` 及更早，新专家 `23:04`）。
+
+代价是这条流程要人陪着点四五次「允许一次」。要变成无人值守就得整会话放宽权限，
+那是另一个决定，没做。
+
+### 四、同名不会互相覆盖，三条路都是拒绝而不是写坏
+
+| 谁想占已有的 id | 结果 |
+|---|---|
+| 市场安装 | `install.ts:270` 先查 `presets.list()`，撞上返回 `already-installed`，一个字节不写；提示去「设置 → Agent 预设」删了再装 |
+| 创造模式（内核 copy） | 抛 `preset "<id>" already exists — a copy never overwrites; delete the existing preset first or choose another id` |
+| 裸写文件 | 只有这条能覆盖，且每次越界写都要一次带路径的审批 |
+
+另外两种「同名」：**显示名**相同、id 不同 → 两行并存，只是名录上看着一样，不影响加载；
+用户预设 id 撞上**出厂预设**（如 `standard`）→ 发现是 first-root-wins，出厂的那份遮住用户的
+（`dsh-agent-presets`: "an earlier root wins a duplicate id"），但 copy 那关先就拒了，
+正常路径造不出这种局面。
+
+### 五、顺带修掉的两处（都是真机量出来的，不是推理）
+
+**侧栏底部两个坐位挤成一行。** `sidebar.footer.action` 是 list 槽，但渲染成
+**单行 nowrap flex，240px**。上游只有一个占位者（`ui-cordis` 的插件坞，只在当前会话注册了
+cordis 插件时出现——创造模式正好会），我们的市场是第二个。实测：往那条槽塞一个满宽兄弟，
+市场从 248px 被压到 50px，就是截图里「1 running」右边那半个字。
+`footer-row-style.ts` 注一条 `:has(> …)` / `:has(> * > …)`（锚在我们自己的 `data-testid` 上，
+不碰内核的哈希类名）让那一行可折行；复验：有兄弟时市场保持 264px，兄弟落到下一行（y 712 → 750）。
+夹一层 `display: contents` 的 Tooltip 是第一版选择器打空的原因，所以写了两个深度。
+
+**窗口标题一开会话就变回 DeepSeek Harness。** `web-brand.ts` 改的是服务端 `<title>`，
+只管到「还没选会话」那一刻；选中之后由内核 `DocumentTitle` 写
+`${session} · ${productTitle}`，而那个 `productTitle` 是发布包里的字面量
+（`ui-renderer/lib/client.js`: `const productTitle = "DeepSeek Harness"`），没有设置、没有槽、
+没有注入常量。`client/document-title.ts` 观察 `<head>` 把名字换回来；判据抽成
+`brandedTitle()`（相等就不写，观察者不会自激），`web-brand.spec.ts` 加两条钉住。
