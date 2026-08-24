@@ -9,6 +9,14 @@ export type DesktopPlatform = 'darwin' | 'win32' | 'linux'
 /** Native presentation modes selected by the desktop-shell Cordis row. */
 export type DesktopShellMode = 'compatibility' | 'advanced'
 
+/**
+ * Product default used when the settings document carries no desktop section.
+ * The launcher's startup projection and the settings schema must both read this
+ * one value: they are compared on every settings commit, and a mismatch
+ * restarts the application.
+ */
+export const DEFAULT_DESKTOP_SHELL_MODE: DesktopShellMode = 'advanced'
+
 /** Electron appearance source used by native frame and material rendering. */
 export type DesktopThemeSource = 'system' | 'light' | 'dark'
 

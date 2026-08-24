@@ -1,5 +1,10 @@
-# Desktop Host operations compose around the existing Web bundle. Compatibility
-# mode keeps upstream ownership of the browser carrier and rendered UI.
+# Desktop Host operations compose around the existing Web bundle.
+#
+# The `mode` value below is a declaration, not the switch: the launcher rewrites
+# this row's `mode` from the settings document on every boot (profile.ts, the
+# `desktop-shell` patch near the end of prepareDesktopProfile). The product
+# default lives in `DEFAULT_DESKTOP_SHELL_MODE` (src/runtime.ts) and a guard test
+# keeps the two equal, so change both together or neither.
 #
 # `desktop-updates` is deliberately absent. Its endpoints are module-level
 # constants in update-checker.ts and update-download.ts pointing at
@@ -13,7 +18,7 @@
     - id: desktop-shell
       name: dsh-plugin-desktop
       config:
-        mode: compatibility
+        mode: advanced
     - id: desktop-terminal
       name: dsh-plugin-desktop/terminal
       disabled: !!js process.platform === 'linux'
@@ -206,18 +211,31 @@
     baseURL: !!js "(process.env.OPENLUX_BASE_URL ?? 'https://api.openlux.ai') + '/v1'"
     model: claude-haiku-4-5-20251001
 
-# Name the guarded provider explicitly. Selection would reach it anyway (it is
-# the only usable fetch provider mounted), so this row is a statement, not a
-# load-bearing switch: a future second provider cannot quietly take over, and a
-# guard row that failed to mount surfaces as WEB_PROVIDER_CONFIGURED_MISSING on
-# the next fetch instead of as a successful unguarded one.
+# Name both providers explicitly. For fetch this is a statement rather than a
+# load-bearing switch (ours is the only usable one mounted); for search it is
+# load-bearing, because two usable providers are now registered and an unnamed
+# selection would fail as WEB_PROVIDER_AMBIGUOUS
+# (`dsh-web/lib/index.js:130`).
+#
+# Search goes to our own provider because the console has always delivered a
+# *priority list* for this purpose and promised on the page that a bad first
+# entry falls through to the next one. Upstream's provider calls exactly one
+# model and its section carries a singular `model`, so nothing there could ever
+# consume that list — the whole degradation was missing, not broken
+# (`openlux-plugin-account/src/web/search/provider.ts`). Ours sends the same
+# Anthropic Messages request with the same native search tool as its first
+# choice, following that package's reply-handling judgements to the letter, then
+# tries two more vendor families when this key has no Claude channel.
+#
+# `deepseek-official` stays mounted and re-pointed above: it is the escape hatch
+# a user layer can name if ours ever misbehaves.
 #
 # Patch of `config` is wholesale replacement (`applyEntryPatches` assigns the
-# key), so `searchProvider` has to be copied from the base row or search
-# selection goes back to "exactly one usable provider".
+# key), so both keys have to be written here or the missing one goes back to
+# "exactly one usable provider".
 - id: web
   config:
-    searchProvider: deepseek-official
+    searchProvider: openlux-search
     fetchProvider: openlux-http
 
 # Let the model read a page it found, instead of guessing from a snippet. The

@@ -16,6 +16,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import sharp from 'sharp'
 import { describe, expect, it } from 'vitest'
 import { APP_ID, INSTALLER_STEM, PRODUCT_NAME, SHORTCUT_NAME } from '../src/brand.ts'
+import { DEFAULT_DESKTOP_SHELL_MODE } from '../src/runtime.ts'
 
 /**
  * What the tray bitmaps are supposed to be, spelled out here rather than
@@ -165,6 +166,44 @@ describe('published package surface', () => {
     expect(readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')).not.toContain('name: dsh-plugin-desktop/updates')
   })
 
+  it('routes web search to the account plugin, which is the only consumer of the delivered list', () => {
+    // Upstream's own row selects `deepseek-official`, which calls exactly one
+    // model and whose settings section carries a singular `model` — so the
+    // console's delivered *priority list* had no consumer at all and every
+    // search ran on the pinned model. A subtree merge is exactly the event that
+    // would put that row back silently, and the symptom would be a capability
+    // that still works, so nobody would look.
+    const patch = readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')
+    expect(patch).toContain('searchProvider: openlux-search')
+    expect(patch).not.toContain('searchProvider: deepseek-official')
+    // Both keys have to stay written: `config` is replaced wholesale, and a
+    // missing one falls back to "exactly one usable provider" — which is now
+    // ambiguous, because two are registered.
+    expect(patch).toContain('fetchProvider: openlux-http')
+    // The id the row names must be the id the provider registers under.
+    const provider = readFileSync(new URL(
+      '../openlux-plugin-account/src/web/search/provider.ts',
+      packageRoot,
+    ), 'utf8')
+    expect(provider).toContain("export const OPENLUX_SEARCH_PROVIDER_ID = 'openlux-search'")
+    expect(provider).toContain('ctx.web.registerSearchProvider')
+  })
+
+  it('ships the frameless shell as the product default, declared in both places', () => {
+    // Upstream defaults to the framed window; this product ships the frameless
+    // one to match the reference client. Two values decide it and they are
+    // compared on every settings commit, so a drift restarts the app in a loop:
+    // the launcher projection reads DEFAULT_DESKTOP_SHELL_MODE and the settings
+    // schema defaults to the same constant. The Cordis row is only a
+    // declaration — the launcher rewrites it from the settings document — so it
+    // has to agree or the next reader will edit the row and see nothing happen.
+    expect(DEFAULT_DESKTOP_SHELL_MODE).toBe('advanced')
+    const patch = readFileSync(new URL('cordis.patch.yml', packageRoot), 'utf8')
+    expect(patch).toContain(`mode: ${DEFAULT_DESKTOP_SHELL_MODE}`)
+    const plugin = readFileSync(new URL('src/index.ts', packageRoot), 'utf8')
+    expect(plugin).toContain('mode: z.union([\'compatibility\', \'advanced\'] as const).default(DEFAULT_DESKTOP_SHELL_MODE)')
+  })
+
   it('pins both selectable Market providers in the published runtime', () => {
     expect(manifest.dependencies).toMatchObject({
       'dsh-community-market': '0.1.0-dev.0',
@@ -276,7 +315,7 @@ describe('published package surface', () => {
     }
   })
 
-  it('gives the account settings section its own nav glyph', () => {
+  it('gives the account settings section its own nav glyph, and lists nav cells rather than registrations', () => {
     const patchPath = './patches/dsh-client-ui-settings-general@0.1.1-rc.2.patch'
     expect(workspaceManifest.resolutions).toMatchObject({
       '@deepseek-ai/dsh-client-ui-settings-general@npm:0.1.1-rc.2': expect.stringContaining(patchPath),
@@ -287,26 +326,35 @@ describe('published package surface', () => {
       'node_modules/@deepseek-ai/dsh-client-ui-settings-general/lib/client.js',
       packageRoot,
     ), 'utf8')
-    for (const marker of ['openlux-account-section', 'IconUserOutline16']) {
+    for (const marker of [
+      'openlux-account-section',
+      'IconUserOutline16',
+      // The nav's own projection. Without this the shell lists raw registrations
+      // while its content region resolves shadowing winners, so replacing a
+      // shipped settings page (the contract the slot advertises for a reused id)
+      // leaves a second nav row pointing at the same page. The filter is what
+      // lets a cell be occupied and silent — how the Agent presets page leaves.
+      'entriesOfSlot("settings.section")',
+      '.filter((row) => row.label !== "")',
+    ]) {
       expect(patch).toContain(marker)
       expect(installedClient).toContain(marker)
     }
   })
 
-  it('re-derives the preset chip from the session that is current', () => {
-    const patchPath = './patches/dsh-client-ui-agent-preset@0.1.1-rc.2.patch'
-    expect(workspaceManifest.resolutions).toMatchObject({
-      '@deepseek-ai/dsh-client-ui-agent-preset@npm:0.1.1-rc.2': expect.stringContaining(patchPath),
-      '@deepseek-ai/dsh-client-ui-agent-preset@npm:^0.1.1-rc.2': expect.stringContaining(patchPath),
-    })
-    const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
-    const installedClient = readFileSync(new URL(
-      'node_modules/@deepseek-ai/dsh-client-ui-agent-preset/lib/client.js',
-      packageRoot,
-    ), 'utf8')
-    for (const marker of ['seat.sync()', 'const preset = this.currentSession()?.agentPreset']) {
-      expect(patch).toContain(marker)
-      expect(installedClient).toContain(marker)
+  it('leaves the agent-preset package unpatched, its seat having no reader here', () => {
+    // This package used to carry a patch (`seat.sync()`, so the hero seat's
+    // display re-derived after a session switch). The only reader of that store
+    // was the seat component itself, and `openlux-plugin-account` now shadows
+    // `conversation.hero.agentPreset` with its own chip — so the patch went. The
+    // header label and the settings page read different stores (`controller`,
+    // `section`), neither of which the patch touched.
+    //
+    // Asserted rather than merely deleted: if this package ever needs patching
+    // again, whoever adds it should read the sentence above first — the seat is
+    // only worth fixing while something renders it.
+    for (const key of Object.keys(workspaceManifest.resolutions ?? {})) {
+      expect(key).not.toContain('dsh-client-ui-agent-preset')
     }
   })
 
@@ -688,7 +736,11 @@ describe('published package surface', () => {
       target: 'nsis',
       arch: ['x64'],
     }])
-    expect(manifest.build?.win?.artifactName).toBe('DSH-Desktop-${version}-${arch}-Portable.${ext}')
+    // Spelled from the same stem as the installer below rather than as a
+    // literal: this key arrived with the 2.0.2 merge carrying upstream's name,
+    // and a literal here is what let the portable build keep it.
+    expect(manifest.build?.win?.artifactName)
+      .toBe(`${INSTALLER_STEM}-\${version}-\${arch}-Portable.\${ext}`)
     expect(manifest.build?.nsis).toEqual({
       license: 'THIRD_PARTY_NOTICES.md',
       oneClick: false,

@@ -29,7 +29,7 @@ import { parseDocument } from 'yaml'
 import { unpackedAsarPath } from './packaged-runtime-path.ts'
 import { findOverlayPackage, resolveOverlayPackage } from './package-overlay.ts'
 import { DESKTOP_DEFAULT_WEB_PORT } from './desktop-port.ts'
-import type { DesktopShellMode } from './runtime.ts'
+import { DEFAULT_DESKTOP_SHELL_MODE, type DesktopShellMode } from './runtime.ts'
 import {
   activeDesktopProfileLayers,
   desktopPluginBundleMutable,
@@ -69,7 +69,6 @@ const AGENT_PRESETS_ROW_ID = 'agent-presets'
 const UPSTREAM_AGENT_PRESETS_PACKAGE = '@deepseek-ai/dsh-agent-presets'
 const DESKTOP_WINDOWS_AGENT_PRESETS_ROW_ID = 'desktop-windows-agent-presets'
 const DESKTOP_WINDOWS_AGENT_PRESETS_PACKAGE = 'dsh-plugin-desktop/windows-agent-presets'
-const DEFAULT_DESKTOP_SHELL_MODE: DesktopShellMode = 'compatibility'
 const DEFAULT_DESKTOP_PORT = DESKTOP_DEFAULT_WEB_PORT
 const DESKTOP_WEB_SERVER_ROW_ID = 'desktop-webserver'
 const DESKTOP_WEB_SERVER_PACKAGE = 'dsh-plugin-desktop/webserver'

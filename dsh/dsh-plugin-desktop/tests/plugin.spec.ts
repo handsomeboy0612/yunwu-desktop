@@ -21,7 +21,11 @@ import {
   DESKTOP_DIRECTORY_PICKER_PATH,
   DESKTOP_DIRECTORY_VALIDATOR_PATH,
 } from '../src/directory-picker-contract.ts'
-import type { DesktopRuntime, DesktopShellSpec } from '../src/runtime.ts'
+import {
+  DEFAULT_DESKTOP_SHELL_MODE,
+  type DesktopRuntime,
+  type DesktopShellSpec,
+} from '../src/runtime.ts'
 import { RENDERER_BOOT_REPORT_PATH, type RendererBootReport } from '../src/renderer-boot-contract.ts'
 
 const config: DesktopConfig = {
@@ -171,10 +175,11 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
 }
 
 describe('desktop Host plugin', () => {
-  it('defaults to compatibility mode and validates both schemas', () => {
+  it('defaults settings to the product mode and validates both schemas', () => {
     expect(Config({} as DesktopConfig)).toEqual(config)
     expect(Config({ mode: 'advanced' } as DesktopConfig)).toEqual({ ...config, mode: 'advanced' })
-    expect(DesktopSettingsSchema({} as DesktopSettings)).toEqual({ mode: 'compatibility', port: 43_120, logLevel: 'info' })
+    expect(DesktopSettingsSchema({} as DesktopSettings))
+      .toEqual({ mode: DEFAULT_DESKTOP_SHELL_MODE, port: 43_120, logLevel: 'info' })
     expect(() => DesktopSettingsSchema({ port: -1 } as DesktopSettings)).toThrow()
     expect(() => DesktopSettingsSchema({ port: 1.5 } as DesktopSettings)).toThrow()
     expect(() => DesktopSettingsSchema({ port: 65_536 } as DesktopSettings)).toThrow()

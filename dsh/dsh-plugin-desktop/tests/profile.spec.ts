@@ -16,6 +16,7 @@ import {
   validateDshMarketBundlePatches,
 } from '../src/profile.ts'
 import { DESKTOP_MARKET_IDENTITIES } from '../src/desktop-market.ts'
+import { DEFAULT_DESKTOP_SHELL_MODE } from '../src/runtime.ts'
 
 const homes: string[] = []
 
@@ -188,6 +189,7 @@ describe('desktop profile composition', {
 
   it('assembles the Host shell without replacing the upstream client shell', () => {
     const home = temporaryHome()
+    writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: compatibility\n')
     const prepared = prepareDesktopProfile(undefined, home, 'darwin')
     const patches = prepared.patches as Array<Record<string, unknown>>
     const inserted = patches.flatMap((patch) => {
@@ -196,7 +198,7 @@ describe('desktop profile composition', {
     })
     expect(inserted).toContainEqual(expect.objectContaining({
       name: DESKTOP_PACKAGE_NAME,
-      config: { mode: 'compatibility' },
+      config: { mode: 'advanced' },
     }))
     expect(patches).toContainEqual(expect.objectContaining({
       id: 'webserver',
@@ -486,6 +488,7 @@ describe('desktop profile composition', {
 
   it('boots a selected Web profile without overriding its compatibility UI rows', () => {
     const home = temporaryHome()
+    writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: compatibility\n')
     const webDir = join(home, 'profiles', 'web')
     const bundles = PROFILE_TEMPLATES.web
     if (bundles === undefined) throw new Error('test requires the shipped Web template')
@@ -547,7 +550,7 @@ describe('desktop profile composition', {
     expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(false)
   })
 
-  it('reads JSON settings and defaults an absent desktop namespace to compatibility', () => {
+  it('reads JSON settings and defaults an absent desktop namespace to the product mode', () => {
     const home = temporaryHome()
     const path = join(home, 'desktop-settings.json')
     writeFileSync(path, JSON.stringify({ 'dsh-desktop': { mode: 'advanced' } }))
@@ -561,7 +564,7 @@ describe('desktop profile composition', {
       mode: 'advanced',
       port: 43_120,
     })
-    expect(desktopShellModeFromSettings({ unrelated: { enabled: true } })).toBe('compatibility')
+    expect(desktopShellModeFromSettings({ unrelated: { enabled: true } })).toBe(DEFAULT_DESKTOP_SHELL_MODE)
   })
 
   it('rejects invalid settings roots, sections, modes, and YAML', () => {
