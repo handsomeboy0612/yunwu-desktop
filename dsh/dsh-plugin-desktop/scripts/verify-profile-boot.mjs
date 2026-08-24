@@ -252,6 +252,22 @@ try {
     }
   }
 
+  // The seam that carries credentials a person has to go and fetch. Every flow
+  // registers behind `ctx.inject(['authorization'], …)`, so dropping its row
+  // costs the sign-ins silently: nothing fails, the flows simply never appear.
+  // Measured here rather than asserted by name because the roster is pi-ai's
+  // catalog, which grows upstream.
+  const authorization = ctx.get('authorization')
+  if (authorization === undefined) {
+    throw new Error('assembled desktop profile mounts no authorization service, so no sign-in can register')
+  }
+  const flows = authorization.list()
+  if (!flows.some(flow => flow.methods.some(method => method.id === 'oauth'))) {
+    throw new Error(
+      `assembled desktop profile registers no OAuth sign-in (${String(flows.length)} flows, all key-only)`,
+    )
+  }
+
   const picker = ctx.directoryPicker.capability()
   if (picker.kind !== 'browse') {
     throw new Error(`assembled Windows profile selected ${picker.kind} directory picker`)

@@ -62,6 +62,16 @@ export interface MarketCardProps {
   readonly onRemove?: () => void
   readonly removeLabel?: string
   /**
+   * Put an unhealthy row back together, when its reason has a fix.
+   *
+   * Only a dead web sign-in has one today. It is offered instead of the
+   * primary action rather than beside it, because an installed row's primary
+   * action is already spent — the row is installed — and the one thing left to
+   * do with it is the repair.
+   */
+  readonly onRepair?: () => void
+  readonly repairLabel?: string
+  /**
    * What the four states are called, when this partition does not call them
    * install / installing / installed / broken.
    *
@@ -143,7 +153,10 @@ export function describe(item: CatalogItem, language: 'zh' | 'en'): string {
  * @returns the card.
  */
 export function MarketCard(
-  { item, state, language, t, onOpen, onPrimary, summonable, onRemove, removeLabel, words }: MarketCardProps,
+  {
+    item, state, language, t, onOpen, onPrimary, summonable,
+    onRemove, removeLabel, onRepair, repairLabel, words,
+  }: MarketCardProps,
 ): ReactNode {
   const [imageFailed, setImageFailed] = useState(false)
   const remote = item.icon.startsWith('http://') || item.icon.startsWith('https://')
@@ -230,6 +243,21 @@ export function MarketCard(
             }}
           >
             {removeLabel}
+          </Button>
+        )}
+
+        {state.kind === 'installed' && state.broken !== undefined
+          && onRepair !== undefined && repairLabel !== undefined && (
+          <Button
+            variant="primary"
+            size="sm"
+            data-testid={`openlux-market-repair-${item.slug}`}
+            onClick={event => {
+              event.stopPropagation()
+              onRepair()
+            }}
+          >
+            {repairLabel}
           </Button>
         )}
 

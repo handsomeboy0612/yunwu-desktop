@@ -30,6 +30,17 @@
       name: dsh-plugin-desktop/pnpm
     - id: desktop-profiles
       name: dsh-plugin-desktop/profiles
+    # The authorization seam, which the base bundle leaves unmounted. A flow is
+    # a plugin's knowledge of how to obtain its own credential, and every plugin
+    # that ships one registers it optionally — pi-ai's is behind
+    # `ctx.inject(['authorization'], …)` — so without this row those flows are
+    # silently absent rather than broken. Mounted for connector sign-in: 60 of
+    # the 82 remote servers in the catalog answer an unauthenticated handshake
+    # with `WWW-Authenticate: Bearer resource_metadata=…`, a credential that can
+    # only be had by talking to the person at the keyboard.
+    - id: authorization
+      name: '@deepseek-ai/dsh-authorization'
+
     # OpenLux account. Resolvable by bare name because it is a dependency of
     # this package: app-boot walks the desktop manifest's dependency closure and
     # symlinks each package into $DSH_HOME/profiles/node_modules, which Node

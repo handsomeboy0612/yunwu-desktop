@@ -19,8 +19,8 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ConnectorManifest } from '../../openlux-plugin-account/src/market/console.ts'
 import {
-  buildConfig, customPath, readConnectorTarget, recordPath, restoreConnectors,
-  syncCustomConnectors, uninstallConnector,
+  buildConfig, customPath, looksUnauthorized, readConnectorTarget, recordPath,
+  remountConnector, restoreConnectors, syncCustomConnectors, uninstallConnector,
 } from '../../openlux-plugin-account/src/market/connector-install.ts'
 
 /**
@@ -138,10 +138,33 @@ describe('manifest to bridge config', () => {
     // Declared token auth with no field name: nowhere to put the secret.
     expect(buildConfig(manifest({ command: 'npx' }, { mode: 'token' }), 'secret'))
       .toMatchObject({ kind: 'refused', reason: 'bad-manifest' })
-    // The kernel ran the whole OAuth flow; the bridge takes static values only,
-    // so connecting would produce a server that 401s on every call.
-    expect(buildConfig(manifest({ url: 'https://example.test/mcp' }, { mode: 'oauth' }), 'x'))
+    // A web sign-in produces a bearer token, which needs a request to ride on.
+    // A spawned process has none, so this manifest describes nothing buildable.
+    expect(buildConfig(manifest({ command: 'npx' }, { mode: 'oauth' }), 'x'))
       .toMatchObject({ kind: 'refused', reason: 'unsupported-auth' })
+  })
+
+  it('builds a signed-in connector, and says so when no grant has been made yet', () => {
+    // The catalog's OAuth rows were written for a kernel that ran `mcp login`
+    // and so declare no field; `Authorization: Bearer` is the token endpoint's
+    // own `token_type` rather than a guess, and an explicit field still wins.
+    const granted = buildConfig(manifest({ url: 'https://example.test/mcp' }, { mode: 'oauth' }), 'tok')
+    expect(granted).toMatchObject({
+      kind: 'built',
+      config: { headers: { Authorization: 'Bearer tok' } },
+      oauth: { site: 'headers', key: 'Authorization', prefix: 'Bearer ' },
+    })
+    // The prefix rides in the record because the value does not: a grant is
+    // re-read and re-spelled on every mount.
+    expect(granted).not.toHaveProperty('secret')
+
+    expect(buildConfig(manifest({ url: 'https://example.test/mcp' }, { mode: 'oauth' })))
+      .toMatchObject({ kind: 'refused', reason: 'needs-authorization' })
+
+    expect(buildConfig(
+      manifest({ url: 'https://example.test/mcp' }, { mode: 'oauth', key: 'X-Token', prefix: '' }),
+      'tok',
+    )).toMatchObject({ config: { headers: { 'X-Token': 'tok' } } })
   })
 
   it('refuses a namespace the bridge would reject at load', () => {
@@ -342,6 +365,222 @@ describe('the user\'s own file', () => {
     expect(synced.problems[0]).not.toContain('openlux-connector')
     expect(synced.problems[0]).not.toContain('command')
   })
+})
+
+/**
+ * A web sign-in that stopped working, and the repair.
+ *
+ * Both halves are here rather than on the machine because the live half needs
+ * a provider willing to expire a grant on cue. What the repair has to get
+ * right is not the OAuth — `connector-oauth.spec.ts` drives that against a
+ * real server — but the mount: an entry already in the tree is holding the
+ * dead token, so remounting has to replace it rather than adopt it.
+ *
+ * These are also the only cases that mount a signed-in connector from disk,
+ * which is how they caught the record parser dropping `oauth` on the way in:
+ * the connector came up with no `Authorization` header and reported itself
+ * live, so every restart of a working connector broke it silently.
+ */
+describe('a sign-in that died', () => {
+  /** One record whose token comes from a web sign-in rather than a paste. */
+  function signedIn(slug: string): string {
+    return JSON.stringify([{
+      slug,
+      serverName: slug,
+      name: 'Moka',
+      connectedAt: '2026-08-25T00:00:00.000Z',
+      config: { serverName: slug, transport: 'streamable-http', url: 'https://example.test/mcp' },
+      oauth: { site: 'headers', key: 'Authorization', prefix: 'Bearer ' },
+    }])
+  }
+
+  /**
+   * A context whose loader tracks its own store, and a seam holding one grant.
+   *
+   * The store matters here and not in the other cases: `mountEntry` adopts an
+   * entry that is already there, so a loader that forgets what it mounted
+   * cannot tell adoption from a fresh mount.
+   * @param grant - what the seam answers with, or nothing for a dead sign-in.
+   * @param options - `removalSticks: false` leaves the entry in the store after
+   *   a removal that reported success, which is the shape a repair must refuse;
+   *   `onCreate` throws in the bridge's place, for the refusals that only the
+   *   server can produce.
+   * @returns the context, what it mounted, and what it removed.
+   */
+  function withGrant(
+    grant?: Record<string, unknown>,
+    options?: { removalSticks?: boolean; onCreate?: () => void },
+  ): {
+    ctx: Host
+    mounts: Record<string, unknown>[]
+    removed: string[]
+    put: (next: Record<string, unknown>) => void
+  } {
+    const mounts: Record<string, unknown>[] = []
+    const removed: string[] = []
+    const store: Record<string, unknown> = {}
+    let held = grant
+    const loader = {
+      store,
+      create: async (options_: Record<string, unknown>) => {
+        options?.onCreate?.()
+        mounts.push(options_.config as Record<string, unknown>)
+        store[String(options_.id)] = options_
+        return String(options_.id)
+      },
+      remove: async (id: string) => {
+        removed.push(id)
+        if (options?.removalSticks !== false) delete store[id]
+      },
+    }
+    return {
+      mounts,
+      removed,
+      put: (next) => { held = next },
+      ctx: {
+        logger: { info: () => {}, warn: () => {} },
+        get: (name: string) => name === 'loader' ? loader : undefined,
+        credentials: {
+          readRecord: async () => held === undefined ? undefined : { kind: 'grant', payload: held },
+          modifyRecord: async () => {},
+          deleteRecord: async () => { held = undefined },
+        },
+      } as unknown as Host,
+    }
+  }
+
+  /** A grant the mount path will accept, with no expiry to chase. */
+  function living(token: string): Record<string, unknown> {
+    return {
+      tokens: { access_token: token, token_type: 'Bearer' },
+      client: { client_id: 'registered' },
+      serverUrl: 'https://example.test/mcp',
+    }
+  }
+
+  it('leaves the row connected, and says the sign-in is what needs fixing', async () => {
+    const { ctx: host, mounts } = withGrant()
+    writeFileSync(recordPath(), signedIn('moka-dead'), 'utf8')
+
+    expect(await restoreConnectors(host)).toEqual({ mounted: 0, failed: 1 })
+
+    expect(mounts).toEqual([])
+    const target = await readConnectorTarget(host)
+    // Still connected: the record is what "connected" means, and a row that
+    // vanished would take its disconnect button with it.
+    expect(target.installed).toMatchObject([{ slug: 'moka-dead', live: false }])
+    // The flag, not the sentence, is what the row turns into a button.
+    expect(target.installed[0]?.needsAuthorization).toBe(true)
+    expect(target.installed[0]?.failure).toContain('授权')
+  })
+
+  it('mounts the new token after the repair, instead of adopting the dead one', async () => {
+    const { ctx: host, mounts, removed, put } = withGrant(living('first'))
+    writeFileSync(recordPath(), signedIn('moka-live'), 'utf8')
+    expect(await restoreConnectors(host)).toEqual({ mounted: 1, failed: 0 })
+    expect(mounts[0]).toMatchObject({ headers: { Authorization: 'Bearer first' } })
+
+    put(living('second'))
+    expect(await remountConnector(host, 'moka-live')).toEqual({ kind: 'mounted' })
+
+    // The entry that held the old token is gone rather than reused, which is
+    // the whole point: adopting it would report success and keep serving a
+    // token the provider has stopped honouring.
+    expect(removed).toEqual(['openlux-connector-moka-live'])
+    expect(mounts).toHaveLength(2)
+    expect(mounts[1]).toMatchObject({ headers: { Authorization: 'Bearer second' } })
+    expect((await readConnectorTarget(host)).installed).toMatchObject([{ live: true }])
+  })
+
+  it('keeps the row and the flag when the repair did not take', async () => {
+    const { ctx: host } = withGrant(living('first'))
+    writeFileSync(recordPath(), signedIn('moka-again'), 'utf8')
+    expect(await restoreConnectors(host)).toEqual({ mounted: 1, failed: 0 })
+
+    // Signed out again between the press and the remount.
+    await uninstallGrantOnly(host)
+    expect(await remountConnector(host, 'moka-again')).toMatchObject({ kind: 'refused' })
+
+    const target = await readConnectorTarget(host)
+    expect(target.installed).toMatchObject([{ slug: 'moka-again', live: false }])
+    expect(target.installed[0]?.needsAuthorization).toBe(true)
+  })
+
+  it('refuses a slug it has no record for', async () => {
+    const { ctx: host } = withGrant(living('first'))
+
+    expect(await remountConnector(host, 'never-connected')).toMatchObject({ kind: 'refused' })
+  })
+
+  it('offers the repair when the provider rejected a grant this side still believes in', async () => {
+    // Nothing expired locally, so the token is handed over and the refusal
+    // arrives from the mount instead — the shape a revoke on the provider's
+    // side takes. Both layers below are copied from what actually ships, and
+    // both matter: `dsh-mcp-client` throws one fixed sentence with the real
+    // error on `cause` (`lib/index.js:782`), and the SDK's own 401 carries the
+    // status only on `.code` — its message says `Streamable HTTP error: …`
+    // and never the number (`client/streamableHttp.js:16-21,369`).
+    const revoked = Object.assign(
+      new Error('Streamable HTTP error: Error POSTing to endpoint: token revoked'),
+      { code: 401 },
+    )
+    const { ctx: host } = withGrant(living('first'), {
+      onCreate: () => {
+        throw new Error('mcp-client(moka-revoked): initial connection or tool synchronization failed', {
+          cause: revoked,
+        })
+      },
+    })
+    writeFileSync(recordPath(), signedIn('moka-revoked'), 'utf8')
+
+    expect(await restoreConnectors(host)).toEqual({ mounted: 0, failed: 1 })
+
+    const target = await readConnectorTarget(host)
+    expect(target.installed[0]?.needsAuthorization).toBe(true)
+    // The status reached the row rather than being swallowed by the wrapper.
+    expect(target.installed[0]?.failure).toContain('401')
+  })
+
+  it('leaves an unrelated failure alone, so the button means what it says', () => {
+    expect(looksUnauthorized('spawn npx ENOENT (ENOENT)', 'moka')).toBe(false)
+    expect(looksUnauthorized('fetch failed ← connect ECONNREFUSED 127.0.0.1:8080', 'moka')).toBe(false)
+    expect(looksUnauthorized('… failed ← Streamable HTTP error: … (401)', 'moka')).toBe(true)
+    expect(looksUnauthorized('… failed ← Authentication required', 'moka')).toBe(true)
+  })
+
+  it('does not read a connector\'s own name as the reason it failed', () => {
+    // Identity products are called this, and the name is inside the sentence:
+    // the client's wrapper reads `mcp-client(<serverName>): …`. Matching it
+    // would pin the button to every failure this connector ever has.
+    const down = 'mcp-client(authing): initial connection or tool synchronization failed'
+      + ' ← fetch failed ← connect ECONNREFUSED 127.0.0.1:8080'
+    expect(looksUnauthorized(down, 'authing')).toBe(false)
+    // The real one still lands for the same connector.
+    expect(looksUnauthorized(`${down.split(' ← ')[0]} ← Streamable HTTP error: … (401)`, 'authing')).toBe(true)
+  })
+
+  it('refuses rather than adopting an entry the unmount could not take down', async () => {
+    const { ctx: host, mounts } = withGrant(living('first'), { removalSticks: false })
+    writeFileSync(recordPath(), signedIn('moka-stuck'), 'utf8')
+    expect(await restoreConnectors(host)).toEqual({ mounted: 1, failed: 0 })
+
+    const outcome = await remountConnector(host, 'moka-stuck')
+
+    // Adopting would have answered `mounted` while the server kept serving the
+    // token the user just replaced — a repair that reports success and fixes
+    // nothing is worse than one that says it could not run.
+    expect(outcome).toMatchObject({ kind: 'refused' })
+    expect(mounts).toHaveLength(1)
+    // And the row keeps its button, so the user can try again after a restart.
+    expect((await readConnectorTarget(host)).installed[0]?.needsAuthorization).toBe(true)
+  })
+
+  /** Drop the grant without touching the record, as a revoke would. */
+  async function uninstallGrantOnly(host: Host): Promise<void> {
+    await (host as unknown as {
+      credentials: { deleteRecord: (key: string) => Promise<void> }
+    }).credentials.deleteRecord('unused')
+  }
 })
 
 /**

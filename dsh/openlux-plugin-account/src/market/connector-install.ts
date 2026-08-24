@@ -61,8 +61,14 @@ import { dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { causeChain } from '../error-cause.ts'
 import { ConsoleError, readConnectorManifest, type ConsoleAccess } from './console.ts'
 import type { ConnectorManifest } from './console.ts'
+import {
+  forgetConnectorGrant, hasConnectorGrant, readAuthorizationState, readConnectorToken,
+  startConnectorAuthorization,
+} from './connector-oauth.ts'
+import type { ConnectorAuthorizationStart, ConnectorAuthorizationState } from './wire.ts'
 import type {
   ConnectorRequest, ConnectorRequirement, ConnectorTarget, CustomOpen, InstallOutcome,
   InstalledConnector, RefusalReason,
@@ -96,6 +102,17 @@ interface SecretSite {
   readonly key: string
 }
 
+/**
+ * Where a granted token belongs, and how it is spelled.
+ *
+ * Carries the prefix a pasted secret's site does not need: a static token is
+ * stored with the prefix already on it, while a granted one is re-fetched and
+ * re-spelled on every mount, so `Bearer ` has to survive in the record.
+ */
+interface GrantSite extends SecretSite {
+  readonly prefix: string
+}
+
 /** What one connected connector needs to be re-mounted next launch. */
 interface ConnectorRecord {
   readonly slug: string
@@ -114,6 +131,16 @@ interface ConnectorRecord {
   readonly config: Record<string, unknown>
   /** Where the token was, and what to ask the credential seam for. */
   readonly secret?: SecretSite & { readonly ref: string }
+  /**
+   * Where the bearer token goes for a connector signed in to over the web.
+   *
+   * Separate from `secret` because the two differ in who owns the value, not
+   * just in where it sits: a pasted token is a string this module wrote to a
+   * `CredentialRef` and reads back unchanged, while a grant is written by the
+   * authorization flow, expires, and is rotated on the mount path. Only the
+   * placement is recorded here; the value is looked up per mount by slug.
+   */
+  readonly oauth?: GrantSite
 }
 
 /** The bridge config for one server, in the shape `dsh-mcp-client` takes. */
@@ -134,7 +161,12 @@ interface LoaderLike {
 }
 
 /** Live mount state, keyed by slug, for the current process only. */
-const mounted = new Map<string, { readonly entryId: string; readonly failure?: string }>()
+const mounted = new Map<string, {
+  readonly entryId: string
+  readonly failure?: string
+  /** Set when the failure is a dead sign-in, which the user can fix in place. */
+  readonly needsAuthorization?: boolean
+}>()
 
 /**
  * Read what is connected.
@@ -164,6 +196,7 @@ export async function readConnectorTarget(ctx: Context): Promise<ConnectorTarget
         connectedAt: record.connectedAt,
         live: state !== undefined && state.failure === undefined,
         ...state?.failure === undefined ? {} : { failure: state.failure },
+        ...state?.needsAuthorization === true ? { needsAuthorization: true } : {},
         // What this actually runs, for the rows the catalog has no entry for:
         // a pasted connector, or a shelf item the console has since dropped.
         // Without it such a row could only say its own name.
@@ -214,12 +247,61 @@ export async function readConnectorRequirement(
     slug,
     mode,
     ...label === undefined ? {} : { label },
+    // Only asked for the mode that can be in that state, so a token connector's
+    // row does not carry a field that reads as "not signed in".
+    ...mode === 'oauth' ? { authorized: await hasConnectorGrant(ctx, slug) } : {},
     ...built.kind === 'refused' ? { refusal: built.message } : {},
   }
 }
 
 /** A stand-in secret, so a token connector's config can be built for a dry run. */
 const REQUIREMENT_PROBE_TOKEN = 'probe'
+
+/**
+ * Start one connector's web sign-in.
+ *
+ * The endpoint comes from the manifest read here rather than from the request,
+ * for the same reason the install path resolves its own download link: a main
+ * process that opens a browser at a URL a renderer handed it is one XSS away
+ * from being a phishing launcher.
+ * @param ctx - host context.
+ * @param access - console origin and token reader.
+ * @param slug - the connector.
+ * @param signal - caller cancellation.
+ * @returns the page to open, or why nothing was started.
+ */
+export async function authorizeConnector(
+  ctx: Context,
+  access: ConsoleAccess,
+  slug: string,
+  signal?: AbortSignal,
+): Promise<ConnectorAuthorizationStart> {
+  if (!CONNECTOR_SLUG.test(slug)) {
+    return { kind: 'refused', message: `连接器标识 ${JSON.stringify(slug)} 不合法。` }
+  }
+  let manifest: ConnectorManifest
+  try {
+    manifest = await readConnectorManifest(ctx, access, slug, signal)
+  } catch (error: unknown) {
+    return { kind: 'refused', message: error instanceof ConsoleError ? error.message : String(error) }
+  }
+  const url = text(manifest.server?.url)
+  if (url === undefined) {
+    return { kind: 'refused', message: '这个连接器不是远端服务器，没有可以授权的地址。' }
+  }
+  // The MCP namespace is the label: the seam's roster is keyed by credential,
+  // and this is the name the same connector's tools already carry in a session.
+  return await startConnectorAuthorization(ctx, slug, text(manifest.mcpName) ?? slug, url)
+}
+
+/**
+ * How one connector's sign-in ended.
+ * @param slug - the connector.
+ * @returns the state the gallery polls for.
+ */
+export function connectorAuthorizationState(slug: string): ConnectorAuthorizationState {
+  return readAuthorizationState(slug)
+}
 
 /**
  * Connect one connector: read its manifest, mount it, remember it.
@@ -255,7 +337,11 @@ export async function installConnector(
     throw error
   }
 
-  const built = buildConfig(manifest, request.token)
+  // A signed-in connector's token is never in the request: the renderer never
+  // sees it, because the flow committed it to the credential seam and the slug
+  // is the whole address.
+  const token = modeOf(manifest) === 'oauth' ? await readConnectorToken(ctx, slug) : request.token
+  const built = buildConfig(manifest, token)
   if (built.kind === 'refused') return refuse(built.reason, built.message)
   return await land(ctx, records, slug, built, {
     ...request.name === undefined ? {} : { name: request.name },
@@ -303,14 +389,19 @@ async function land(
     return refuse(kept.reason, kept.message)
   }
 
+  // Whichever kind of value was placed comes back out before the config is
+  // written down. The grant's owner is the authorization flow, so unlike a
+  // pasted secret there is nothing to move — only the placement is recorded.
+  const placed = built.secret ?? built.oauth
   const row: ConnectorRecord = {
     slug,
     serverName: built.serverName,
     name: text(meta.name) ?? slug,
     ...text(meta.version) === undefined ? {} : { version: text(meta.version)! },
     connectedAt: new Date().toISOString(),
-    config: built.secret === undefined ? built.config : without(built.config, built.secret),
+    config: placed === undefined ? built.config : without(built.config, placed),
     ...built.secret === undefined ? {} : { secret: { ...built.secret, ref: refNameFor(slug) } },
+    ...built.oauth === undefined ? {} : { oauth: built.oauth },
   }
   try {
     await writeRecords([...records, row])
@@ -348,6 +439,10 @@ export async function uninstallConnector(ctx: Context, slug: string): Promise<bo
   // on a separate «解绑», but that second button does not exist here — and a
   // secret nothing can show or delete is worse than one retype.
   await forgetSecret(ctx, found)
+  // Same reasoning for a grant, with one difference worth knowing: this forgets
+  // the local record only. The seam has no revoke, so the session on the
+  // provider's side outlives it and a re-connect may not ask again.
+  if (found.oauth !== undefined) await forgetConnectorGrant(ctx, slug)
   ctx.logger.info(`openlux: connector ${slug} disconnected`)
   return true
 }
@@ -594,28 +689,128 @@ export async function restoreConnectors(ctx: Context): Promise<{ mounted: number
   let failed = 0
   for (const record of records) {
     if (mounted.has(record.slug)) continue
-    const config = await hydrate(ctx, record)
-    if (config.kind === 'missing') {
-      mounted.set(record.slug, { entryId: entryIdFor(record.serverName), failure: config.message })
-      failed += 1
-      ctx.logger.warn(`openlux: connector ${record.slug} has no token: ${config.message}`)
-      continue
-    }
-    const outcome = await mountEntry(ctx, record.serverName, config.config)
+    const outcome = await bring(ctx, record)
     if (outcome.kind === 'mounted') {
-      mounted.set(record.slug, { entryId: outcome.entryId })
       ok += 1
       continue
     }
-    mounted.set(record.slug, {
-      entryId: entryIdFor(record.serverName),
-      failure: outcome.message,
-    })
     failed += 1
-    ctx.logger.warn(`openlux: connector ${record.slug} did not mount: ${outcome.message}`)
+    ctx.logger.warn(`openlux: connector ${record.slug} did not come up: ${outcome.message}`)
   }
   ctx.logger.info(`openlux: connectors restored, ${ok} live, ${failed} failed`)
   return { mounted: ok, failed }
+}
+
+/**
+ * Resolve one record's credentials, mount it, and record how that went.
+ *
+ * The step startup and the repair button share, so a row repaired by hand ends
+ * in exactly the state the next launch would have put it in — including the
+ * `needsAuthorization` flag, which is what keeps the button on screen when the
+ * sign-in is still dead.
+ * @param ctx - host context.
+ * @param record - the stored row to bring up.
+ * @returns whether it is live, and why not when it is not.
+ */
+async function bring(
+  ctx: Context,
+  record: ConnectorRecord,
+): Promise<{ kind: 'mounted' } | { kind: 'refused'; message: string }> {
+  const config = await hydrate(ctx, record)
+  if (config.kind === 'missing') {
+    mounted.set(record.slug, {
+      entryId: entryIdFor(record.serverName),
+      failure: config.message,
+      ...config.reauthorize === true ? { needsAuthorization: true } : {},
+    })
+    return { kind: 'refused', message: config.message }
+  }
+  const outcome = await mountEntry(ctx, record.serverName, config.config)
+  if (outcome.kind === 'mounted') {
+    mounted.set(record.slug, { entryId: outcome.entryId })
+    return { kind: 'mounted' }
+  }
+  mounted.set(record.slug, {
+    entryId: entryIdFor(record.serverName),
+    failure: outcome.message,
+    // A grant this side still believes in can already have been revoked on the
+    // provider's, and then the refusal arrives here rather than as a missing
+    // token. Only asked of a connector that has a sign-in to redo.
+    ...record.oauth !== undefined && looksUnauthorized(outcome.message, record.serverName)
+      ? { needsAuthorization: true }
+      : {},
+  })
+  return { kind: 'refused', message: outcome.message }
+}
+
+/**
+ * Whether a mount refusal reads as a rejected sign-in.
+ *
+ * The same rule the product we are aligned with applies to its own MCP rows —
+ * `server.needsAuth || error.includes("401") || error.toLowerCase().includes("auth")`
+ * (WorkBuddy `renderer/assets/connector-*.js`) — minus the first term, which is
+ * a field its bridge reports and ours does not. Matching on text is coarse by
+ * nature, and deliberately biased towards offering the button: the cost of a
+ * false positive is one sign-in the user did not need, while a false negative
+ * leaves them with a connector and no way to fix it.
+ *
+ * Give it {@link causeChain}, never a bare `error.message`: on the real path
+ * the number reaches this function only because that walker appends `.code`.
+ * @param message - the refusal, cause chain included.
+ * @param serverName - whose refusal it is, taken out before matching.
+ * @returns true when it names an authorization problem.
+ */
+export function looksUnauthorized(message: string, serverName: string): boolean {
+  // The name is inside the sentence being matched — the client's wrapper reads
+  // `mcp-client(<serverName>): …` — and identity products are called things
+  // like `authing`, so leaving it in would put the button on every failure a
+  // connector so named ever has, down to the endpoint being unreachable.
+  const named = serverName === '' ? message : message.split(serverName).join(' ')
+  const lower = named.toLowerCase()
+  return lower.includes('401') || lower.includes('auth')
+}
+
+/**
+ * Bring one already-connected connector back up, after a repaired sign-in.
+ *
+ * A separate call from `installConnector`, which refuses a slug it already has
+ * a record for (`已经连上 … 了。要重连请先断开。`) — correct for a press on the
+ * shelf, wrong for a row that is connected and only needs its token replaced.
+ * Disconnecting first would have worked, but a cancelled sign-in would then
+ * leave the user with no connector at all rather than the one they started
+ * with.
+ *
+ * The old entry is dropped before the new one is made because `mountEntry`
+ * adopts a live entry under the same id, and adopting is exactly wrong here:
+ * the entry it would adopt is the one holding the token that just expired.
+ * @param ctx - host context.
+ * @param slug - the connector to bring back up.
+ * @returns whether it is live, and why not when it is not.
+ */
+export async function remountConnector(
+  ctx: Context,
+  slug: string,
+): Promise<{ kind: 'mounted' } | { kind: 'refused'; message: string }> {
+  const records = await readRecords()
+  const found = records.find(record => record.slug === slug)
+  if (found === undefined) return { kind: 'refused', message: `还没有连上 ${slug}。` }
+  const state = mounted.get(slug)
+  if (state !== undefined) await unmountEntry(ctx, state.entryId)
+  mounted.delete(slug)
+  // The store, not the unmount's own answer: a row that never mounted has no
+  // entry to remove and reports failure for that reason alone, while an entry
+  // that survived a successful-looking removal is the one case that must not
+  // continue — `mountEntry` would adopt it and report a repair that changed
+  // nothing.
+  const entryId = entryIdFor(found.serverName)
+  if (loaderOf(ctx)?.store?.[entryId] !== undefined) {
+    mounted.set(slug, { entryId, failure: '旧的连接没能撤下来。', needsAuthorization: true })
+    return { kind: 'refused', message: '旧的连接没能撤下来，重启应用之后再试一次。' }
+  }
+  const outcome = await bring(ctx, found)
+  if (outcome.kind === 'mounted') ctx.logger.info(`openlux: connector ${slug} remounted`)
+  else ctx.logger.warn(`openlux: connector ${slug} did not remount: ${outcome.message}`)
+  return outcome
 }
 
 /** What building a bridge config from a manifest ended in. */
@@ -626,6 +821,8 @@ type BuildOutcome =
     readonly config: BridgeConfig
     /** Present when a token was placed, so the caller can lift it back out. */
     readonly secret?: SecretSite
+    /** Present when the value placed came from a web sign-in rather than a paste. */
+    readonly oauth?: GrantSite
   }
   | { readonly kind: 'refused'; readonly reason: RefusalReason; readonly message: string }
 
@@ -665,15 +862,21 @@ export function buildConfig(manifest: ConnectorManifest, token?: string): BuildO
   const url = text(server.url)
   const command = text(server.command)
   const mode = modeOf(manifest)
-  if (mode === 'oauth') {
+  // A web sign-in produces a bearer token for an endpoint, so a manifest that
+  // declares one for a local process describes something that cannot exist:
+  // there is no request to put the header on.
+  if (mode === 'oauth' && url === undefined) {
     return {
       kind: 'refused',
       reason: 'unsupported-auth',
-      message: '这个连接器要走一次网页授权，当前版本还不能代你完成。',
+      message: '这个连接器声明了网页授权，但它跑在本地进程上，授权拿到的令牌无处可放。',
     }
   }
   if (mode === 'token' && (token === undefined || token.trim() === '')) {
     return { kind: 'refused', reason: 'needs-token', message: '这个连接器需要一个令牌才能连接。' }
+  }
+  if (mode === 'oauth' && (token === undefined || token.trim() === '')) {
+    return { kind: 'refused', reason: 'needs-authorization', message: '这个连接器要先在浏览器里授权一次。' }
   }
 
   if (url !== undefined) {
@@ -690,10 +893,14 @@ export function buildConfig(manifest: ConnectorManifest, token?: string): BuildO
     }
     const headers = { ...record(server.headers) }
     let secret: SecretSite | undefined
+    let oauth: GrantSite | undefined
     if (mode === 'token') {
       const placed = inject(headers, manifest, token ?? '')
       if ('kind' in placed) return placed
       secret = { site: 'headers', key: placed.key }
+    }
+    if (mode === 'oauth') {
+      oauth = placeBearer(headers, manifest, token ?? '')
     }
     return {
       kind: 'built',
@@ -706,6 +913,7 @@ export function buildConfig(manifest: ConnectorManifest, token?: string): BuildO
         failOnStartupError: true,
       },
       ...secret === undefined ? {} : { secret },
+      ...oauth === undefined ? {} : { oauth },
     }
   }
 
@@ -775,6 +983,32 @@ function inject(
   }
   into[key] = `${prefixOf(manifest)}${token.trim()}`
   return { key }
+}
+
+/**
+ * Put an access token where a signed-in server will read it.
+ *
+ * Unlike `inject`, a missing `auth.key` is not a broken manifest here: the
+ * catalog's OAuth rows were written for a kernel that ran `mcp login` and
+ * never had to say where the result goes, so most of them declare nothing.
+ * `Authorization: Bearer …` is not a guess in that silence — it is what the
+ * token endpoint's own `token_type` says and what RFC 6750 defines — while a
+ * manifest that does name a field still wins, because a server that wants its
+ * token somewhere unusual is the only one that would bother to say so.
+ * @param into - the header map, mutated in place.
+ * @param manifest - the row, for an explicit `auth.key` / `auth.prefix`.
+ * @param token - the access token from the grant.
+ * @returns the header that was written.
+ */
+function placeBearer(
+  into: Record<string, string>,
+  manifest: ConnectorManifest,
+  token: string,
+): GrantSite {
+  const key = text(manifest.auth?.key) ?? 'Authorization'
+  const prefix = typeof manifest.auth?.prefix === 'string' ? manifest.auth.prefix : 'Bearer '
+  into[key] = `${prefix}${token.trim()}`
+  return { site: 'headers', key, prefix }
 }
 
 /**
@@ -872,7 +1106,24 @@ async function forgetSecret(ctx: Context, row: ConnectorRecord): Promise<void> {
 async function hydrate(
   ctx: Context,
   row: ConnectorRecord,
-): Promise<{ kind: 'ready'; config: BridgeConfig } | { kind: 'missing'; message: string }> {
+): Promise<
+  | { kind: 'ready'; config: BridgeConfig }
+  // `reauthorize` is what turns the message into a button: a dead sign-in is
+  // the one missing-credential case the user can fix without disconnecting.
+  | { kind: 'missing'; message: string; reauthorize?: boolean }
+> {
+  if (row.oauth !== undefined) {
+    // Read through the refresh: the header is a snapshot the bridge keeps for
+    // the life of the plugin instance, so an access token that expires in ten
+    // minutes has to be renewed here rather than at the first 401 — which the
+    // bridge would report as a dead server, not as an expired sign-in.
+    const token = await readConnectorToken(ctx, row.slug)
+    if (token === undefined) {
+      return { kind: 'missing', message: '网页授权已经失效了，重新授权一次就好。', reauthorize: true }
+    }
+    const site = { ...record(row.config[row.oauth.site]), [row.oauth.key]: `${row.oauth.prefix}${token}` }
+    return { kind: 'ready', config: { ...row.config, [row.oauth.site]: site } }
+  }
   if (row.secret === undefined) return { kind: 'ready', config: row.config }
   const hit = await ctx.credentials?.resolve(credentialRef(row.secret.ref)).catch(() => undefined)
   if (hit?.value === undefined || hit.value === '') {
@@ -911,7 +1162,11 @@ async function mountEntry(
     const created = await loader.create({ id: entryId, name: MCP_CLIENT_PACKAGE, config })
     return { kind: 'mounted', entryId: created }
   } catch (error: unknown) {
-    return { kind: 'refused', message: error instanceof Error ? error.message : String(error) }
+    // The chain, not the message: `dsh-mcp-client` throws one fixed sentence
+    // ("initial connection or tool synchronization failed") and puts the HTTP
+    // status on `cause`, so the top message cannot tell a rejected sign-in from
+    // an endpoint that is simply down — which is the distinction the row needs.
+    return { kind: 'refused', message: causeChain(error) }
   }
 }
 
@@ -971,6 +1226,7 @@ async function readRecords(): Promise<readonly ConnectorRecord[]> {
     if (typeof row?.slug !== 'string' || typeof row.serverName !== 'string') continue
     if (typeof row.config !== 'object' || row.config === null) continue
     const secret = secretOf(row.secret)
+    const oauth = grantOf(row.oauth)
     rows.push({
       slug: row.slug,
       serverName: row.serverName,
@@ -979,6 +1235,7 @@ async function readRecords(): Promise<readonly ConnectorRecord[]> {
       connectedAt: typeof row.connectedAt === 'string' ? row.connectedAt : '',
       config: { ...row.config },
       ...secret === undefined ? {} : { secret },
+      ...oauth === undefined ? {} : { oauth },
     })
   }
   return rows
@@ -1019,6 +1276,27 @@ function secretOf(value: unknown): (SecretSite & { ref: string }) | undefined {
   const key = text(row.key)
   if (ref === undefined || key === undefined) return undefined
   return { site: row.site, key, ref }
+}
+
+/**
+ * Read back where a granted bearer token goes.
+ *
+ * Dropping this on the way in is silent and total: the mount path would find
+ * no `oauth`, take the record for one that needs no credential, and put the
+ * server up with no `Authorization` header at all — a connector that reads as
+ * live while every one of its tools answers 401.
+ * @param value - the record's `oauth` as it came off disk.
+ * @returns the placement, or undefined.
+ */
+function grantOf(value: unknown): GrantSite | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const row = value as Partial<GrantSite>
+  if (row.site !== 'env' && row.site !== 'headers') return undefined
+  const key = text(row.key)
+  if (key === undefined) return undefined
+  // An empty prefix is a real answer — a server wanting the bare token — so it
+  // is kept, and only a missing one falls back to the standard spelling.
+  return { site: row.site, key, prefix: typeof row.prefix === 'string' ? row.prefix : 'Bearer ' }
 }
 
 /** A trimmed non-empty string, or undefined. */

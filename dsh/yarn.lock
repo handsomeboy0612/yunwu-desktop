@@ -5327,7 +5327,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@modelcontextprotocol/sdk@npm:^1.12.0, @modelcontextprotocol/sdk@npm:^1.26.0":
+"@modelcontextprotocol/sdk@npm:1.30.0, @modelcontextprotocol/sdk@npm:^1.12.0, @modelcontextprotocol/sdk@npm:^1.26.0":
   version: 1.30.0
   resolution: "@modelcontextprotocol/sdk@npm:1.30.0"
   dependencies:
@@ -11668,6 +11668,7 @@ __metadata:
     "@deepseek-ai/dsh-agent-presets": "npm:0.1.1-rc.2"
     "@deepseek-ai/dsh-api-remotes": "npm:0.1.1-rc.2"
     "@deepseek-ai/dsh-attachment": "npm:0.1.1-rc.2"
+    "@deepseek-ai/dsh-authorization": "npm:0.1.1-rc.2"
     "@deepseek-ai/dsh-client-connection": "npm:0.1.1-rc.2"
     "@deepseek-ai/dsh-client-locale": "npm:0.1.1-rc.2"
     "@deepseek-ai/dsh-client-runtime": "npm:0.1.1-rc.2"
@@ -11693,6 +11694,7 @@ __metadata:
     "@deepseek-ai/dsh-tools": "npm:0.1.1-rc.2"
     "@deepseek-ai/dsh-web": "npm:0.1.1-rc.2"
     "@earendil-works/pi-ai": "npm:0.82.1"
+    "@modelcontextprotocol/sdk": "npm:1.30.0"
     "@types/node": "npm:24.10.1"
     "@types/react": "npm:^18"
     "@types/react-dom": "npm:~18.3.0"
@@ -11704,6 +11706,7 @@ __metadata:
     "@deepseek-ai/cordis": 4.0.1
     "@deepseek-ai/dsh-api-remotes": 0.1.1-rc.2
     "@deepseek-ai/dsh-attachment": 0.1.1-rc.2
+    "@deepseek-ai/dsh-authorization": 0.1.1-rc.2
     "@deepseek-ai/dsh-client-connection": 0.1.1-rc.2
     "@deepseek-ai/dsh-client-locale": 0.1.1-rc.2
     "@deepseek-ai/dsh-client-runtime": 0.1.1-rc.2
@@ -11726,6 +11729,7 @@ __metadata:
     "@deepseek-ai/dsh-tools": 0.1.1-rc.2
     "@deepseek-ai/dsh-web": 0.1.1-rc.2
     "@earendil-works/pi-ai": 0.82.1
+    "@modelcontextprotocol/sdk": ^1.12.0
     react: 18.3.1
   languageName: unknown
   linkType: soft

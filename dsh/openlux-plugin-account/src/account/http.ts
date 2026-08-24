@@ -18,6 +18,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { LOCALE_SETTINGS_NAMESPACE, type LocaleSettings } from '@deepseek-ai/dsh-client-locale'
+import { causeChain } from '../error-cause.ts'
 
 /**
  * Per-request budget. The sign-in screen blocks the whole application, so a
@@ -40,28 +41,6 @@ export interface ApiEnvelope<T> {
 export interface HttpReply {
   readonly response: Response
   readonly body: unknown
-}
-
-/**
- * What actually went wrong under a transport failure.
- *
- * `fetch` reports every transport problem as the same bare `TypeError: fetch
- * failed` and puts the real reason on `cause` — DNS, TLS, a refused connection
- * and a reset socket are one message until you unwrap it. Since this text is
- * what a user reads and what a model is told, it carries the cause chain.
- * @param error - the thrown value.
- * @returns one line naming the failure and its cause, when there is one.
- */
-function reason(error: unknown): string {
-  const parts: string[] = []
-  let current: unknown = error
-  for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
-    const code = (current as { code?: unknown }).code
-    parts.push(code === undefined ? current.message : `${current.message} (${String(code)})`)
-    current = current.cause
-  }
-  if (parts.length === 0) parts.push(String(error))
-  return parts.join(' ← ')
 }
 
 /** Why a request never produced a reply. */
@@ -144,7 +123,7 @@ export async function requestJson(
       throw new AccountRequestError(`账号服务超时（${Math.round(timeoutMs / 1000)} 秒未响应）`, 'timeout')
     }
     if (upstream?.aborted === true) throw new AccountRequestError('请求已取消', 'cancelled')
-    throw new AccountRequestError(`无法连接账号服务：${reason(error)}`, 'unreachable')
+    throw new AccountRequestError(`无法连接账号服务：${causeChain(error)}`, 'unreachable')
   }
   // A body that is not JSON is a server-side surprise, not a caller error; the
   // status alone still lets the caller produce a useful message.
@@ -191,7 +170,7 @@ export async function requestBytes(
       throw new AccountRequestError(`下载超时（${Math.round(timeoutMs / 1000)} 秒未完成）`, 'timeout')
     }
     if (upstream?.aborted === true) throw new AccountRequestError('下载已取消', 'cancelled')
-    throw new AccountRequestError(`无法下载${what}：${reason(error)}`, 'unreachable')
+    throw new AccountRequestError(`无法下载${what}：${causeChain(error)}`, 'unreachable')
   }
   if (!response.ok) {
     throw new AccountRequestError(`下载失败（HTTP ${response.status}）`, 'unreachable')

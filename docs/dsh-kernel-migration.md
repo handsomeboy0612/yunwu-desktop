@@ -6545,3 +6545,148 @@ cordis 插件时出现——创造模式正好会），我们的市场是第二�
 （`ui-renderer/lib/client.js`: `const productTitle = "DeepSeek Harness"`），没有设置、没有槽、
 没有注入常量。`client/document-title.ts` 观察 `<head>` 把名字换回来；判据抽成
 `brandedTitle()`（相等就不写，观察者不会自激），`web-brand.spec.ts` 加两条钉住。
+
+## 连接器网页授权：内核有整条接缝，我们没挂（2026-08-25 真机验通）
+
+**82 个远端连接器里 60 个走 OAuth**，一直被 `buildConfig` 一律拒掉。动手前差点自己造一套
+编排 + 浏览器 + 存储，查完发现三层全是现成的。
+
+**第一层，跟人对话的那半是内核的：`ctx.authorization`（`@deepseek-ai/dsh-authorization`）。**
+它就是为「配不出来、只能跟人要」的凭据设计的：`registerFlow({ key, label, methods, run })`
+注册，`session.notify({ message, url })` 把人送去浏览器，`session.prompt()` 问粘贴码，
+`begin({ key, interaction })` 由界面发起，外加一 key 一次的 `ALREADY_IN_FLIGHT` 互斥、
+`inFlight`、`authorization/settled` 事件。README 里连「本地回调和手工粘贴码赛跑、输的那个撤掉」
+都写进设计了。**关键事实：这个包是 `dsh-plugin-desktop` 的直接依赖（`package.json:158`），
+但不在 `dsh-base/cordis.patch.yml` 那 78 个插件的挂载清单里**，而每个 flow 都是
+`ctx.inject(['authorization'], …)` 可选注册的——所以它不报错，只是一个 flow 都不存在。
+挂上一行之后 headless 启动实测 `flows=37 oauth=6`（Anthropic / Copilot / Kimi / Codex /
+OpenRouter / xAI 的订阅登录全冒出来了，pi-ai 一直在无条件注册）。这条断言固化进
+`verify:profile`：这行 patch 丢了不会报错，只会让所有登录悄悄消失。
+那 6 个**没有露出入口**，是产品决定——用户拿自己的 Claude 订阅直连就绕开了我们的中转计费。
+
+**第二层，协议是 MCP SDK 的，接缝自己说「never the protocol」。**
+`@modelcontextprotocol/sdk/client/auth.js` 导出全套：`discoverOAuthProtectedResourceMetadata`
+→ `discoverAuthorizationServerMetadata` → `registerClient`（DCR）→ `startAuthorization`（PKCE）
+→ `exchangeAuthorization`。`auth()` 是两段式入口：第一次回 `REDIRECT` 并调
+`provider.redirectToAuthorization(url)`，第二次带 `authorizationCode` 换令牌。
+**SDK 1.30 的坑：`auth()` 不再自己走 refresh_token**，无 code 调用直接抛
+`Either provider.prepareTokenRequest() or authorizationCode is required`，
+刷新要自己调 `refreshAuthorization()` 原语（测试里撞出来的，不是读文档读到的）。
+
+**第三层，存储是 credential seam 的 grant。** key 是 `<owner>/<id>`，owner 必须是插件注册名
+（`openlux-plugin-account/<slug>`），`modifyRecord` 是唯一写路径且跨进程互斥——正好是
+refresh token 轮换需要的。「flow owns the write」：`run()` resolve 意味着记录已提交，
+接缝会核验，没提交的 flow 会被判失败。
+
+**bridge 那头没有旋钮，这个 0 是真的。** `dsh-mcp-client` 只吃静态
+`headers: z.dict(String)`（`lib/index.js:752`），transport 只传 `requestInit.headers`
+（`:47`）——虽然它底下的 `StreamableHTTPClientTransport` 支持 `authProvider`。
+全内核 `rg --no-ignore` 搜 `authProvider` **0 命中**，带正对照验过
+（`StreamableHTTPClientTransport` 1 命中）。所以不打补丁：令牌在 **mount 路径**上现取现刷
+（`hydrate()` → `readConnectorToken()`），因为 header 是快照，bridge 会拿着它过完整个进程生命。
+
+**真机（2026-08-25，`mcp.mokahr.com`）**：动态注册真的发了 client_id
+`436d8ba8-…`、`code_challenge_method=S256`、`redirect_uri=http://127.0.0.1:<临时端口>/callback`、
+`scope=mcp:tools people:read` 自动从资源元数据带上。`token_endpoint_auth_methods=["none"]`
+= 公共客户端，**不用申请 client_id、不用 client secret**，QQ 邮箱形状一模一样。
+浏览器里登录 Moka 那一步没有账号跑不了，所以 `tests/connector-oauth.spec.ts` 起了一个真的
+本地授权服务器，把发现 / DCR / PKCE / 回调 / 提交 / 刷新 / 注入整条跑完（6 条）。
+
+**界面为什么是两个 RPC + 轮询**：host 没有 `shell.openExternal`，渲染进程的 `window.open`
+才会被桌面壳交给系统浏览器（`electron-shell-generation.ts:157`）。所以
+`market.connectorAuthorize` 一拿到授权地址就返回、attempt 继续在后台跑，
+`market.connectorAuthorizeState` 轮询结果——人在另一个窗口里待多久都不会把请求挂死。
+
+## 授权失效后没有回头路，以及顺手撞出来的那个重启 bug（2026-08-25 真机验通）
+
+问「WorkBuddy 的对话内授权卡片要不要补」时查出来的：**它没有这个东西**。它的对话内卡片
+只有微信支付一种，`handleElicitationRequest` 只认 `_meta['codebuddy.ai'].weixinpay`，
+自己的注释也写死了「elicitation/create（微信支付卡片等）→ 合成 weixinpay 卡片 toolCall」
+（`renderer/assets/index-ByH0lxCD.js`）。协议层确实有 `zElicitationUrlMode { elicitationId, url }`
+（`acp-D0j2glmK.js`，ACP 自动生成的 zod schema），但**全 renderer 零消费者**——
+和语言包里那套没上线的三步引导文案是同一类假阳性。它的授权入口只有连接器面板那颗按钮
+（`reconnectMcpServer` + `needsAuth` 标记 + 10 处「重新授权」文案），
+也就是我们已经有的那条路。所以卡片不补。
+
+**真缺的是失效之后的回头路。** `hasConnectorGrant` 只判记录在不在，refresh 失败
+（`readConnectorToken` 返回 undefined）时 grant 记录还躺着，行照旧显示「已授权」，
+用户看到一句「重新授权一次就好」却没有任何地方能重新授权——只能猜到要先断开。
+处置是让 `hydrate` 的 missing 带上 `reauthorize`，一路带到 `InstalledConnector.needsAuthorization`，
+行上出一颗「重新授权」。**判据抽进 `client/connector-rows.ts`**（不碰 UI 的纯函数），
+因为这个包没有 DOM 测试框架，判据留在 `.tsx` 里就没人测得到——和 `expert-rows.ts` 同一条路子。
+
+**重新授权不能走 `connect`**，这条是动手前验出来的，省了几百行返工：
+`installConnector` 见到已有记录直接 `refuse('already-installed', '已经连上 … 了。要重连请先断开。')`
+（`connector-install.ts:317`）。所以新开 `remountConnector`，**先 unmount 再 mount**——
+`mountEntry` 对同 id 的活 entry 会 adopt（`:1048`），而这里要 adopt 的恰恰是那个揣着
+死令牌的 entry，adopt 会报成功然后继续用旧令牌。
+
+**撤下来没有的判据是看 store，不是看 `unmountEntry` 的返回值**（自检时补的）。两种失败长得
+一样但要反着处理：从没挂上的行（授权失效那条主路径）本来就没有 entry 可删，`remove` 必然
+报失败，照返回值拒就把最常见的场景挡死了；而 `remove` 报成功、entry 却还在 store 里，是唯一
+必须停下的情况——继续走下去 `mountEntry` 就会 adopt 它，答一句 `mounted` 而什么都没变。
+所以只问一句 `loader.store[entryId] !== undefined`。
+
+**服务器侧撤销授权：同一颗按钮，另一条进入方式（补完于同日）。** 本地 grant 还没到期，
+`readConnectorToken` 照常给出令牌，服务器 401 → 失败走的是 `mountEntry` 的 refused 而不是
+`hydrate` 的 missing，于是 `needsAuthorization` 仍为 false，行上只剩一句看不懂的报错。
+照 WorkBuddy 的判据补：它判
+`server.needsAuth || server.error?.includes("401") || server.error?.toLowerCase().includes("auth")`
+（`renderer/assets/connector-Bwm0lcJo.js`）。头一项是它 bridge 报的字段，我们没有，
+剩下两项照抄成 `looksUnauthorized()`，**只对有 sign-in 可重来的连接器问**（`row.oauth !== undefined`），
+免得给一个静态 token 的行发一颗按不动的按钮。
+
+**前提是 `mountEntry` 得先把 401 交出来。** 它原本只取 `error.message`，而 `dsh-mcp-client`
+抛的永远是同一句 `initial connection or tool synchronization failed`，真错误挂在 `cause` 上
+（`lib/index.js:782`，且 `firstAttemptError` 存的是原始对象不是字符串，`:644`）——
+按原样匹配，撤销授权和端点宕机是同一行字。所以把 `account/http.ts` 里那个已经在用的
+cause 链展开抽成 `src/error-cause.ts`，两边共用一份。文本匹配天然粗糙，方向是**偏向多给按钮**：
+误报的代价是一次白走的授权，漏报的代价是用户拿着一个坏连接器无路可走。
+
+**差点又踩一次「探针停在数据结构上」：401 根本不在文案里。** 我第一版夹具照直觉写
+`new Error('HTTP 401 Unauthorized')`，测试当然绿。回去翻 SDK 才发现真错误是
+`StreamableHTTPError`，`super(\`Streamable HTTP error: ${message}\`)` + `this.code = status`
+（`client/streamableHttp.js:16-21`），未配 authProvider 时 401 落到 `:369` 那条兜底——
+**整句话里没有「401」这三个字符，数字只在 `.code` 上**。真正让判据成立的是 `causeChain`
+顺手把 `code` 拼进去的那一行；没有它，这次改动会以「测试全绿、真机不出按钮」收场。
+夹具已改成真形状，两处注释都钉了这个依赖。
+
+**用真 socket 兑过账**（临时探针，跑完即删）：本机起一个只回 401 的 http server，
+用真 `Context` + 真 `dsh-mcp-client` 的 `apply()` 打过去，落到行上的字是
+
+```
+mcp-client(probe401): initial connection or tool synchronization failed ← Streamable HTTP error: Error POSTing to endpoint: {"error":"token revoked"} (401)
+```
+
+整句里唯一的「401」就是末尾那个由 `code` 拼出来的括号。界面那半不用再验一遍：
+`needsAuthorization` 是同一个字段喂同一颗按钮，上一轮 refresh 失败那条路已经 CDP 看过了。
+
+**自检时抓到的第二个坑：连接器自己的名字也在被匹配的那句话里。** 客户端的包装句是
+`mcp-client(<serverName>): …`，而身份类产品就叫 `authing` 这种名字——照原样匹配 `auth`，
+这个连接器**从此每一次失败都会长出一颗「重新授权」**，连端点宕机都算。所以
+`looksUnauthorized(message, serverName)` 先把名字从文本里挖掉再匹配，并补了一条用
+`authing` + ECONNREFUSED 的测试钉住。另外整条判据只对 `record.oauth !== undefined` 的行问，
+自定义连接器（永远是静态 header）碰不到。
+
+**顺手撞出来一个更严重的 bug：`readRecords` 从来没解析 `oauth` 字段。** `land()` 写盘时
+存了（`:403`），读回来时丢了，于是 **OAuth 连接器一重启，`row.oauth` 是 undefined，
+`hydrate` 当它是不需要凭据的连接器，配置里一个 `Authorization` 头都不带就挂上去**。
+这个 bug 在实现 OAuth 那轮就埋下了，之前的测试没有一条从磁盘挂载过 oauth 连接器，
+所以一直没露头；这次三条新测试一跑就红了。修法是补一个 `grantOf()`，跟 `secretOf()` 对称
+（默认 prefix `Bearer ` 与 `placeBearer` 那头一致）。**教训是「探针停在数据结构上」的另一种
+形态**：当时验的是「授权流能拿到令牌」，没验「下一次启动还能用」。
+
+**它的表现不是「在线但全废」，这一句我第一次写错了，回查纠正。** 记录里带
+`failOnStartupError: true`，而 `dsh-mcp-client` 在 `await connection.ready` 拿到 error 时直接
+throw（`node_modules/@deepseek-ai/dsh-mcp-client/lib/index.js:782`），于是 `loader.create` 抛、
+`mountEntry` 返回 refused、行显示「未连上」。OAuth 服务器按定义在 initialize 那一步就 401
+——`serverWantsAuthorization()` 探测的正是这个 401——所以必然走这条路，不会静默在线。
+**真正糟的地方在别处**：`row.oauth` 丢了同时意味着 `needsAuthorization` 恒为 false，
+所以「重新授权」按钮永远不出现，用户只看到一句 `initial connection or tool synchronization
+failed`，唯一出路是断开重连。两个毛病同一个根因，`grantOf()` 一起解决。
+
+真机（CDP，2026-08-25 02:23，`--remote-debugging-port=9223`）：手写一条 `context7` 的
+oauth 记录、故意不给 grant，重启后连接器行读到 `未连上 / 断开 / 重新授权`，
+同页另外两个未连接的连接器只有「连接」——按钮没有外溢。验完记录文件已删。
+`bin.js` 不转 argv，挂 CDP 仍然要直接跑
+`node_modules\electron\dist\electron.exe lib\main.js --remote-debugging-port=9223`。

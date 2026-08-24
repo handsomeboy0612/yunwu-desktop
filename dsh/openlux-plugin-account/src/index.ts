@@ -42,8 +42,9 @@ import { readExpertManifest, type ConsoleAccess } from './market/console.ts'
 import { installPreset, readInstallTarget, type InstallOutcome, type InstallRequest, type InstallTarget } from './market/install.ts'
 import { importLocalSkill, installSkill, readSkillTarget, removeSkill } from './market/skill-install.ts'
 import {
-  installConnector, openCustomFile, readConnectorRequirement, readConnectorTarget,
-  restoreConnectors, syncCustomConnectors, uninstallConnector,
+  authorizeConnector, connectorAuthorizationState, installConnector, openCustomFile,
+  readConnectorRequirement, readConnectorTarget, remountConnector, restoreConnectors,
+  syncCustomConnectors, uninstallConnector,
 } from './market/connector-install.ts'
 import type { ConnectorRequest } from './market/wire.ts'
 import { registerImageAskTool } from './media/ask-tool.ts'
@@ -381,10 +382,31 @@ async function route(
         )),
       }
 
+    // A web sign-in, in two calls because the browser is the renderer's to
+    // open: this one answers with the page as soon as the flow has produced it
+    // and leaves the attempt running, and the poll below reports how it ended.
+    case 'market.connectorAuthorize':
+      return {
+        ok: true,
+        value: await authorizeConnector(ctx, marketAccess(ctx, baseUrl), slugOf(payload), signal),
+      }
+
+    case 'market.connectorAuthorizeState':
+      return { ok: true, value: connectorAuthorizationState(slugOf(payload)) }
+
     case 'market.connectorUninstall':
       return {
         ok: true,
         value: { removed: await serialize(() => uninstallConnector(ctx, slugOf(payload))) },
+      }
+
+    // Bring a connected row back up after its sign-in was repaired. Serialized
+    // with the rest because it unmounts and remounts an entry in the same tree
+    // the connect and disconnect paths write to.
+    case 'market.connectorRemount':
+      return {
+        ok: true,
+        value: await serialize(() => remountConnector(ctx, slugOf(payload))),
       }
 
     // The user's own servers, which live in a file they edit — WorkBuddy's shape

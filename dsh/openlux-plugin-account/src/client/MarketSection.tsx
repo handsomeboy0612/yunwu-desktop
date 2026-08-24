@@ -23,11 +23,13 @@ import type { CSSProperties, ReactNode } from 'react'
 import { Button, Input, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
-  Catalog, CatalogFailure, CatalogItem, CatalogType, ConnectorRequirement, ConnectorTarget,
-  CustomConnectorSync, CustomOpen, InstallOutcome, InstallTarget, InstalledConnector,
-  InstalledPreset, SkillTarget,
+  Catalog, CatalogFailure, CatalogItem, CatalogType, ConnectorAuthorizationStart,
+  ConnectorAuthorizationState, ConnectorRequirement, ConnectorTarget, CustomConnectorSync,
+  CustomOpen, InstallOutcome, InstallTarget, InstalledConnector, InstalledPreset, RemountOutcome,
+  SkillTarget,
 } from '../market/wire.ts'
 import { pickSkillDirectory } from './skill-pick.ts'
+import { connectorRow } from './connector-rows.ts'
 import { MarketCard, describe, type CardState } from './MarketCard.tsx'
 import {
   ConnectorToken, CustomConnector, MarketConfirm, MarketDetail, MarketOutcome,
@@ -76,6 +78,12 @@ export interface MarketSectionInjected {
  * it simply has no roster row to select, which the summon reports.
  */
 const AUTHORING_PRESET = 'cordis'
+
+/** How often the gallery asks the host whether the browser has come back. */
+const AUTHORIZE_POLL_MS = 1500
+
+/** Matches the host listener's own patience, so neither side gives up alone. */
+const AUTHORIZE_TIMEOUT_MS = 5 * 60 * 1000
 
 /** Which half of the roster the user is looking at. */
 type Kind = 'all' | 'agent' | 'team'
@@ -334,13 +342,15 @@ export function MarketSection(
   const stateOf = useCallback((item: CatalogItem): CardState => {
     if (tab === 'connector') {
       const connected = connectedBySlug.get(item.slug)
-      if (connected !== undefined) {
+      const row = connectorRow(connected, installing === item.slug)
+      if (row !== undefined) {
+        if (row.kind === 'working') return { kind: 'installing' }
         // A connector that did not come up this launch is still connected — the
         // record is what "connected" means — so it keeps the installed state and
         // carries the reason, which is what the card turns into a tooltip.
-        return connected.live
+        return row.kind === 'connected'
           ? { kind: 'installed' }
-          : { kind: 'installed', broken: t('connectorOffline', { message: connected.failure ?? '' }) }
+          : { kind: 'installed', broken: t('connectorOffline', { message: connected?.failure ?? '' }) }
       }
       if (installing === item.slug) return { kind: 'installing' }
       const blocked = blockedReason(item)
@@ -520,6 +530,98 @@ export function MarketSection(
   }, [callHost, readInstalled])
 
   /**
+   * Sign in to one connector through the browser, then connect it.
+   *
+   * The host runs the flow and answers with the page to open; opening it is
+   * this half's job because a renderer's `window.open` is what the desktop
+   * shell hands to `shell.openExternal`, and the host has no browser of its
+   * own. The wait afterwards is a poll rather than a pushed event: the person
+   * is in another window for as long as they take, and a request left hanging
+   * across that is a request that times out.
+   */
+  const authorize = useCallback(async (
+    item: CatalogItem,
+    settle: (item: CatalogItem) => Promise<void>,
+  ): Promise<void> => {
+    const started = await callHost<ConnectorAuthorizationStart>('market.connectorAuthorize', {
+      slug: item.slug,
+    })
+    if (!started.ok || started.value.kind === 'refused') {
+      setInstalling(undefined)
+      setOutcome({
+        item,
+        outcome: {
+          kind: 'refused',
+          reason: 'needs-authorization',
+          message: started.ok ? started.value.message : started.error.message,
+        },
+      })
+      return
+    }
+    window.open(started.value.url, '_blank', 'noopener,noreferrer')
+
+    for (let waited = 0; waited < AUTHORIZE_TIMEOUT_MS; waited += AUTHORIZE_POLL_MS) {
+      await new Promise((settle) => { setTimeout(settle, AUTHORIZE_POLL_MS) })
+      const state = await callHost<ConnectorAuthorizationState>('market.connectorAuthorizeState', {
+        slug: item.slug,
+      })
+      if (!state.ok || state.value.kind === 'pending') continue
+      if (state.value.kind === 'authorized') {
+        // The grant is stored, so whichever path the caller came in on now
+        // finds a token: a first connect writes the record, a repair remounts
+        // the record that is already there.
+        setInstalling(undefined)
+        await settle(item)
+        return
+      }
+      setInstalling(undefined)
+      setOutcome({
+        item,
+        outcome: {
+          kind: 'refused',
+          reason: 'needs-authorization',
+          message: state.value.kind === 'failed' ? state.value.message : '授权被取消了。',
+        },
+      })
+      return
+    }
+    setInstalling(undefined)
+  }, [callHost])
+
+  /**
+   * Sign in again for a connector whose grant died, and put it back up.
+   *
+   * A repair rather than a reconnect: the record, the config and the MCP name
+   * all stay, and only the token is replaced. Disconnecting first would have
+   * reached the same place through the ordinary connect path, but a sign-in
+   * the user then abandons would leave them with nothing where they used to
+   * have a connector.
+   */
+  const repair = useCallback(async (item: CatalogItem): Promise<void> => {
+    setDetail(undefined)
+    setInstalling(item.slug)
+    await authorize(item, async signedIn => {
+      const result = await callHost<RemountOutcome>('market.connectorRemount', {
+        slug: signedIn.slug,
+      })
+      setInstalling(undefined)
+      await readInstalled('connector')
+      // Only a failure is reported. A repair that worked says so by the row
+      // going healthy, and a dialog on top of that would be one more press
+      // between the user and the thing they came back to use.
+      if (result.ok && result.value.kind === 'mounted') return
+      setOutcome({
+        item: signedIn,
+        outcome: {
+          kind: 'refused',
+          reason: 'needs-authorization',
+          message: result.ok ? result.value.message : result.error.message,
+        },
+      })
+    })
+  }, [authorize, callHost, readInstalled])
+
+  /**
    * Ask the host what this connector needs, then either connect or ask the user.
    *
    * The manifest read happens on the press rather than for the whole shelf: it
@@ -531,8 +633,8 @@ export function MarketSection(
     const reply = await callHost<ConnectorRequirement>('market.connectorRequirement', {
       slug: item.slug,
     })
-    setInstalling(undefined)
     if (!reply.ok) {
+      setInstalling(undefined)
       setOutcome({
         item,
         outcome: { kind: 'refused', reason: 'bad-manifest', message: reply.error.message },
@@ -541,25 +643,36 @@ export function MarketSection(
     }
     const requirement = reply.value
     if (requirement.refusal !== undefined) {
+      setInstalling(undefined)
       setOutcome({
         item,
         outcome: {
           kind: 'refused',
           // The mode decides which refusal this is, because that is what the
-          // user can act on: an OAuth connector is not coming back until we
-          // implement the flow, while a broken manifest is an ops fix.
+          // user can act on. `oauth` reaching here is the local-process case
+          // only — a sign-in that has nowhere to put its token — since a remote
+          // one is now started rather than refused.
           reason: requirement.mode === 'oauth' ? 'unsupported-auth' : 'bad-manifest',
           message: requirement.refusal,
         },
       })
       return
     }
+    // A connector already signed in to connects like any other: the token is in
+    // the credential seam and the host looks it up by slug.
+    if (requirement.mode === 'oauth' && requirement.authorized !== true) {
+      // Left spinning on purpose — the browser is about to take over, and the
+      // row has to keep saying something is in progress until it comes back.
+      await authorize(item, connect)
+      return
+    }
+    setInstalling(undefined)
     if (requirement.mode === 'token') {
       setToken({ item, requirement, value: '' })
       return
     }
     await connect(item)
-  }, [callHost, connect])
+  }, [authorize, callHost, connect])
 
   /**
    * The card's primary action.
@@ -932,6 +1045,9 @@ export function MarketSection(
                 : {}}
               {...tab === 'connector' && connectedBySlug.has(item.slug)
                 ? { onRemove: () => { void disconnect(item.slug) }, removeLabel: t('disconnect') }
+                : {}}
+              {...connectorRow(connectedBySlug.get(item.slug), installing === item.slug)?.repairable === true
+                ? { onRepair: () => { void repair(item) }, repairLabel: t('connectorReauthorize') }
                 : {}}
               onOpen={() => setDetail(item)}
               onPrimary={() => { void primary(item) }}

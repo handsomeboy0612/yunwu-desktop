@@ -168,13 +168,15 @@ export type RefusalReason =
   | 'bad-manifest'
   /** The connector declares token auth and the gallery sent none. */
   | 'needs-token'
+  /** The connector declares a web sign-in and no grant is stored yet. */
+  | 'needs-authorization'
   /**
    * The connector's authorization cannot be completed by this client.
    *
-   * `oauth` is the case: the old kernel ran the whole flow (`mcp login`), while
-   * the bridge we mount takes static headers and env only
-   * (`dsh-mcp-client` README, Config table). Refusing is honest; mounting a
-   * server that will answer 401 to every call is not.
+   * What is left of this case after connector sign-in shipped: a manifest that
+   * declares `oauth` on a *local* server. A bearer token has to ride a request,
+   * and a spawned process has none — so unlike a remote endpoint, there is no
+   * place the result of a sign-in could go.
    */
   | 'unsupported-auth'
   /** The manifest asks for a transport the bridge does not speak (e.g. `sse`). */
@@ -280,6 +282,14 @@ export interface InstalledConnector {
   /** Why it is not mounted, when it is not. */
   readonly failure?: string
   /**
+   * Whether that failure is a dead web sign-in.
+   *
+   * Its own field rather than a read of `failure`, because the row turns it
+   * into an action — signing in again in place — and matching on a sentence
+   * would break the first time the sentence is reworded or translated.
+   */
+  readonly needsAuthorization?: boolean
+  /**
    * The command or endpoint this runs.
    *
    * For the rows no catalog entry describes: one the user pasted, and one the
@@ -366,13 +376,46 @@ export interface CustomConnectorRequest {
  */
 export interface ConnectorRequirement {
   readonly slug: string
-  /** `none` connects on one press; `token` needs a field; `oauth` is refused. */
+  /** `none` connects on one press; `token` needs a field; `oauth` needs a browser. */
   readonly mode: 'none' | 'token' | 'oauth'
   /** What to call the field, from the manifest (`auth.label`). */
   readonly label?: string
+  /** For `oauth` only: whether a grant is already stored, so the row can connect. */
+  readonly authorized?: boolean
   /** Why this connector cannot be connected at all, when it cannot. */
   readonly refusal?: string
 }
+
+/** What starting a web sign-in produced. */
+export type ConnectorAuthorizationStart =
+  /** Open this page; the attempt runs on and settles on its own. */
+  | { readonly kind: 'opened'; readonly url: string }
+  /** Nothing was started, and this is why. */
+  | { readonly kind: 'refused'; readonly message: string }
+
+/**
+ * How a sign-in ended, polled by the gallery while the browser is open.
+ *
+ * Polled rather than pushed because the attempt outlives the request that
+ * started it: the host answers with the URL as soon as there is one, so the
+ * renderer can open the browser, and the outcome arrives minutes later.
+ */
+export type ConnectorAuthorizationState =
+  | { readonly kind: 'idle' }
+  | { readonly kind: 'pending' }
+  | { readonly kind: 'authorized' }
+  | { readonly kind: 'cancelled' }
+  | { readonly kind: 'failed'; readonly message: string }
+
+/**
+ * How putting an already-connected connector back up ended.
+ *
+ * Its own shape rather than an `InstallOutcome`, because nothing is installed:
+ * the record was there before the press and is still there after a refusal.
+ */
+export type RemountOutcome =
+  | { readonly kind: 'mounted' }
+  | { readonly kind: 'refused'; readonly message: string }
 
 /** Where installs land, and what is already there. */
 export interface InstallTarget {
