@@ -35,8 +35,10 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { createHash } from 'node:crypto'
 import { normalizeBase, requestJson } from '../../account/http.ts'
 import type { ConsoleAccess } from '../../market/console.ts'
+import { registerModelCacheInvalidator } from '../../models/runtime-cache.ts'
 import { geminiImageProvider } from './gemini.ts'
 import { klingImageProvider, klingOmniImageProvider } from './kling.ts'
 import { mjImagineProvider } from './mj.ts'
@@ -146,6 +148,7 @@ interface RawRow {
 }
 
 const cache = new Map<string, ImageCatalog>()
+registerModelCacheInvalidator(() => cache.clear())
 
 /**
  * Read the servable image models, from cache when it is current.
@@ -162,7 +165,7 @@ export async function readImageCatalog(
   const token = await access.apiKey()
   if (token === undefined || token === '') return undefined
   const base = normalizeBase(access.baseUrl)
-  const key = `${base}|${token}`
+  const key = `${base}|${createHash('sha256').update(token).digest('hex').slice(0, 24)}`
   const cached = cache.get(key)
   if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) return cached
 
@@ -194,6 +197,11 @@ export async function readImageCatalog(
     if (models.size === 0) return cached
     const fresh: ImageCatalog = { models, present, at: Date.now() }
     cache.set(key, fresh)
+    while (cache.size > 8) {
+      const oldest = cache.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      cache.delete(oldest)
+    }
     return fresh
   } catch (error: unknown) {
     ctx.logger.warn(`openlux: image catalogue unreadable (${error instanceof Error ? error.message : String(error)}); leaving the model unchecked`)

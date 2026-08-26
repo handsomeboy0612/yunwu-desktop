@@ -43,6 +43,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { AccountRequestError, normalizeBase, requestJson } from '../account/http.ts'
 import type { ConsoleAccess } from '../market/console.ts'
 import { listedModels } from '../models/listed.ts'
+import { diagnosticUsageText } from './usage.ts'
 
 /**
  * Budget for one look.
@@ -65,7 +66,7 @@ const ANSWER_MAX_TOKENS = 2048
 
 /** Raised when the look could not happen or produced nothing; text is model-facing. */
 export class VisionError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly status?: number) {
     super(message)
     this.name = 'VisionError'
   }
@@ -164,7 +165,7 @@ export async function lookAtImage(
     const detail = messageOf(body['error']) ?? textOf(body['message']) ?? ''
     throw new VisionError(detail === ''
       ? `${request.model} 读图接口返回 HTTP ${String(reply.response.status)}。`
-      : `${request.model} 拒绝了这次读图（HTTP ${String(reply.response.status)}）：${detail}`)
+      : `${request.model} 拒绝了这次读图（HTTP ${String(reply.response.status)}）：${detail}`, reply.response.status)
   }
 
   const choice = (body['choices'] as unknown[] | undefined)?.[0] as Record<string, unknown> | undefined
@@ -176,7 +177,23 @@ export async function lookAtImage(
     // silence as a description.
     throw new VisionError(`${request.model} 这次没有给出任何文字，图可能没被它读到。`)
   }
+  if (deniesSeeingImage(answer)) {
+    throw new VisionError(`${request.model} 收下了请求但没有拿到图片（原话：${answer.slice(0, 80)}）`)
+  }
+  const usage = diagnosticUsageText(body['usage'])
+  ctx.logger.info(`openlux: image_ask used ${request.model}${usage === '' ? '' : ` (${usage})`}`)
   return { answer, model: request.model }
+}
+
+/** Detect fluent HTTP-200 replies that actually say no image was received. */
+export function deniesSeeingImage(answer: string): boolean {
+  return [
+    /\b(?:cannot|can't|can not|unable to|could not)\s+(?:see|view|access|open|read)\s+(?:the\s+|this\s+|any\s+)?(?:image|picture|photo|attachment)/i,
+    /\b(?:no|didn't receive|did not receive|haven't received|have not received)\s+(?:image|picture|photo|attachment)/i,
+    /\bplease\s+(?:upload|attach|provide|share)\s+(?:the\s+|an?\s+)?(?:image|picture|photo)/i,
+    /(?:没有|未|无法|不能)(?:看到|收到|读取|打开|访问)[^。！？\n]{0,10}?(?:图片|图像|照片|附件)/,
+    /请(?:上传|附上|提供)(?:一下)?(?:图片|图像|照片)/,
+  ].some(pattern => pattern.test(answer))
 }
 
 /** `error.message` from an OpenAI-shaped failure body. */

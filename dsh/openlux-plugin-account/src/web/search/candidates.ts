@@ -24,8 +24,11 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { createHash } from 'node:crypto'
 import { normalizeBase, requestJson } from '../../account/http.ts'
 import type { ConsoleAccess } from '../../market/console.ts'
+import { isChatPricingModel } from '../../models/pool.ts'
+import { registerModelCacheInvalidator } from '../../models/runtime-cache.ts'
 import { claudeNativeTransport } from './claude-native.ts'
 import { geminiGroundingTransport } from './gemini-grounding.ts'
 import { openaiAnnotationsTransport } from './openai-annotations.ts'
@@ -51,7 +54,7 @@ export const SEARCH_TRANSPORTS: readonly SearchTransport[] = [
 const CATALOG_TTL_MS = 300_000
 
 /** Budget for reading the catalogue; it is a small JSON list on a warm path. */
-const CATALOG_TIMEOUT_MS = 15_000
+const CATALOG_TIMEOUT_MS = 6_000
 
 /** One servable model, with the transport that claimed it. */
 export interface SearchCandidate {
@@ -75,7 +78,15 @@ interface RawRow {
   readonly tags?: unknown
 }
 
+interface PricingRow {
+  readonly model_name?: unknown
+  readonly model_type?: unknown
+  readonly tags?: unknown
+  readonly supported_endpoint_types?: unknown
+}
+
 const cache = new Map<string, SearchCatalog>()
+registerModelCacheInvalidator(() => cache.clear())
 
 /**
  * Read the claimable search models, from cache when it is current.
@@ -92,26 +103,39 @@ async function readCatalog(
   signal?: AbortSignal,
 ): Promise<SearchCatalog | undefined> {
   const base = normalizeBase(access.baseUrl)
-  const key = `${base}|${token}`
+  const key = `${base}|${createHash('sha256').update(token).digest('hex').slice(0, 24)}`
   const cached = cache.get(key)
   if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) return cached
 
   try {
-    const reply = await requestJson(ctx, `${base}/v1/models`, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
-    }, CATALOG_TIMEOUT_MS, signal)
-    if (!reply.response.ok) {
-      ctx.logger.warn(`openlux: search catalogue read returned HTTP ${String(reply.response.status)}; falling back to proven names`)
+    const [directoryReply, squareReply] = await Promise.all([
+      requestJson(ctx, `${base}/v1/models`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      }, CATALOG_TIMEOUT_MS, signal),
+      requestJson(ctx, `${base}/api/pricing`, {
+        method: 'GET',
+      }, CATALOG_TIMEOUT_MS, signal),
+    ])
+    if (!directoryReply.response.ok || !squareReply.response.ok) {
+      ctx.logger.warn(`openlux: search catalogue read returned HTTP `
+        + `${String(directoryReply.response.status)}/${String(squareReply.response.status)}; falling back to proven names`)
       return cached
     }
-    const rows = (reply.body as { readonly data?: unknown } | undefined)?.data
-    if (!Array.isArray(rows)) return cached
+    const rows = (directoryReply.body as { readonly data?: unknown } | undefined)?.data
+    const squareRows = (squareReply.body as { readonly data?: unknown } | undefined)?.data
+    if (!Array.isArray(rows) || !Array.isArray(squareRows)) return cached
+    const listed = new Set<string>()
+    for (const raw of squareRows as readonly PricingRow[]) {
+      const id = typeof raw.model_name === 'string' ? raw.model_name.trim() : ''
+      if (id !== '' && isChatPricingModel(raw)) listed.add(id)
+    }
+    if (listed.size === 0) return cached
     const candidates: SearchCandidate[] = []
     const present = new Set<string>()
     for (const raw of rows as readonly RawRow[]) {
       const row = read(raw)
-      if (row === undefined) continue
+      if (row === undefined || !listed.has(row.id)) continue
       present.add(row.id)
       const transport = SEARCH_TRANSPORTS.find(candidate => candidate.claims(row))
       if (transport === undefined) continue
@@ -122,6 +146,11 @@ async function readCatalog(
     if (candidates.length === 0) return cached
     const fresh: SearchCatalog = { candidates, present, at: Date.now() }
     cache.set(key, fresh)
+    while (cache.size > 8) {
+      const oldest = cache.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      cache.delete(oldest)
+    }
     return fresh
   } catch (error: unknown) {
     ctx.logger.warn(`openlux: search catalogue unreadable (${error instanceof Error ? error.message : String(error)}); falling back to proven names`)

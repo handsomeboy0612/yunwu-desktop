@@ -1,0 +1,237 @@
+diff --git a/lib/client.js b/lib/client.js
+index ff3e9cfc82cf8144e22dc3dbd3453fbebae3df8a..71c44bbd441ea2dded0dc6f245059148b65976f6 100644
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -59,8 +59,10 @@ window.__ModuleLoader__.load({
++		const openluxTokenCss = ".openluxTokenRow{align-items:stretch;gap:10px;display:flex}.openluxTokenMenu{flex:1;min-width:0;display:flex!important}.openluxTokenMenu>[role=menu]{box-sizing:border-box;width:100%;min-width:100%;max-width:100%;max-height:min(320px,calc(100vh - 24px))}.openluxTokenMenu [role=menuitem]{align-items:flex-start;min-height:52px;padding:7px 9px}.openluxTokenTrigger{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);width:100%;min-width:0;height:44px;color:var(--dsw-alias-label-primary);cursor:pointer;background:var(--dsw-alias-bg-layer-1);border-radius:8px;align-items:center;gap:8px;padding:5px 10px;text-align:left;display:flex}.openluxTokenTrigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}.openluxTokenTrigger[aria-expanded=true]{border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 1px var(--dsw-alias-brand-primary)}.openluxTokenTrigger:disabled{cursor:default;opacity:.6}.openluxTokenCurrent,.openluxTokenOption{flex-direction:column;flex:1;gap:1px;min-width:0;display:flex}.openluxTokenCurrentName,.openluxTokenOptionName{color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.openluxTokenCurrentName{font-size:13px;font-weight:500;line-height:18px}.openluxTokenCurrentMeta,.openluxTokenOptionMeta{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.openluxTokenCurrentMeta{font-size:11px;line-height:16px}.openluxTokenChevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .12s}.openluxTokenTrigger[aria-expanded=true] .openluxTokenChevron{transform:rotate(180deg)}.openluxTokenOptionMain{align-items:center;gap:7px;min-width:0;display:flex}.openluxTokenOptionName{flex:1;font-size:13px;font-weight:500;line-height:18px}.openluxTokenOptionRoute{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-module-platform);border-radius:4px;flex:none;max-width:120px;padding:1px 6px;font-size:10px;line-height:16px;text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.openluxTokenOptionMeta{font-size:11px;line-height:16px}.openluxTokenManage{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);height:44px;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;background:var(--dsw-alias-bg-layer-1);border-radius:8px;align-items:center;gap:5px;padding:0 11px;font-size:12px;line-height:18px;display:inline-flex}.openluxTokenManage:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.openluxTokenManage:focus-visible,.openluxTokenTrigger:focus-visible{outline:none;box-shadow:0 0 0 2px var(--dsw-alias-border-l3)}@media (prefers-reduced-motion:reduce){.openluxTokenChevron{transition:none}}";
++		const openluxModelFetchCss = ".zGbnIq_addModelButton{box-sizing:border-box;border:1px dashed var(--dsw-alias-border-l1);width:100%;min-height:42px;height:42px;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;background:transparent;border-radius:11px;justify-content:center;align-items:center;padding:0 12px;font-size:13px;line-height:20px;display:flex}.zGbnIq_addModelButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.zGbnIq_addModelButton:disabled{cursor:default;opacity:.4}";
+ 		const tagId$3 = "@deepseek-ai/dsh-client-ui-settings-models/ModelsSection.module.css";
+ 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$3) + "]") === null) {
+ 			const tag = document.createElement("style");
+ 			tag.dataset.plugin = "@deepseek-ai/dsh-client-ui-settings-models";
+ 			tag.dataset.pluginCss = tagId$3;
+-			tag.textContent = css$3;
++			tag.textContent = css$3 + openluxTokenCss + openluxModelFetchCss;
+ 			document.head.appendChild(tag);
+ 		}
+@@ -934,19 +936,9 @@ window.__ModuleLoader__.load({
+ 							props.overridden === true && props.onReset !== void 0 ? (0, react_jsx_runtime.jsx)("button", {
+ 								type: "button",
+ 								className: ModelsSection_module_css_default["linkButton"],
+ 								disabled,
+ 								onClick: props.onReset,
+ 								children: t("resetModels")
+-							}) : null,
+-							(0, react_jsx_runtime.jsx)("button", {
+-								type: "button",
+-								className: ModelsSection_module_css_default["linkButton"],
+-								disabled: disabled || busy || !askable || props.probeBlocked !== void 0,
+-								title: props.probeBlocked !== void 0 ? t(props.probeBlocked) : askable ? void 0 : t("fetchNeedsBaseUrl"),
+-								onClick: () => {
+-									fetchModels();
+-								},
+-								children: busy ? t("fetching") : t("fetchModels")
+-							})
++							}) : null
+ 						]
+ 					}),
+@@ -1061,10 +1053,11 @@ window.__ModuleLoader__.load({
+ 					(0, react_jsx_runtime.jsx)("button", {
+ 						type: "button",
+ 						className: ModelsSection_module_css_default["addModelButton"],
+-						disabled,
++						disabled: disabled || busy || !askable || props.probeBlocked !== void 0,
++						title: props.probeBlocked !== void 0 ? t(props.probeBlocked) : askable ? void 0 : t("fetchNeedsBaseUrl"),
+ 						onClick: () => {
+-							onChange([...models, { id: "" }]);
++							fetchModels();
+ 						},
+-						children: t("addModel")
++						children: busy ? t("fetching") : `＋ ${t("fetchModels")}`
+ 					}),
+ 					failure !== void 0 ? (0, react_jsx_runtime.jsx)("p", {
+@@ -1504,6 +1497,7 @@ window.__ModuleLoader__.load({
+ 			const [loading, setLoading] = (0, react.useState)(true);
+ 			const [switching, setSwitching] = (0, react.useState)(false);
+ 			const [failure, setFailure] = (0, react.useState)(void 0);
++			const [menuOpen, setMenuOpen] = (0, react.useState)(false);
+ 			const load = (0, react.useCallback)(async (signal) => {
+ 				const result = await callAccount("tokens.list", {}, signal);
+ 				if (!result.ok) throw new Error(result.error.message);
+@@ -1522,6 +1516,20 @@ window.__ModuleLoader__.load({
+ 				};
+ 			}, [load]);
++			(0, react.useEffect)(() => {
++				if (!menuOpen) return;
++				const closeOnEscape = (event) => {
++					if (event.key !== "Escape") return;
++					event.preventDefault();
++					event.stopImmediatePropagation();
++					setMenuOpen(false);
++				};
++				document.addEventListener("keydown", closeOnEscape, true);
++				return () => {
++					document.removeEventListener("keydown", closeOnEscape, true);
++				};
++			}, [menuOpen]);
+ 			const useToken = async (id) => {
++				setMenuOpen(false);
+ 				setSwitching(true);
+ 				setFailure(void 0);
+ 				try {
+@@ -1534,49 +1542,97 @@ window.__ModuleLoader__.load({
+ 					setSwitching(false);
+ 				}
+ 			};
+-			const labelOf = (token) => {
+-				const routing = token.routingPriority === "" ? token.groupNames.length === 0 ? t("tokenManual") : `${t("tokenManual")} · ${token.groupNames.join(" + ")}` : {
++			const routeOf = (token) => {
++				return token.routingPriority === "" ? token.groupNames.length === 0 ? t("tokenManual") : `${t("tokenManual")} · ${token.groupNames.join(" + ")}` : {
+ 					auto: t("tokenRouteAuto"),
+ 					price: t("tokenRoutePrice"),
+ 					speed: t("tokenRouteSpeed"),
+ 					success_rate: t("tokenRouteSuccess")
+ 				}[token.routingPriority] ?? t("tokenRouteAuto");
+-				return `${token.name} · ${token.maskedKey} · ${routing}`;
+ 			};
++			const tokens = snapshot?.tokens ?? [];
++			const current = tokens.find((token) => token.id === snapshot?.currentId);
++			const controlDisabled = disabled || loading || switching || snapshot?.credentialWritable === false || tokens.length === 0;
++			const currentName = loading ? t("tokenLoading") : current?.name ?? t("tokenUnmatched");
++			const currentMeta = current === void 0 ? "" : `${current.maskedKey} · ${routeOf(current)}`;
++			const tokenItems = tokens.map((token) => ({
++				id: String(token.id),
++				disabled: token.status !== 1 || switching,
++				label: (0, react_jsx_runtime.jsxs)("span", {
++					className: "openluxTokenOption",
++					children: [(0, react_jsx_runtime.jsxs)("span", {
++						className: "openluxTokenOptionMain",
++						children: [(0, react_jsx_runtime.jsx)("span", {
++							className: "openluxTokenOptionName",
++							children: token.name
++						}), (0, react_jsx_runtime.jsx)("span", {
++							className: "openluxTokenOptionRoute",
++							title: routeOf(token),
++							children: routeOf(token)
++						})]
++					}), (0, react_jsx_runtime.jsx)("span", {
++						className: "openluxTokenOptionMeta",
++						children: token.maskedKey
++					})]
++				})
++			}));
+ 			return (0, react_jsx_runtime.jsxs)("div", {
+ 				className: ModelsSection_module_css_default["field"],
+ 				children: [(0, react_jsx_runtime.jsx)("span", {
+ 					className: ModelsSection_module_css_default["fieldLabel"],
+ 					children: t("currentToken")
+ 				}), (0, react_jsx_runtime.jsxs)("div", {
+-					className: ModelsSection_module_css_default["rowHead"],
+-					children: [(0, react_jsx_runtime.jsxs)("select", {
+-						className: `${ModelsSection_module_css_default["input"]} ${ModelsSection_module_css_default["selectInput"]}`,
+-						value: snapshot?.currentId === void 0 ? "" : String(snapshot.currentId),
+-						"aria-label": t("currentToken"),
+-						disabled: disabled || loading || switching || snapshot?.credentialWritable === false,
+-						onChange: (event) => {
+-							const id = Number(event.target.value);
+-							if (Number.isInteger(id) && id > 0) useToken(id);
++					className: "openluxTokenRow",
++					children: [(0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Menu, {
++						className: "openluxTokenMenu",
++						open: menuOpen && !controlDisabled,
++						items: tokenItems,
++						selectedId: snapshot?.currentId === void 0 ? void 0 : String(snapshot.currentId),
++						onClose: () => {
++							setMenuOpen(false);
+ 						},
+-						children: [
+-							snapshot?.currentId === void 0 ? (0, react_jsx_runtime.jsx)("option", {
+-								value: "",
+-								children: loading ? t("tokenLoading") : t("tokenUnmatched")
+-							}) : null,
+-							...(snapshot?.tokens ?? []).map((token) => (0, react_jsx_runtime.jsx)("option", {
+-								value: String(token.id),
+-								disabled: token.status !== 1,
+-								children: labelOf(token)
+-							}, token.id))
+-						]
++						onSelect: (value) => {
++							const id = Number(value);
++							if (!Number.isInteger(id) || id <= 0) return;
++							if (id === snapshot?.currentId) {
++								setMenuOpen(false);
++								return;
++							}
++							useToken(id);
++						},
++						anchor: (0, react_jsx_runtime.jsxs)("button", {
++							type: "button",
++							className: "openluxTokenTrigger",
++							"aria-label": t("currentToken"),
++							"aria-haspopup": "menu",
++							"aria-expanded": menuOpen && !controlDisabled,
++							disabled: controlDisabled,
++							title: currentMeta === "" ? currentName : `${currentName} · ${currentMeta}`,
++							onClick: () => {
++								setMenuOpen((open) => !open);
++							},
++							children: [(0, react_jsx_runtime.jsxs)("span", {
++								className: "openluxTokenCurrent",
++								children: [(0, react_jsx_runtime.jsx)("span", {
++									className: "openluxTokenCurrentName",
++									children: currentName
++								}), currentMeta === "" ? null : (0, react_jsx_runtime.jsx)("span", {
++									className: "openluxTokenCurrentMeta",
++									children: currentMeta
++								})]
++							}), (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronDownOutline14, {
++								className: "openluxTokenChevron"
++							})]
++						})
+ 					}), (0, react_jsx_runtime.jsx)("button", {
+ 						type: "button",
+-						className: ModelsSection_module_css_default["linkButton"],
++						className: "openluxTokenManage",
+ 						onClick: () => {
+ 							openSection("openlux-token-section");
+ 						},
+-						children: t("manageTokens")
++						children: [(0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconSettingsOutline14, {}), (0, react_jsx_runtime.jsx)("span", {
++							children: t("manageTokens")
++						})]
+ 					})]
+ 				}), (0, react_jsx_runtime.jsx)("p", {
+ 					className: ModelsSection_module_css_default["advancedHint"],
+@@ -2026,11 +2082,16 @@ window.__ModuleLoader__.load({
+ 					setSavedTarget(target);
+ 				});
+ 			};
+ 			const closeEditor = (changed, target) => {
+-				setEditing(void 0);
++				if (changed) {
++					setAdding(false);
++					setDeclaring(false);
++					announceSaved(target);
++					return;
++				}
++				setEditing(void 0);
+ 				setAdding(false);
+ 				setDeclaring(false);
+-				if (changed) announceSaved(target);
+ 			};
+ 			/**
+ 			* Close a setup card, which owns none of the state above: the row-editor,
+@@ -2774,5 +2835,5 @@ window.__ModuleLoader__.load({
+ 			addModel: "Add model",
+ 			removeModel: "Delete model",
+ 			managedModel: "Official",
+-			managedModelHint: "Provided by OpenLux. This row cannot be edited or removed; use 'Add model' below for your own.",
++			managedModelHint: "Provided by OpenLux. This row cannot be edited or removed; use 'Fetch available models' below to add more.",
+ 			modelsEmpty: "No models will be shown in the selector. Unlisted IDs can still be sent directly.",
+@@ -2893,5 +2954,5 @@ window.__ModuleLoader__.load({
+ 			addModel: "添加模型",
+ 			removeModel: "删除模型",
+ 			managedModel: "官方",
+-			managedModelHint: "由 OpenLux 提供，不可修改或删除；自定义模型请用下方「添加模型」。",
++			managedModelHint: "由 OpenLux 提供，不可修改或删除；新增模型请使用下方「获取可用模型」。",
+ 			modelsEmpty: "模型选择器中将不显示任何模型；目录外 ID 仍可直接发送。",

@@ -1,7 +1,15 @@
 import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-client-runtime/client'
 import type { DesktopFilePathBridge, DesktopFilePathBridgeWindow } from '../file-path-bridge-contract.ts'
 
-export const WORKSPACE_DROP_TARGET = '[data-dsh-workspace-drop-target]'
+/**
+ * The renderer wraps every slot in a `display:contents` `[data-slot]` node, so
+ * the visual drop surface is the first child — ui-workspace's browser root —
+ * rather than a kernel-package patch attribute.
+ */
+export const WORKSPACE_SLOT = '[data-slot="sidebar.workspaces"]'
+
+/** CSS selector for the visual Workspace browser root inside the slot wrapper. */
+export const WORKSPACE_DROP_TARGET = `${WORKSPACE_SLOT} > :first-child`
 
 /** Workspace operations used after a desktop folder is resolved. */
 export interface WorkspaceFolderDropActions {
@@ -70,10 +78,16 @@ export async function adoptWorkspaceFolder(
   actions.startSession(workspace.workspaceId)
 }
 
-function workspaceTarget(target: EventTarget | null): HTMLElement | undefined {
+/**
+ * Walk from a nested drop event to the Workspace browser's layout box.
+ * `Element.closest('A > B')` only matches the event target itself, so nested
+ * session rows would miss a child-combinator selector.
+ */
+export function workspaceDropSurface(target: EventTarget | null): HTMLElement | undefined {
   if (!(target instanceof Element)) return undefined
-  const element = target.closest(WORKSPACE_DROP_TARGET)
-  return element instanceof HTMLElement ? element : undefined
+  const slot = target.closest(WORKSPACE_SLOT)
+  const surface = slot?.firstElementChild
+  return surface instanceof HTMLElement ? surface : undefined
 }
 
 /** Install desktop-only folder adoption on the upstream Workspace browser. */
@@ -123,7 +137,7 @@ export function installWorkspaceFolderDrop(
 
   const onDragOver = (event: DragEvent): void => {
     const transfer = event.dataTransfer
-    const target = workspaceTarget(event.target)
+    const target = workspaceDropSurface(event.target)
     if (transfer === null || target === undefined || !hasFilePayload(transfer)) return
     event.preventDefault()
     const acceptable = !busy && singleDroppedDirectory(transfer) !== undefined
@@ -132,14 +146,14 @@ export function installWorkspaceFolderDrop(
     else if (!busy) hide(target)
   }
   const onDragLeave = (event: DragEvent): void => {
-    const target = workspaceTarget(event.target)
+    const target = workspaceDropSurface(event.target)
     if (target === undefined || target !== active || busy) return
     if (event.relatedTarget instanceof Node && target.contains(event.relatedTarget)) return
     hide(target)
   }
   const onDrop = (event: DragEvent): void => {
     const transfer = event.dataTransfer
-    const target = workspaceTarget(event.target)
+    const target = workspaceDropSurface(event.target)
     if (transfer === null || target === undefined || !hasFilePayload(transfer)) return
     event.preventDefault()
     event.stopPropagation()

@@ -63,6 +63,31 @@ export function normalizeBase(baseUrl: string): string {
 }
 
 /**
+ * Whether a model-route reply proves that the desktop token itself is invalid.
+ *
+ * `new-yunwu-api/middleware/auth.go:882-896` emits token admission failures as
+ * HTTP 401 with one of the localized `token.*` messages. Once admission passes,
+ * an upstream channel can also answer 401, and Distributor/provider protocol
+ * checks can answer 403. Those are candidate failures, not evidence that the
+ * desktop credential is dead, so callers must not stop a fallback chain from
+ * status alone.
+ */
+export function isTokenCredentialFailure(status: number | undefined, detail: string): boolean {
+  if (status !== 401) return false
+  const message = detail.trim().toLowerCase()
+  return [
+    /^invalid token\b/,
+    /^token not provided\b/,
+    /^this token has expired\b/,
+    /^token quota exhausted\b/,
+    /^this token status is unavailable\b/,
+    /^token\.(?:invalid|not_provided|expired|exhausted|status_unavailable)\b/,
+    /^(?:无效的令牌|未提供令牌|该令牌已过期|该令牌额度已用尽|该令牌状态不可用)/,
+    /^(?:無效的令牌|未提供令牌|該令牌已過期|該令牌額度已用盡|該令牌狀態不可用)/,
+  ].some(pattern => pattern.test(message))
+}
+
+/**
  * Language to ask the console to answer in.
  *
  * The console picks per request from `Accept-Language`

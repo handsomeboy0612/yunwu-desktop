@@ -26,10 +26,11 @@
 
 import { createRequire } from 'node:module'
 import type { Context } from '@deepseek-ai/cordis'
-import { asEnvelope, normalizeBase, requestJson } from '../account/http.ts'
+import { normalizeBase } from '../account/http.ts'
+import { readContentModule } from './content-cache.ts'
 import { formatFor } from './wire.ts'
 import type {
-  Catalog, CatalogArtifact, CatalogCategory, CatalogFailure, CatalogItem, CatalogType, Unavailable,
+  Catalog, CatalogArtifact, CatalogCategory, CatalogItem, CatalogType, Unavailable,
 } from './wire.ts'
 
 export type {
@@ -42,15 +43,6 @@ const CATALOG_TIMEOUT_MS = 12_000
 
 /** Preset ids are directory names; the kernel's own rule decides which. */
 const PRESET_ID = /^[a-z0-9][a-z0-9-]*$/
-
-/** What one revalidation kept. */
-interface Cached {
-  readonly etag: string | undefined
-  readonly catalog: Catalog
-}
-
-/** Per-origin, per-type memo; the process is the cache's lifetime. */
-const cache = new Map<string, Cached>()
 
 const require_ = createRequire(import.meta.url)
 
@@ -94,75 +86,36 @@ export async function readCatalog(
   const base = normalizeBase(options.baseUrl)
   const api = kernelApi()
   const key = `${base}|${options.type}|${api}`
-  const held = cache.get(key)
-
-  const token = await options.apiKey()
-  // Not an error: a signed-out client has a catalog it cannot read yet, and
-  // the gallery's answer to that is the sign-in row it already shows.
-  if (token === undefined) {
-    return { kernelApi: api, items: [], categories: [], failure: { kind: 'signed-out' } }
-  }
 
   // One format per partition, and none for connectors: they carry an MCP launch
   // manifest in their own row rather than an archive, so asking for one would
   // mark every connector unavailable.
   const format = formatFor(options.type)
-  const url = `${base}/api/desktop-market/snapshot`
-    + `?type=${encodeURIComponent(options.type)}&kernel_api=${encodeURIComponent(api)}`
+  const url = `${base}/api/desktop-content/catalog/${encodeURIComponent(options.type)}`
+    + `?kernel_api=${encodeURIComponent(api)}`
     // No format means "catalog only, no artifacts", which the console handles
     // as its own case and which is exactly right for connectors.
     + (format === undefined ? '' : `&format=${encodeURIComponent(format)}`)
-  const headers: Record<string, string> = { Authorization: `Bearer ${token}` }
-  if (held?.etag !== undefined) headers['If-None-Match'] = held.etag
-
-  let reply
-  try {
-    reply = await requestJson(ctx, url, { method: 'GET', headers }, CATALOG_TIMEOUT_MS, signal)
-  } catch (error: unknown) {
-    return failed(api, held, {
-      kind: 'transport',
-      message: error instanceof Error ? error.message : String(error),
-    })
+  const read = await readContentModule(ctx, {
+    key,
+    url,
+    apiKey: options.apiKey,
+    timeoutMs: CATALOG_TIMEOUT_MS,
+    parse: data => catalogOf(data, api, options.type),
+  }, signal)
+  if (read.value === undefined) {
+    return {
+      kernelApi: api,
+      items: [],
+      categories: [],
+      ...read.failure === undefined ? {} : { failure: read.failure },
+    }
   }
-
-  // 304 is the hit: the body is empty by contract, and the rows we hold are
-  // the ones the console would have sent.
-  // A revalidation that matched makes the held rows current again, so an
-  // earlier failure's marks do not ride along.
-  if (reply.response.status === 304 && held !== undefined) {
-    const { kernelApi: api304, items, categories } = held.catalog
-    return { kernelApi: api304, items, categories }
+  return {
+    ...read.value,
+    ...read.stale === true ? { stale: true } : {},
+    ...read.failure === undefined ? {} : { failure: read.failure },
   }
-  if (!reply.response.ok) {
-    return failed(api, held, { kind: 'http', status: reply.response.status })
-  }
-
-  const envelope = asEnvelope<{ items?: unknown; categories?: unknown }>(reply.body)
-  if (envelope.success === false) {
-    return failed(api, held, envelope.message === undefined || envelope.message === ''
-      ? { kind: 'http', status: reply.response.status }
-      : { kind: 'refused', message: envelope.message })
-  }
-
-  const catalog: Catalog = {
-    kernelApi: api,
-    items: itemsOf(envelope.data?.items, api, options.type),
-    categories: categoriesOf(envelope.data?.categories),
-  }
-  cache.set(key, { etag: reply.response.headers.get('etag') ?? undefined, catalog })
-  return catalog
-}
-
-/**
- * Answer a failed read with whatever is still true.
- * @param api - kernel api the read was for.
- * @param held - the cached answer, when there is one.
- * @param failure - why the fresh read failed.
- * @returns the stale catalog, or an empty one carrying the reason.
- */
-function failed(api: string, held: Cached | undefined, failure: CatalogFailure): Catalog {
-  if (held === undefined) return { kernelApi: api, items: [], categories: [], failure }
-  return { ...held.catalog, stale: true, failure }
 }
 
 /**
@@ -171,13 +124,33 @@ function failed(api: string, held: Cached | undefined, failure: CatalogFailure):
  * @param api - kernel api the artifacts were asked for.
  * @returns the rows the gallery renders.
  */
-function itemsOf(raw: unknown, api: string, type: CatalogType): CatalogItem[] {
+function catalogOf(raw: unknown, api: string, type: CatalogType): Catalog | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined
+  const data = raw as Record<string, unknown>
+  const categories = categoriesOf(data['categories'])
+  const tagNames = namesById(data['tags'])
+  const featuredIds = featuredItemIds(data['sections'])
+  return {
+    kernelApi: api,
+    items: itemsOf(data['items'], api, type, tagNames, featuredIds),
+    categories,
+  }
+}
+
+function itemsOf(
+  raw: unknown,
+  api: string,
+  type: CatalogType,
+  tagNames: ReadonlyMap<number, string>,
+  featuredIds: ReadonlySet<number>,
+): CatalogItem[] {
   if (!Array.isArray(raw)) return []
   const items: CatalogItem[] = []
   for (const entry of raw) {
     const row = (entry ?? {}) as Record<string, unknown>
     const slug = text(row['slug'])
     if (slug === '') continue
+    const id = count(row['id'])
     const artifact = artifactOf(row['artifact'], api, formatFor(type))
     const unavailable: Unavailable | undefined = !PRESET_ID.test(slug)
       ? 'bad-id'
@@ -185,16 +158,19 @@ function itemsOf(raw: unknown, api: string, type: CatalogType): CatalogItem[] {
       : artifact === undefined && formatFor(type) !== undefined ? 'no-artifact' : undefined
     items.push({
       slug,
-      name: text(row['name']) === '' ? slug : text(row['name']),
+      name: text(row['name_zh']) === '' ? slug : text(row['name_zh']),
       descriptionZh: text(row['description_zh']),
       descriptionEn: text(row['description_en']),
       version: text(row['version']),
-      icon: text(row['icon']),
-      categoryId: count(row['category_id']),
-      tags: tagsOf(row['tags']),
-      team: row['is_team'] === true || row['is_team'] === 1,
-      featured: row['featured'] === true || row['featured'] === 1,
+      icon: nestedText(row['icon_asset'], 'url'),
+      categoryId: positiveIds(row['category_ids'])[0] ?? 0,
+      tags: positiveIds(row['tag_ids']).map(tagId => tagNames.get(tagId) ?? '').filter(Boolean),
+      team: text(row['expert_kind']) === 'team',
+      featured: featuredIds.has(id),
       downloads: count(row['download_count']),
+      ...Array.isArray(row['opening_prompts'])
+        ? { openingPrompts: texts(row['opening_prompts']) }
+        : {},
       ...artifact === undefined ? {} : { artifact },
       ...unavailable === undefined ? {} : { unavailable },
     })
@@ -227,13 +203,14 @@ function artifactOf(
 ): CatalogArtifact | undefined {
   if (wanted === undefined) return undefined
   const row = (raw ?? {}) as Record<string, unknown>
-  const sha256 = text(row['sha256'])
+  const asset = (row['asset'] ?? {}) as Record<string, unknown>
+  const sha256 = text(asset['sha256'])
   const format = text(row['format'])
   const kernelApi = text(row['kernel_api'])
   if (sha256 === '') return undefined
   if (format !== wanted) return undefined
   if (kernelApi !== '' && kernelApi !== api) return undefined
-  return { format, kernelApi: kernelApi === '' ? api : kernelApi, sha256, size: count(row['size']) }
+  return { format, kernelApi: kernelApi === '' ? api : kernelApi, sha256, size: count(asset['size']) }
 }
 
 /**
@@ -247,7 +224,7 @@ function categoriesOf(raw: unknown): CatalogCategory[] {
   for (const entry of raw) {
     const row = (entry ?? {}) as Record<string, unknown>
     const id = count(row['id'])
-    const name = text(row['name'])
+    const name = text(row['name_zh'])
     if (id > 0 && name !== '') categories.push({ id, name })
   }
   return categories
@@ -258,12 +235,47 @@ function categoriesOf(raw: unknown): CatalogCategory[] {
  * @param raw - the `tags` field, an array or its JSON text.
  * @returns the tags, empty when unreadable.
  */
-function tagsOf(raw: unknown): string[] {
-  const parsed: unknown = typeof raw === 'string' && raw !== ''
-    ? ((): unknown => { try { return JSON.parse(raw) } catch { return undefined } })()
-    : raw
-  if (!Array.isArray(parsed)) return []
-  return parsed.map(tag => text(tag)).filter(tag => tag !== '')
+function namesById(raw: unknown): ReadonlyMap<number, string> {
+  const result = new Map<number, string>()
+  if (!Array.isArray(raw)) return result
+  for (const entry of raw) {
+    const row = (entry ?? {}) as Record<string, unknown>
+    const id = count(row['id'])
+    const name = text(row['name_zh'])
+    if (id > 0 && name !== '') result.set(id, name)
+  }
+  return result
+}
+
+function featuredItemIds(raw: unknown): ReadonlySet<number> {
+  const result = new Set<number>()
+  if (!Array.isArray(raw)) return result
+  for (const entry of raw) {
+    const row = (entry ?? {}) as Record<string, unknown>
+    if (text(row['slug']) !== 'featured') continue
+    for (const id of positiveIds(row['item_ids'])) result.add(id)
+  }
+  return result
+}
+
+function positiveIds(raw: unknown): number[] {
+  return Array.isArray(raw) ? raw.map(count).filter(id => id > 0) : []
+}
+
+function nestedText(raw: unknown, key: string): string {
+  if (raw === null || typeof raw !== 'object') return ''
+  return text((raw as Record<string, unknown>)[key])
+}
+
+/** Read the catalog's eager expert questions, keeping their published order. */
+function texts(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const result: string[] = []
+  for (const value of raw) {
+    const item = text(value)
+    if (item !== '' && !result.includes(item)) result.push(item)
+  }
+  return result
 }
 
 /**

@@ -104,6 +104,7 @@ import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-cli
 // them structurally would only buy a cast at the one call that matters.
 import type { ComposerAttachment, DraftAttachmentId } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { FILE_STAGE_ENDPOINT, FILE_VISION_ENDPOINT, MAX_STAGED_BYTES } from '../files/name.ts'
+import { fileIntakeRoute } from './file-intake.ts'
 import { diskPathOf } from './file-path-bridge.ts'
 import { fileReferenceText } from './file-reference.ts'
 import type { AccountHostCaller } from './types.ts'
@@ -113,18 +114,6 @@ export const ATTACH_FILE_ID = 'openlux-attach-file'
 
 /** Ahead of anything else a plugin adds to that row: it is the row's own subject. */
 export const ATTACH_FILE_ORDER = 0
-
-/**
- * What the kernel's image intake accepts, so a drop can be routed to whichever
- * half handles it.
- *
- * These are `attachment-local`'s default `mediaTypes`, which
- * `dsh-plugin-desktop/cordis.patch.yml` does not override (it only raises
- * `maxImageBytes`). Widening that config without touching this list would send
- * the new type down our path instead — a worse route for an image, not a broken
- * one, since the model can still open it with `read_image`.
- */
-const KERNEL_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 
 /** What the host answers; mirrors `files/stage.ts`'s `StageOutcome`. */
 type StageOutcome =
@@ -278,10 +267,28 @@ export function AttachFileButton(
   // is synchronous. `undefined` means "not answered yet", which routes to the
   // kernel rather than guessing.
   const vision = useRef<VisionModels | undefined>(undefined)
+  const selectionGeneration = useRef(0)
+  const rerouteFlight = useRef<Promise<void>>()
+
+  interface StagedFile {
+    readonly file: File
+    readonly path: string
+  }
+
+  const placePaths = (paths: readonly string[]): void => {
+    let draft = draftAt.current
+    for (const path of paths) {
+      if (reference(path)) continue
+      draft = withPath(draft, path)
+      inputActions.setDraft(draft)
+    }
+  }
 
   const stage = async (files: readonly File[]): Promise<readonly File[]> => {
     try {
-      return await attach(files)
+      const staged = await attach(files)
+      placePaths(staged.map(item => item.path))
+      return staged.map(item => item.file)
     } finally {
       // Anything thrown in there would otherwise leave the button reading
       // "attaching…" for the rest of the session, with no way back.
@@ -294,7 +301,7 @@ export function AttachFileButton(
    * @param files - what the user handed over, by any of the three doors.
    * @returns the ones that reached the harness home; a refusal keeps its file out.
    */
-  const attach = async (files: readonly File[]): Promise<readonly File[]> => {
+  const attach = async (files: readonly File[]): Promise<readonly StagedFile[]> => {
     setBusy(true)
     setProblem(null)
     // Both places, every time: the label is for the user who is at the button,
@@ -303,28 +310,11 @@ export function AttachFileButton(
       setProblem(text)
       notify('error', text)
     }
-    // The draft is a point-in-time snapshot off the owner share, so the running
-    // value is threaded through this loop rather than re-read per file. Only the
-    // text arm needs it, and that arm is all-or-nothing per composition — a
-    // missing composer face means no chip ever lands — so the two can never
-    // interleave and leave this stale.
-    let draft = draftAt.current
-    /**
-     * Put one path in front of the user, in whichever form this composition can
-     * carry.
-     * @param path - the staged file's absolute path.
-     */
-    const place = (path: string): void => {
-      if (reference(path)) return
-      draft = withPath(draft, path)
-      inputActions.setDraft(draft)
-    }
-    const staged: File[] = []
+    const staged: StagedFile[] = []
     for (const file of files) {
       const onDisk = diskPathOf(file)
       if (onDisk !== undefined) {
-        place(onDisk)
-        staged.push(file)
+        staged.push({ file, path: onDisk })
         continue
       }
       if (file.size > MAX_STAGED_BYTES) {
@@ -349,8 +339,7 @@ export function AttachFileButton(
         refuse(t('unreadable'))
         continue
       }
-      place(result.value.path)
-      staged.push(file)
+      staged.push({ file, path: result.value.path })
     }
     return staged
   }
@@ -392,18 +381,39 @@ export function AttachFileButton(
    * Failures still speak, through `attach`'s own refusals.
    */
   const rerouteRail = async (): Promise<void> => {
-    const ids = railAt.current
-    if (ids.length === 0 || kernelTakesImages()) return
-    const images = railImages(ids)
-    if (images.length === 0) return
-    const staged = new Set(await stageNow.current(images.map(image => image.file)))
-    for (const image of images) {
-      if (!staged.has(image.file)) continue
-      // Order matters: the id leaves the input state first, so nothing renders a
-      // preview whose object URL has already been revoked.
-      inputActions.removeImage(image.id)
-      releaseRailImage(image.id)
-    }
+    if (rerouteFlight.current !== undefined) return rerouteFlight.current
+    const generation = selectionGeneration.current
+    const run = (async (): Promise<void> => {
+      const ids = railAt.current
+      if (ids.length === 0 || kernelTakesImages()) return
+      const images = railImages(ids)
+      if (images.length === 0) return
+      let staged: readonly StagedFile[]
+      try {
+        staged = await attach(images.map(image => image.file))
+      } finally {
+        setBusy(false)
+      }
+      if (generation !== selectionGeneration.current || kernelTakesImages()) return
+      const byFile = new Map(staged.map(item => [item.file, item.path]))
+      const currentIds = new Set(railAt.current)
+      const paths: string[] = []
+      for (const image of images) {
+        const path = byFile.get(image.file)
+        if (path === undefined || !currentIds.has(image.id)) continue
+        paths.push(path)
+        // Order matters: the id leaves the input state first, so nothing renders
+        // a preview whose object URL has already been revoked.
+        inputActions.removeImage(image.id)
+        releaseRailImage(image.id)
+      }
+      placePaths(paths)
+    })()
+    const tracked = run.finally(() => {
+      if (rerouteFlight.current === tracked) rerouteFlight.current = undefined
+    })
+    rerouteFlight.current = tracked
+    return tracked
   }
   const rerouteNow = useRef(rerouteRail)
   rerouteNow.current = rerouteRail
@@ -446,7 +456,10 @@ export function AttachFileButton(
   useEffect(() => {
     // Switching models is the gesture this watches for; the picker writes the
     // same store the routing reads, so the two halves stay one decision.
-    const stop = watchSelection(() => { void rerouteNow.current() })
+    const stop = watchSelection(() => {
+      selectionGeneration.current += 1
+      void rerouteNow.current()
+    })
     return () => { stop() }
   }, [])
 
@@ -470,7 +483,10 @@ export function AttachFileButton(
       // itself the feedback, and a notice explaining the routing turned into a
       // line of chrome the user had to read on every picture. Failures still
       // speak — those go through `refuse`.
-      if (files.every(file => KERNEL_IMAGE_TYPES.has(file.type)) && kernelTakesImages()) return
+      if (fileIntakeRoute(files, {
+        kernelTakesImages: kernelTakesImages(),
+        clipboardHasText: false,
+      }) === 'kernel') return
       // A mixed drop comes here whole. Splitting it is not possible — the
       // kernel's handler takes `dataTransfer.files` or nothing — and taking all
       // of it loses less than dropping the strangers on the floor: an image with
@@ -504,12 +520,10 @@ export function AttachFileButton(
         .map(item => item.getAsFile())
         .filter((file): file is File => file !== null)
       if (files.length === 0) return
-      // Text alongside the picture is left to the kernel whole: its paste path
-      // is a transaction over the draft (`pasteBegin`, undo, reference chips),
-      // and claiming half of that would break the text half to fix the picture.
-      // A pasted screenshot — the case this exists for — carries no text.
-      if (clipboard.getData('text/plain') !== '') return
-      if (kernelTakesImages()) return
+      if (fileIntakeRoute(files, {
+        kernelTakesImages: kernelTakesImages(),
+        clipboardHasText: clipboard.getData('text/plain') !== '',
+      }) === 'kernel') return
       // Same route as a drop, for the same reason, and the kernel's own intake
       // is on the textarea's React `onPaste` (`client.js:3542`), so capture at
       // the document beats it.

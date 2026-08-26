@@ -50,6 +50,8 @@ export interface CatalogItem {
   readonly team: boolean
   readonly featured: boolean
   readonly downloads: number
+  /** Opening questions already carried by the expert catalog's first screen. */
+  readonly openingPrompts?: readonly string[]
   readonly artifact?: CatalogArtifact
   readonly unavailable?: Unavailable
 }
@@ -88,6 +90,74 @@ export interface Catalog {
   readonly stale?: boolean
   /** Set when the fresh read failed, whether or not cache saved it. */
   readonly failure?: CatalogFailure
+}
+
+/** One reusable opening question attached to a home scene. */
+export interface HomeScenePrompt {
+  readonly title: string
+  readonly prompt: string
+}
+
+/** One expert reference carried by a home recommendation. */
+export interface HomeExpertRef {
+  readonly id: number
+  readonly slug: string
+  readonly name: string
+}
+
+/** A scene chip and the prompts it may stage into the blank composer. */
+export interface HomeScene {
+  readonly id: number
+  readonly slug: string
+  readonly name: string
+  readonly mode: string
+  readonly iconKey: string
+  readonly prompts: readonly HomeScenePrompt[]
+  readonly experts: readonly HomeExpertRef[]
+}
+
+/** Curated expert recommendation shown on the blank-session home. */
+export interface HomeShowcase {
+  readonly id: number
+  readonly slug: string
+  readonly title: string
+  readonly subtitle: string
+  readonly description: string
+  readonly initPrompt: string
+  readonly cover: string
+  readonly experts: readonly HomeExpertRef[]
+}
+
+/** One practice case; its short-lived artifact URL is resolved only on click. */
+export interface HomePlaybook {
+  readonly id: number
+  readonly slug: string
+  readonly title: string
+  readonly subtitle: string
+  readonly description: string
+  readonly initPrompt: string
+  readonly sceneSlug: string
+  readonly cover: string
+  readonly artifactType: string
+  /** Stable editorial order from the V2 playbook row. */
+  readonly sortOrder: number
+  readonly experts: readonly HomeExpertRef[]
+  readonly tags: readonly string[]
+}
+
+/** Independently ETag-revalidated home modules combined for the renderer. */
+export interface HomeContent {
+  readonly scenes: readonly HomeScene[]
+  readonly showcases: readonly HomeShowcase[]
+  readonly playbooks: readonly HomePlaybook[]
+  readonly stale?: boolean
+  readonly failure?: CatalogFailure
+}
+
+/** On-demand artifact lease for an HTML, video, or external-link playbook. */
+export interface PlaybookArtifact {
+  readonly url: string
+  readonly artifactType: string
 }
 
 /**

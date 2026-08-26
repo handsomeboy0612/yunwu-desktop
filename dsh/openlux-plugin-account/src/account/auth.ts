@@ -38,7 +38,6 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { ACCOUNT_TIMEOUT_MS, asEnvelope, normalizeBase, requestJson } from './http.ts'
-import { saveSession } from './session.ts'
 
 /** Token name created on the user's behalf, visible in their console. */
 const TOKEN_NAME = 'OpenLux 桌面客户端'
@@ -63,6 +62,11 @@ export type SignInOutcome =
     readonly apiKey: string
     readonly userId: number
     readonly username: string
+    readonly session: {
+      readonly userId: number
+      readonly baseUrl: string
+      readonly cookie: string
+    }
   }
   /** The console refused: wrong password, banned account, disabled sign-in. */
   | { readonly kind: 'rejected'; readonly message: string; readonly needCaptcha: boolean }
@@ -86,6 +90,7 @@ interface TokenItem {
   name?: string
   key?: string
   status?: number
+  expired_time?: number
   routing_priority?: string
 }
 
@@ -118,17 +123,13 @@ export async function signIn(
   const key = await getOrCreateApiKey(ctx, base, login.cookie, login.userId, signal)
   if (key.kind !== 'ok') return key
 
-  // Persisted after the key is in hand: a session stored for a sign-in that
-  // then failed to produce a key would leave the balance line authenticated
-  // for an account the rest of the app does not consider signed in.
-  await saveSession(ctx, { userId: login.userId, baseUrl: base, cookie: login.cookie })
-
   return {
     kind: 'ok',
     baseUrl: base,
     apiKey: key.apiKey,
     userId: login.userId,
     username: login.username,
+    session: { userId: login.userId, baseUrl: base, cookie: login.cookie },
   }
 }
 
@@ -250,6 +251,7 @@ async function findReusableKey(
   const found = itemsOf(envelope.data).find(item =>
     item.name === TOKEN_NAME
     && item.status === 1
+    && (item.expired_time === undefined || item.expired_time === -1 || item.expired_time > Math.floor(Date.now() / 1000))
     && typeof item.key === 'string' && item.key !== ''
     && typeof item.routing_priority === 'string' && item.routing_priority !== '',
   )

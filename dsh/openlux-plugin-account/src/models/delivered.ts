@@ -13,6 +13,18 @@ export interface DeliveredModelConfig {
 interface DeliveryWire {
   readonly configured?: boolean | number
   readonly revision?: number
+  readonly intent_revision?: number
+  readonly effective_revision?: string
+  readonly intent?: DeliveryIntentWire
+  readonly chat_models?: unknown
+  readonly search_models?: unknown
+  readonly default_image_model?: unknown
+  readonly default_video_model?: unknown
+}
+
+interface DeliveryIntentWire {
+  readonly configured?: boolean | number
+  readonly revision?: number
   readonly chat_models?: unknown
   readonly search_models?: unknown
   readonly default_image_model?: unknown
@@ -79,14 +91,21 @@ export async function fetchDeliveredModelConfig(
       throw new Error(envelope.message?.trim() || 'model delivery returned an invalid envelope')
     }
     const wire = envelope.data
-    const configured = wire.configured === true || wire.configured === 1
-    const defaultImageModel = normalizedOptionalName(wire.default_image_model)
-    const defaultVideoModel = normalizedOptionalName(wire.default_video_model)
+    // New clients consume the global, unfiltered intent. The top-level fields
+    // remain the token-specific effective projection for old clients.
+    const source = wire.intent ?? wire
+    const configured = source.configured === true || source.configured === 1
+    const defaultImageModel = normalizedOptionalName(source.default_image_model)
+    const defaultVideoModel = normalizedOptionalName(source.default_video_model)
     return {
       configured,
-      revision: typeof wire.revision === 'number' ? wire.revision : 0,
-      chatModels: normalizeNames(wire.chat_models),
-      searchModels: normalizeNames(wire.search_models),
+      revision: typeof wire.intent_revision === 'number'
+        ? wire.intent_revision
+        : typeof source.revision === 'number'
+          ? source.revision
+          : typeof wire.revision === 'number' ? wire.revision : 0,
+      chatModels: normalizeNames(source.chat_models),
+      searchModels: normalizeNames(source.search_models),
       ...defaultImageModel === undefined ? {} : { defaultImageModel },
       ...defaultVideoModel === undefined ? {} : { defaultVideoModel },
     }

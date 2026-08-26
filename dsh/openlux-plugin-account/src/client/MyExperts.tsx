@@ -181,6 +181,8 @@ export function MyExperts(
                 language={language}
                 t={t}
                 summonable={summonable}
+                // Experts speak in words here too, same as the expert tab.
+                primaryLook="text"
                 words={{
                   primary: t('mineUse'),
                   busy: t('preparing'),
@@ -188,6 +190,9 @@ export function MyExperts(
                   done: '',
                   unhealthy: t('brokenInstalled'),
                 }}
+                // Every row here is installed, so the card's corner is the
+                // check — pressable, because using it is why this page exists.
+                {...summonable ? { onTry: () => onSummon(preset), tryLabel: t('mineUse') } : {}}
                 // No detail sheet: an authored expert has no catalog row to
                 // open, so the whole card is the one action it can offer.
                 onOpen={() => { if (summonable) onSummon(preset) }}

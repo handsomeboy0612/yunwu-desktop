@@ -81,7 +81,11 @@ export interface SearchAttempt {
  * clears after about three seconds.
  */
 export class SearchAttemptError extends Error {
-  constructor(message: string, readonly rateLimited = false) {
+  constructor(
+    message: string,
+    readonly rateLimited = false,
+    readonly status?: number,
+  ) {
     super(message)
     this.name = 'SearchAttemptError'
   }
@@ -126,10 +130,10 @@ export interface SearchTransport {
  * anything seen since, and the loop tries the next candidate rather than
  * spending it twice.
  */
-export const ATTEMPT_TIMEOUT_MS = 90_000
+export const ATTEMPT_TIMEOUT_MS = 16_000
 
 /** Room for the answering turn; unused tokens are not billed. */
-export const ATTEMPT_MAX_TOKENS = 1_200
+export const ATTEMPT_MAX_TOKENS = 4_096
 
 /**
  * Whether a failure reads like throttling rather than refusal.

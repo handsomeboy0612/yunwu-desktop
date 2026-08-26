@@ -1,5 +1,5 @@
 /**
- * Let the sidebar's foot hold two entries instead of squeezing one.
+ * Let the sidebar's foot hold any number of action entries vertically.
  *
  * ## What goes wrong without this
  *
@@ -14,20 +14,22 @@
  *
  * ## Why one rule on the parent
  *
- * A child cannot decide that a nowrap row wraps, so the rule has to land on the
+ * A child cannot turn its nowrap parent into a column, so the rule has to land on the
  * container — but the container's class is a hashed CSS-module name and not
  * ours to depend on. `:has(> …)` selects it through our own marker instead: the
  * only element it can match is whatever holds this launcher, so the rule cannot
- * reach a row we do not occupy. Wrapping is also the answer the geometry
- * already implies, since the trigger asks for `calc(100% + 8px)` — given the
- * chance it takes its own line, and the dock takes the next one.
+ * reach a row we do not occupy. A column is also what the geometry implies,
+ * since each product trigger asks for `calc(100% + 8px)` and needs its own
+ * line. It is stronger than wrapping here: the
+ * temporary Cordis/expert dock can add more than one entry, and every one must
+ * remain an independent row instead of sharing whatever width happens to fit.
  *
  * Two depths, because the tooltip wraps the button in a `display: contents`
  * div: today the flex row is the grandparent (that wrapper contributes no box,
- * so wrapping it does nothing), and if the wrapper ever goes away the first
+ * so changing its direction does nothing), and if the wrapper ever goes away the first
  * selector is already the right one. Anything looser — `:has(…)` without a
  * child combinator — would also match the foot and the sidebar root, and
- * rewrap layouts that are none of our business.
+ * reshape layouts that are none of our business.
  *
  * Injection follows the same convention as `file-chip-style.ts`: one `<style>`
  * tagged `data-plugin-css`, skipped when already present.
@@ -35,6 +37,7 @@
  * @module openlux-plugin-account/client/footer-row-style
  */
 
+import { AUTOMATION_LAUNCHER_ID } from './AutomationLauncher.tsx'
 import { MARKET_LAUNCHER_ID } from './MarketLauncher.tsx'
 
 /** Marker on the injected tag; also the double-injection guard. */
@@ -42,9 +45,13 @@ const TAG_ID = 'openlux-plugin-account/footer-row'
 
 /** The rule set. */
 const CSS = `
+:has(> [data-testid="${AUTOMATION_LAUNCHER_ID}"]),
+:has(> * > [data-testid="${AUTOMATION_LAUNCHER_ID}"]),
 :has(> [data-testid="${MARKET_LAUNCHER_ID}"]),
 :has(> * > [data-testid="${MARKET_LAUNCHER_ID}"]) {
-  flex-wrap: wrap;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
 }
 `
 

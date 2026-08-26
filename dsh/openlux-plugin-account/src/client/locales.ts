@@ -38,6 +38,7 @@ export const zh = {
   'captchaAngle': '旋转角度',
 
   'nav': '账户',
+  'tokensNav': '令牌管理',
   'triggerAria': '账号与设置',
   'panelAria': '账号',
   'signedIn': '已登录',
@@ -92,6 +93,7 @@ export const en = {
   'captchaAngle': 'Rotation angle',
 
   'nav': 'Account',
+  'tokensNav': 'Tokens',
   'triggerAria': 'Account and settings',
   'panelAria': 'Account',
   'signedIn': 'Signed in',

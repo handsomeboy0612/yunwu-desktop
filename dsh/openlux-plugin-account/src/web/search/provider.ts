@@ -35,7 +35,11 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { WebError, type WebSearchProvider, type WebSearchRequest, type WebSearchResult } from '@deepseek-ai/dsh-web'
-import { AccountRequestError, normalizeBase } from '../../account/http.ts'
+import {
+  AccountRequestError,
+  isTokenCredentialFailure,
+  normalizeBase,
+} from '../../account/http.ts'
 import type { ConsoleAccess } from '../../market/console.ts'
 import { planSearch, type SearchCandidate } from './candidates.ts'
 import { SearchAttemptError } from './transport.ts'
@@ -60,13 +64,22 @@ const MAX_ATTEMPTS = 3
  * a tool call the user is watching is worse than reporting the failure.
  */
 const RATE_LIMIT_WAIT_MS = 3_000
+const TOTAL_SEARCH_TIMEOUT_MS = 60_000
+const MAX_SOURCES = 8
 
 /** What the provider needs from the plugin around it. */
 export interface SearchProviderOptions {
   /** Route origin and token reader; the same pair the media tools use. */
   readonly access: ConsoleAccess
+  /** Capture one token for catalogue planning and all paid candidates. */
+  readonly captureAccess?: () => Promise<ConsoleAccess>
   /** The console's priority list at call time, in its own order. */
   readonly models: () => readonly string[]
+}
+
+export function shouldRetrySearchRound(errors: readonly unknown[]): boolean {
+  return errors.length > 0
+    && errors.every(error => error instanceof SearchAttemptError && error.rateLimited)
 }
 
 /** Search through the models this account was given, best first. */
@@ -101,13 +114,19 @@ class OpenLuxSearchProvider implements WebSearchProvider {
     const query = request.query.trim()
     if (query === '') throw new WebError('检索词是空的。', 'WEB_PROVIDER_ERROR')
 
-    const token = await this.options.access.apiKey()
+    const deadline = new AbortController()
+    const abort = () => deadline.abort()
+    signal?.addEventListener('abort', abort, { once: true })
+    const timer = setTimeout(() => deadline.abort(), TOTAL_SEARCH_TIMEOUT_MS)
+    try {
+    const access = await this.options.captureAccess?.() ?? this.options.access
+    const token = await access.apiKey()
     if (token === undefined || token === '') {
       throw new WebError('当前没有可用的 OpenLux 密钥，请先在侧栏登录账号。', 'WEB_PROVIDER_CREDENTIAL_MISSING')
     }
-    const base = normalizeBase(this.options.access.baseUrl)
+    const base = normalizeBase(access.baseUrl)
     const delivered = this.options.models()
-    const plan = await planSearch(this.ctx, this.options.access, token, delivered, signal)
+    const plan = await planSearch(this.ctx, access, token, delivered, deadline.signal)
     if (plan.unusable.length > 0) {
       // Worth its own line: from the console side the entry looks configured,
       // and this is the only place that says it was skipped and why.
@@ -124,17 +143,32 @@ class OpenLuxSearchProvider implements WebSearchProvider {
     const attempts = plan.candidates.slice(0, MAX_ATTEMPTS)
     const failures: string[] = []
     for (let round = 0; round < 2; round += 1) {
-      let throttled = false
+      const roundErrors: unknown[] = []
       for (const candidate of attempts) {
         try {
-          return await this.attempt(candidate, { base, token, query, request, signal, blind: plan.blind })
+          return await this.attempt(candidate, {
+            base,
+            token,
+            query,
+            request,
+            signal: deadline.signal,
+            blind: plan.blind,
+          })
         } catch (error: unknown) {
+          roundErrors.push(error)
           // The caller went away; the remaining candidates would each cost a
           // billed turn for an answer nobody is waiting for.
           if (error instanceof AccountRequestError && error.kind === 'cancelled') {
             throw new WebError('检索已取消。', 'WEB_ABORTED', { cause: error })
           }
           if (signal?.aborted === true) throw new WebError('检索已取消。', 'WEB_ABORTED', { cause: error })
+          if (deadline.signal.aborted) {
+            throw new WebError('联网检索超过 60 秒总预算，已停止后续候选。', 'WEB_PROVIDER_ERROR', { cause: error })
+          }
+          if (error instanceof SearchAttemptError
+            && isTokenCredentialFailure(error.status, error.message)) {
+            throw new WebError(error.message, 'WEB_PROVIDER_CREDENTIAL_MISSING', { cause: error })
+          }
           const failure = error instanceof Error ? error.message : String(error)
           failures.push(failure)
           // Each step down is its own line. Degrading is invisible otherwise —
@@ -143,20 +177,23 @@ class OpenLuxSearchProvider implements WebSearchProvider {
           // gets noticed (measured: a retired `*-search-preview` entry refuses
           // in ~0.75s before the next candidate answers).
           this.ctx.logger.warn(`openlux: 检索候选 ${candidate.model} 没成，换下一个：${failure}`)
-          if (error instanceof SearchAttemptError && error.rateLimited) throttled = true
         }
       }
-      if (!throttled || round === 1) break
+      if (!shouldRetrySearchRound(roundErrors) || round === 1) break
       // Every candidate was throttled rather than broken, so the list itself is
       // fine and waiting is the move.
       this.ctx.logger.warn(`openlux: 检索候选全部被限流，等 ${String(RATE_LIMIT_WAIT_MS / 1000)} 秒后重试一轮`)
-      await wait(RATE_LIMIT_WAIT_MS, signal)
+      await wait(RATE_LIMIT_WAIT_MS, deadline.signal)
     }
 
     throw new WebError(
       `联网检索没有成功。试过 ${attempts.map(candidate => candidate.model).join('、')}：${failures.join('；')}`,
       'WEB_PROVIDER_ERROR',
     )
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
+    }
   }
 
   /** Run one candidate and log what it produced. */
@@ -186,7 +223,13 @@ class OpenLuxSearchProvider implements WebSearchProvider {
     // that the delivered order was honoured.
     this.ctx.logger.info(`openlux: 检索用 ${candidate.model}（${candidate.transport.id}${input.blind ? '，目录读不到' : ''}）`
       + `，${String(result.sources.length)} 条来源，${String(Date.now() - started)}ms`)
-    return result
+    const limit = Math.min(MAX_SOURCES, Math.max(1, input.request.maxResults ?? MAX_SOURCES))
+    const sources = result.sources.slice(0, limit)
+    return {
+      ...result,
+      sources,
+      truncated: result.truncated || sources.length < result.sources.length,
+    }
   }
 }
 
@@ -221,5 +264,10 @@ async function wait(ms: number, signal?: AbortSignal): Promise<void> {
  * @param options - route access and the delivered priority list.
  */
 export function registerSearchProvider(ctx: Context, options: SearchProviderOptions): void {
-  ctx.web.registerSearchProvider(new OpenLuxSearchProvider(ctx, options))
+  // Keep the mounted service structural: the desktop test workspace can
+  // resolve a second Cordis declaration without dsh-web's augmentation.
+  const web = (ctx as unknown as {
+    readonly web: { registerSearchProvider(provider: WebSearchProvider): unknown }
+  }).web
+  web.registerSearchProvider(new OpenLuxSearchProvider(ctx, options))
 }

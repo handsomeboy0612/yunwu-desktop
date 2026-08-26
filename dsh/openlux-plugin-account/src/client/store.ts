@@ -81,6 +81,7 @@ const EMPTY: AccountView = {
 export class AccountStore {
   private view: AccountView = EMPTY
   private readonly listeners = new Set<() => void>()
+  private generation = 0
 
   constructor(private readonly callHost: AccountHostCaller) {}
 
@@ -102,12 +103,13 @@ export class AccountStore {
    * @param force - bypass the host's refresh throttle (an explicit refresh).
    */
   refresh = async (force = false): Promise<void> => {
-    if (this.view.fetching) return
+    const generation = ++this.generation
     this.commit({ fetching: true })
     const [status, balance] = await Promise.all([
       this.callHost<HostAccountStatus>('status', {}),
       this.callHost<BalanceSnapshot>('balance', { force }),
     ])
+    if (generation !== this.generation) return
     this.commit({
       read: true,
       fetching: false,
@@ -138,6 +140,7 @@ export class AccountStore {
    * honestly rather than assuming the app is now keyless.
    */
   signOut = async (): Promise<void> => {
+    this.generation += 1
     await this.callHost('sign-out', {})
     this.view = { ...EMPTY, read: true }
     this.emit()
@@ -146,7 +149,14 @@ export class AccountStore {
 
   /** A sign-in just succeeded somewhere; pull the new facts. */
   signedIn = async (): Promise<void> => {
-    this.view = { ...this.view, balance: undefined, balanceStatus: undefined, message: undefined }
+    this.generation += 1
+    this.view = {
+      ...this.view,
+      balance: undefined,
+      balanceStatus: undefined,
+      message: undefined,
+      fetching: false,
+    }
     await this.refresh(true)
   }
 

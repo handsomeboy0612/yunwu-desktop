@@ -186,7 +186,53 @@ describe('published package surface', () => {
       packageRoot,
     ), 'utf8')
     expect(provider).toContain("export const OPENLUX_SEARCH_PROVIDER_ID = 'openlux-search'")
-    expect(provider).toContain('ctx.web.registerSearchProvider')
+    // The service access may be structural to survive workspace package
+    // junctions; pin the actual registration rather than one Context spelling.
+    expect(provider).toContain('registerSearchProvider(new OpenLuxSearchProvider')
+  })
+
+  it('keeps online account traffic separate from an overridden local market', () => {
+    const accountSource = readFileSync(new URL(
+      '../openlux-plugin-account/src/index.ts',
+      packageRoot,
+    ), 'utf8')
+    const accountRuntime = readFileSync(new URL(
+      '../openlux-plugin-account/lib/index.js',
+      packageRoot,
+    ), 'utf8')
+    for (const code of [accountSource, accountRuntime]) {
+      expect(code).toContain('OPENLUX_BASE_URL')
+      expect(code).toContain('OPENLUX_API_KEY')
+      expect(code).toContain('YUNWU_MARKET_BASE_URL')
+      expect(code).toContain('YUNWU_MARKET_TOKEN')
+      expect(code).not.toContain('TEMP_MARKET')
+      expect(code).toContain('http://localhost:3000')
+      expect(code).not.toMatch(/sk-[A-Za-z0-9]{24,}/u)
+    }
+  })
+
+  it('ships the V2 home modules with durable ETag caching', () => {
+    const accountRoot = new URL('../openlux-plugin-account/', packageRoot)
+    const catalog = readFileSync(new URL('src/market/catalog.ts', accountRoot), 'utf8')
+    const home = readFileSync(new URL('src/market/home-content.ts', accountRoot), 'utf8')
+    const cache = readFileSync(new URL('src/market/content-cache.ts', accountRoot), 'utf8')
+    const client = readFileSync(new URL('src/client/index.ts', accountRoot), 'utf8')
+    const hostRuntime = readFileSync(new URL('lib/index.js', accountRoot), 'utf8')
+    const clientRuntime = readFileSync(new URL('lib/client.js', accountRoot), 'utf8')
+
+    expect(catalog).toContain('/api/desktop-content/catalog/')
+    expect(catalog).not.toContain('/api/desktop-market/snapshot')
+    expect(home).toContain('/api/desktop-content/home-scenes')
+    expect(home).toContain('/api/desktop-content/expert-showcases')
+    expect(home).toContain('/api/desktop-content/playbooks')
+    expect(cache).toContain('openlux-content-cache.json')
+    expect(cache).toContain("headers['If-None-Match']")
+    expect(client).toContain("ctx.slots.inject('conversation.input.dock'")
+    for (const runtime of [hostRuntime, clientRuntime]) {
+      expect(runtime).toContain('market.home')
+    }
+    expect(clientRuntime).toContain('openlux-home-scenes')
+    expect(clientRuntime).toContain('openlux-home-cases')
   })
 
   it('ships the frameless shell as the product default, declared in both places', () => {
@@ -212,20 +258,18 @@ describe('published package surface', () => {
     expect(manifest.optionalDependencies ?? {}).not.toHaveProperty('dshmarket')
   })
 
-  it('patches app boot to accept an empty patch layer', () => {
-    const patchPath = './patches/dsh-app-boot@0.1.1-rc.2.patch'
-    expect(workspaceManifest.resolutions).toMatchObject({
-      '@deepseek-ai/dsh-app-boot@npm:0.1.1-rc.2': expect.stringContaining(patchPath),
-      '@deepseek-ai/dsh-app-boot@npm:^0.1.1-rc.2': expect.stringContaining(patchPath),
-    })
-    const marker = 'if (parsed === void 0 || parsed === null) return [];'
-    const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
+  it('accepts a blank machine-wide patch layer without patching app boot', () => {
+    for (const key of Object.keys(workspaceManifest.resolutions ?? {})) {
+      expect(key).not.toContain('dsh-app-boot')
+    }
     const installedBoot = readFileSync(new URL(
       'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
       packageRoot,
     ), 'utf8')
-    expect(patch).toContain(marker)
-    expect(installedBoot).toContain(marker)
+    expect(installedBoot).not.toContain('if (parsed === void 0 || parsed === null) return [];')
+    const profile = readFileSync(new URL('src/profile.ts', packageRoot), 'utf8')
+    expect(profile).toContain('function loadMachineWidePatches(home: string)')
+    expect(profile).toContain('const loadedHomePatches = loadMachineWidePatches(home)')
   })
 
   it('patches the browse panel with the Windows native-picker icon bridge', () => {
@@ -253,21 +297,29 @@ describe('published package surface', () => {
       expect(patch).toContain(marker)
       expect(installedClient).toContain(marker)
     }
+    const desktopClient = readFileSync(new URL('src/client/index.ts', packageRoot), 'utf8')
+    expect(desktopClient).toContain('installDesktopDirectoryPickerBridge()')
   })
 
-  it('marks the upstream Workspace browser as the desktop folder-drop target', () => {
-    const patchPath = './patches/dsh-client-ui-workspace@0.1.1-rc.2.patch'
-    expect(workspaceManifest.resolutions).toMatchObject({
-      '@deepseek-ai/dsh-client-ui-workspace@npm:0.1.1-rc.2': expect.stringContaining(patchPath),
-      '@deepseek-ai/dsh-client-ui-workspace@npm:^0.1.1-rc.2': expect.stringContaining(patchPath),
-    })
-    const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
+  it('drops folders onto the renderer slot wrapper without patching ui-workspace', () => {
+    for (const key of Object.keys(workspaceManifest.resolutions ?? {})) {
+      expect(key).not.toContain('dsh-client-ui-workspace')
+    }
+    const dropSource = readFileSync(new URL('src/client/workspace-folder-drop.ts', packageRoot), 'utf8')
+    expect(dropSource).toContain('[data-slot="sidebar.workspaces"]')
+    expect(dropSource).not.toContain('data-dsh-workspace-drop-target')
     const installedClient = readFileSync(new URL(
       'node_modules/@deepseek-ai/dsh-client-ui-workspace/lib/client.js',
       packageRoot,
     ), 'utf8')
-    expect(patch).toContain('data-dsh-workspace-drop-target')
-    expect(installedClient).toContain('data-dsh-workspace-drop-target')
+    expect(installedClient).not.toContain('data-dsh-workspace-drop-target')
+    // The wrapper this leans on: every slot renders inside `[data-slot]`, so the
+    // browser root is reachable without a marker of our own.
+    const renderer = readFileSync(new URL(
+      'node_modules/@deepseek-ai/dsh-client-ui-renderer/lib/client.js',
+      packageRoot,
+    ), 'utf8')
+    expect(renderer).toContain('"data-slot": slotKey')
   })
 
   it('keeps API selection available after overriding a provider base URL', () => {
@@ -315,7 +367,77 @@ describe('published package surface', () => {
     }
   })
 
-  it('gives the account settings section its own nav glyph, and lists nav cells rather than registrations', () => {
+  it('replaces the official provider key field with account token switching', () => {
+    const patchPath = './patches/dsh-client-ui-settings-models@0.1.1-rc.2.patch'
+    const installedClient = readFileSync(new URL(
+      'node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js',
+      packageRoot,
+    ), 'utf8')
+    const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
+    for (const marker of [
+      'function OpenLuxTokenControl',
+      'callAccount("tokens.list"',
+      'callAccount("tokens.use"',
+      'openSection("openlux-token-section")',
+      'row.entry.provider === "openlux"',
+      'officialTag',
+      'managed && !baseURLOverridden ? null',
+    ]) {
+      expect(patch).toContain(marker)
+      expect(installedClient).toContain(marker)
+    }
+  })
+
+  it('renders account tokens in a bounded rich menu instead of a native select', () => {
+    const patchPath = './patches/dsh-client-ui-settings-models-token-picker@0.1.1-rc.2.patch'
+    expect(workspaceManifest.resolutions).toMatchObject({
+      '@deepseek-ai/dsh-client-ui-settings-models@npm:0.1.1-rc.2': expect.stringContaining(patchPath),
+      '@deepseek-ai/dsh-client-ui-settings-models@npm:^0.1.1-rc.2': expect.stringContaining(patchPath),
+    })
+    const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
+    const installedClient = readFileSync(new URL(
+      'node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js',
+      packageRoot,
+    ), 'utf8')
+    for (const marker of [
+      '_deepseek_ai_dsh_client_ui_primitives.Menu',
+      'className: "openluxTokenTrigger"',
+      'className: "openluxTokenOptionRoute"',
+      'className: "openluxTokenManage"',
+      'max-height:min(320px,calc(100vh - 24px))',
+      'const openluxModelFetchCss',
+      'children: busy ? t("fetching") : `＋ ${t("fetchModels")}`',
+      'event.stopImmediatePropagation()',
+    ]) {
+      expect(patch).toContain(marker)
+      expect(installedClient).toContain(marker)
+    }
+    expect(installedClient).not.toContain(
+      'children: busy ? t("fetching") : t("fetchModels")',
+    )
+  })
+
+  it('keeps the provider editor expanded after saving model settings', () => {
+    const patch = readFileSync(new URL(
+      './patches/dsh-client-ui-settings-models-token-picker@0.1.1-rc.2.patch',
+      workspaceRoot,
+    ), 'utf8')
+    const installedClient = readFileSync(new URL(
+      'node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js',
+      packageRoot,
+    ), 'utf8')
+    const closeEditor = installedClient.slice(
+      installedClient.indexOf('const closeEditor ='),
+      installedClient.indexOf('const closeSetup ='),
+    )
+
+    expect(patch).toContain('if (changed) {')
+    expect(closeEditor).toMatch(
+      /if \(changed\) \{[\s\S]*announceSaved\(target\);[\s\S]*return;[\s\S]*\}[\s\S]*setEditing\(void 0\)/u,
+    )
+  })
+
+  it('gives account pages their own nav glyphs, cross-page navigation, and projected nav cells', () => {
     const patchPath = './patches/dsh-client-ui-settings-general@0.1.1-rc.2.patch'
     expect(workspaceManifest.resolutions).toMatchObject({
       '@deepseek-ai/dsh-client-ui-settings-general@npm:0.1.1-rc.2': expect.stringContaining(patchPath),
@@ -329,6 +451,9 @@ describe('published package surface', () => {
     for (const marker of [
       'openlux-account-section',
       'IconUserOutline16',
+      'openlux-token-section',
+      'IconApiOutline14',
+      'openSection: onSelect',
       // The nav's own projection. Without this the shell lists raw registrations
       // while its content region resolves shadowing winners, so replacing a
       // shipped settings page (the contract the slot advertises for a reused id)

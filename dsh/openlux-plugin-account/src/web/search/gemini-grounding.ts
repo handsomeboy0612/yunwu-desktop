@@ -82,6 +82,7 @@ export const geminiGroundingTransport: SearchTransport = {
       throw new SearchAttemptError(
         `${model} 拒绝了这次检索（HTTP ${String(reply.response.status)}）：${detail === '' ? '无说明' : detail}`,
         readsAsRateLimit(reply.response.status, detail),
+        reply.response.status,
       )
     }
 

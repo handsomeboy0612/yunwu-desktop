@@ -1,8 +1,8 @@
 diff --git a/lib/client.js b/lib/client.js
-index 59d01801f9f410d30c76af000710aa51ea98bfda..f22f50718eac10c3eb22f8af9b46449fbbf9f90b 100644
+index 59d01801f9f410d30c76af000710aa51ea98bfda..3f286f7f0ce788f1a75ee8920df8331d6d4ab9da 100644
 --- a/lib/client.js
 +++ b/lib/client.js
-@@ -71,6 +71,14 @@ window.__ModuleLoader__.load({
+@@ -71,6 +71,18 @@ window.__ModuleLoader__.load({
  		*/
  		/** Nav glyph by section id; unknown ids fall back to the settings gear. */
  		function navIcon(id) {
@@ -14,10 +14,25 @@ index 59d01801f9f410d30c76af000710aa51ea98bfda..f22f50718eac10c3eb22f8af9b46449f
 +				className: SettingsRoot_module_css_default.navIcon,
 +				size: 16
 +			});
++			if (id === "openlux-token-section") return (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconApiOutline14, {
++				className: SettingsRoot_module_css_default.navIcon,
++				size: 16
++			});
  			if (id === "models") return (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconDataOutline16, {
  				className: SettingsRoot_module_css_default.navIcon,
  				size: 16
-@@ -499,12 +507,23 @@ window.__ModuleLoader__.load({
+@@ -169,6 +181,9 @@ window.__ModuleLoader__.load({
+ 						}), (0, react_jsx_runtime.jsx)("div", {
+ 							className: SettingsRoot_module_css_default.options,
+-							children: active !== void 0 && renderSlot("settings.section", { close: onClose }, { only: active })
++							children: active !== void 0 && renderSlot("settings.section", {
++								close: onClose,
++								openSection: onSelect
++							}, { only: active })
+ 						})]
+ 					})]
+ 				})]
+@@ -499,12 +514,23 @@ window.__ModuleLoader__.load({
  						if (version !== rowsVersion || revision !== rowsRevision) {
  							rowsVersion = version;
  							rowsRevision = revision;

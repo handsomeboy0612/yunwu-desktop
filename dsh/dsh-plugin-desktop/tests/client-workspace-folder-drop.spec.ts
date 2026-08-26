@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-client-runtime/client'
 import {
@@ -69,5 +70,14 @@ describe('desktop workspace folder drop', () => {
     )).rejects.toThrow('DSH Desktop rejected this workspace location')
     expect(actions.validateDirectory).toHaveBeenCalledWith('E:\\repo')
     expect(actions.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('workspace drop surface', () => {
+  it('walks nested drop events from the slot wrapper, not a child-combinator closest', () => {
+    const source = readFileSync(new URL('../src/client/workspace-folder-drop.ts', import.meta.url), 'utf8')
+    expect(source).toContain('const slot = target.closest(WORKSPACE_SLOT)')
+    expect(source).toContain('const surface = slot?.firstElementChild')
+    expect(source).not.toContain('closest(WORKSPACE_DROP_TARGET)')
   })
 })

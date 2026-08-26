@@ -115,6 +115,21 @@ const TOOL_REALITY_ORDER = 150
 /** Prefix of the delegation tools a team lead gets, one per member. */
 const DELEGATE_PREFIX = 'delegate_'
 
+/** The two system-prompt verbs used here, kept structural across package junctions. */
+interface ToolRealityHost {
+  readonly systemPrompt: {
+    section(input: { name: string; order: number; text: string }): unknown
+  }
+  on(
+    event: 'system-prompt/assemble',
+    listener: (
+      assembly: PromptAssembly,
+      context: AssembleContext,
+      next: () => Promise<PromptAssembly>,
+    ) => Promise<PromptAssembly>,
+  ): unknown
+}
+
 /** Prefix every MCP-provided tool carries, so absence can be derived. */
 const MCP_PREFIX = 'mcp__'
 
@@ -123,6 +138,7 @@ const WEB_TOOLS = ['web_search', 'web_fetch'] as const
 
 /** The kernel's file reader (`dsh-tool-fs`), which is what an attached path is for. */
 const READ_TOOL = 'read'
+const READ_IMAGE_TOOL = 'read_image'
 
 /** Shells, for the formats `read` cannot decode; named in this order when present. */
 const SHELL_TOOLS = ['bash', 'pwsh'] as const
@@ -268,8 +284,8 @@ function documentAskLine(tools: readonly string[]): string | undefined {
  */
 function imageAskLine(tools: readonly string[]): string | undefined {
   if (!tools.includes(IMAGE_ASK_TOOL_NAME)) return undefined
-  const opener = tools.includes(READ_TOOL)
-    ? `图片先用 ${code(READ_TOOL)} 打开；**被拒（说当前模型不支持图片）就改调 ${code(IMAGE_ASK_TOOL_NAME)}**`
+  const opener = tools.includes(READ_IMAGE_TOOL)
+    ? `图片先用 ${code(READ_IMAGE_TOOL)} 打开；**被拒（说当前模型不支持图片）就改调 ${code(IMAGE_ASK_TOOL_NAME)}**`
     : `**看图片用 ${code(IMAGE_ASK_TOOL_NAME)}**`
   return `> - ${opener}——它会把这张图交给一个能读图的模型，把文字结论带回来给你`
     + `（参数 \`path\` 填图片路径，有具体问题就写进 \`question\`）。`
@@ -365,8 +381,12 @@ export function toolReality(tools: readonly string[], origin?: string): string {
  * @param ctx - a context whose `systemPrompt` service is mounted.
  */
 export function registerToolReality(ctx: Context): void {
-  ctx.systemPrompt.section({ name: TOOL_REALITY_SECTION, order: TOOL_REALITY_ORDER, text: CORE })
-  ctx.on('system-prompt/assemble', async (
+  // The desktop test workspace can resolve a second Cordis declaration whose
+  // Context lacks this package's module augmentation; the runtime face is the
+  // same mounted service, so name only the public verbs used here.
+  const host = ctx as unknown as ToolRealityHost
+  host.systemPrompt.section({ name: TOOL_REALITY_SECTION, order: TOOL_REALITY_ORDER, text: CORE })
+  host.on('system-prompt/assemble', async (
     _assembly: PromptAssembly,
     context: AssembleContext,
     next: () => Promise<PromptAssembly>,

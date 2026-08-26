@@ -49,9 +49,18 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { AccountRequestError, normalizeBase, requestJson } from '../account/http.ts'
+import { createHash } from 'node:crypto'
+import {
+  AccountRequestError,
+  isTokenCredentialFailure,
+  normalizeBase,
+  requestJson,
+} from '../account/http.ts'
 import type { ConsoleAccess } from '../market/console.ts'
 import { listedModels } from '../models/listed.ts'
+import { fetchChatPool } from '../models/pool.ts'
+import { registerModelCacheInvalidator } from '../models/runtime-cache.ts'
+import { diagnosticUsageText } from './usage.ts'
 
 /**
  * Budget for one document question.
@@ -59,16 +68,13 @@ import { listedModels } from '../models/listed.ts'
  * Longer than a look at a picture: the far side extracts text, renders page
  * images for a PDF, and only then starts generating.
  */
-const READ_TIMEOUT_MS = 180_000
+const READ_TIMEOUT_MS = 55_000
+const TOTAL_TIMEOUT_MS = 175_000
+const MAX_ATTEMPTS = 3
+const MAX_TOTAL_UPLOAD_BYTES = 60 * 1024 * 1024
 
 /** Room for the answer; unused tokens are not billed, an empty reply costs a retry. */
 const ANSWER_MAX_TOKENS = 4096
-
-/** How long the callable-model list stays current, when tier two is reached. */
-const CATALOG_TTL_MS = 300_000
-
-/** Budget for reading that list; a small JSON body. */
-const CATALOG_TIMEOUT_MS = 15_000
 
 /**
  * How many models beyond the delivered list one call may try.
@@ -77,7 +83,7 @@ const CATALOG_TIMEOUT_MS = 15_000
  * a thoroughness dial: three failures already mean the route is wrong for this
  * file rather than that the fourth name is the lucky one.
  */
-const EXTRA_ATTEMPTS = 3
+const NEGATIVE_TTL_MS = 10 * 60_000
 
 /** Raised when no model could read the document; text is model-facing. */
 export class DocumentError extends Error {
@@ -194,18 +200,27 @@ export interface DocumentOutcome {
  * a broken one, and forgetting it all on restart is intended — a relay fix
  * should not need a client release to take effect.
  */
-const refused = new Map<string, Set<string>>()
+const refused = new Map<string, number>()
+registerModelCacheInvalidator(() => refused.clear())
 
 /** Whether this pair already failed in this process. */
-function alreadyRefused(model: string, mediaType: string): boolean {
-  return refused.get(model)?.has(mediaType) === true
+function alreadyRefused(scope: string, model: string, mediaType: string): boolean {
+  const key = `${scope}|${model}|${mediaType}`
+  const until = refused.get(key)
+  if (until === undefined) return false
+  if (until > Date.now()) return true
+  refused.delete(key)
+  return false
 }
 
 /** Remember that this pair failed. */
-function remember(model: string, mediaType: string): void {
-  const seen = refused.get(model)
-  if (seen === undefined) refused.set(model, new Set([mediaType]))
-  else seen.add(mediaType)
+function remember(scope: string, model: string, mediaType: string): void {
+  refused.set(`${scope}|${model}|${mediaType}`, Date.now() + NEGATIVE_TTL_MS)
+  while (refused.size > 128) {
+    const oldest = refused.keys().next().value as string | undefined
+    if (oldest === undefined) break
+    refused.delete(oldest)
+  }
 }
 
 /**
@@ -227,8 +242,8 @@ function remember(model: string, mediaType: string): void {
  * @param mediaType - the document's media type.
  * @returns delivered candidates, already filtered of known refusals.
  */
-function deliveredCandidates(ctx: Context, mediaType: string): readonly string[] {
-  const listed = listedModels(ctx).filter(entry => !alreadyRefused(entry.id, mediaType))
+function deliveredCandidates(ctx: Context, scope: string, mediaType: string): readonly string[] {
+  const listed = listedModels(ctx).filter(entry => !alreadyRefused(scope, entry.id, mediaType))
   const sees = listed.filter(entry => entry.input?.includes('image') === true)
   const rest = listed.filter(entry => entry.input?.includes('image') !== true)
   return [...sees, ...rest].map(entry => entry.id)
@@ -294,58 +309,6 @@ export function deniesReading(answer: string): boolean {
     && UNREADABLE_CAUSES.some(pattern => pattern.test(answer))
 }
 
-interface CallableCache {
-  readonly models: readonly string[]
-  readonly at: number
-}
-
-const callable = new Map<string, CallableCache>()
-
-/**
- * Chat models this token can actually call, for tier two.
- *
- * The catalogue has no file-input flag, so the filter is the coarsest one that
- * is still true: rows the route calls chat models. Anything more specific would
- * be a guess dressed as a fact.
- * @param ctx - host context.
- * @param access - route origin and token reader.
- * @param signal - caller cancellation.
- * @returns model ids, possibly empty when the list could not be read.
- */
-async function callableChatModels(
-  ctx: Context,
-  access: ConsoleAccess,
-  signal?: AbortSignal,
-): Promise<readonly string[]> {
-  const token = await access.apiKey()
-  if (token === undefined || token === '') return []
-  const base = normalizeBase(access.baseUrl)
-  const key = `${base}|${token}`
-  const cached = callable.get(key)
-  if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) return cached.models
-  try {
-    const reply = await requestJson(ctx, `${base}/v1/models`, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
-    }, CATALOG_TIMEOUT_MS, signal)
-    if (!reply.response.ok) return cached?.models ?? []
-    const rows = (reply.body as { readonly data?: unknown } | undefined)?.data
-    if (!Array.isArray(rows)) return cached?.models ?? []
-    const models: string[] = []
-    for (const raw of rows as readonly { readonly id?: unknown, readonly model_type?: unknown }[]) {
-      if (typeof raw.id !== 'string' || raw.id.trim() === '') continue
-      if (raw.model_type !== undefined && raw.model_type !== 'chat') continue
-      models.push(raw.id.trim())
-    }
-    if (models.length === 0) return cached?.models ?? []
-    callable.set(key, { models, at: Date.now() })
-    return models
-  } catch (error: unknown) {
-    ctx.logger.warn(`openlux: callable model list unreadable (${error instanceof Error ? error.message : String(error)})`)
-    return cached?.models ?? []
-  }
-}
-
 /**
  * Ask about one document, trying candidates until one reads it.
  *
@@ -370,29 +333,38 @@ export async function askAboutDocument(
     throw new DocumentError('当前没有可用的 OpenLux 密钥，请先在侧栏登录账号。')
   }
 
-  const delivered = deliveredCandidates(ctx, request.mediaType)
+  const startedAt = Date.now()
+  const scope = `${normalizeBase(access.baseUrl)}|${tokenDigest(token)}`
+  const delivered = deliveredCandidates(ctx, scope, request.mediaType)
+  const dynamic = await fetchChatPool(ctx, access.baseUrl, token, signal)
+    .then(pool => pool?.map(model => model.id) ?? [])
+  const candidates = [...new Set([...delivered, ...dynamic])]
+    .filter(model => !alreadyRefused(scope, model, request.mediaType))
+    .slice(0, MAX_ATTEMPTS)
   const failures: string[] = []
-  for (const model of delivered) {
-    const outcome = await attempt(ctx, access, token, request, model, signal)
-    if (typeof outcome !== 'string') return outcome
-    failures.push(`${model}：${outcome}`)
-  }
-
-  // Tier two, and only now: a delivered model is the one operations vouched for,
-  // so paying an upload to a name nobody delivered is a fallback, not a race.
-  const extra = (await callableChatModels(ctx, access, signal))
-    .filter(model => !delivered.includes(model) && !alreadyRefused(model, request.mediaType))
-    .slice(0, EXTRA_ATTEMPTS)
-  for (const model of extra) {
-    const outcome = await attempt(ctx, access, token, request, model, signal)
-    if (typeof outcome !== 'string') return outcome
+  let uploaded = 0
+  for (const [index, model] of candidates.entries()) {
+    if (Date.now() - startedAt >= TOTAL_TIMEOUT_MS) {
+      failures.push('整次文档读取已到时间上限')
+      break
+    }
+    if (uploaded + request.data.byteLength > MAX_TOTAL_UPLOAD_BYTES) {
+      failures.push('整次文档读取已到上传字节上限')
+      break
+    }
+    uploaded += request.data.byteLength
+    const outcome = await attempt(ctx, access, token, scope, request, model, signal)
+    if (typeof outcome !== 'string') {
+      ctx.logger.info(`openlux: document_ask succeeded after ${String(index + 1)} attempt(s)`)
+      return outcome
+    }
     failures.push(`${model}：${outcome}`)
   }
 
   if (failures.length === 0) {
     throw new DocumentError('当前账号下没有可用的对话模型，读不了这份文档。请先在侧栏登录，或让管理端下发一个对话模型。')
   }
-  throw new DocumentError(`试过的模型都没能读这份文档：\n${failures.join('\n')}\n`
+  throw new DocumentError(`试过的模型都没能读这份文档（最多 ${String(MAX_ATTEMPTS)} 次）：\n${failures.join('\n')}\n`
     + '这不是文件的问题，是这条线路上没有模型接收这种附件。'
     + '可以让管理端下发一个能读文档的模型，或者请用户把内容贴成文字。')
 }
@@ -411,6 +383,7 @@ async function attempt(
   ctx: Context,
   access: ConsoleAccess,
   token: string,
+  scope: string,
   request: DocumentRequest,
   model: string,
   signal?: AbortSignal,
@@ -443,23 +416,30 @@ async function attempt(
 
   const body = (reply.body ?? {}) as Record<string, unknown>
   if (!reply.response.ok) {
-    remember(model, request.mediaType)
     const detail = messageOf(body['error']) ?? textOf(body['message']) ?? ''
+    if (isTokenCredentialFailure(reply.response.status, detail)) {
+      throw new DocumentError(`当前令牌无权读取文档（HTTP ${String(reply.response.status)}）：${detail || '请重新登录或切换令牌'}`)
+    }
+    if (isExplicitDocumentRefusal(reply.response.status, detail)) {
+      remember(scope, model, request.mediaType)
+    }
     return `HTTP ${String(reply.response.status)}${detail === '' ? '' : ` ${detail}`}`
   }
   const choice = (body['choices'] as unknown[] | undefined)?.[0] as Record<string, unknown> | undefined
   const answer = flatten((choice?.['message'] as Record<string, unknown> | undefined)?.['content'])
   if (answer === '') {
-    remember(model, request.mediaType)
     return '接受了请求但没有给出任何文字'
   }
   if (deniesReading(answer)) {
     // A 200 that says "no document here" means the part was dropped upstream,
     // not that this document is unreadable. Handing it back would answer the
     // user's question with the plumbing's excuse.
-    remember(model, request.mediaType)
+    remember(scope, model, request.mediaType)
     return `收下了请求但没拿到文件（原话：${answer.slice(0, 60)}）`
   }
+  const usage = diagnosticUsageText(body['usage'])
+  ctx.logger.info(`openlux: document_ask used ${model} (${String(request.data.byteLength)} bytes`
+    + `${usage === '' ? '' : `, ${usage}`})`)
   return { answer, model }
 }
 
@@ -490,4 +470,15 @@ function flatten(content: unknown): string {
       : '')
     .join('')
     .trim()
+}
+
+export function isExplicitDocumentRefusal(status: number, detail: string): boolean {
+  if (status === 415 || status === 422) return true
+  if (status < 400 || status >= 500 || status === 401 || status === 403 || status === 429) return false
+  return /(?:file|document|attachment|pdf|mime).*(?:unsupported|invalid|not support|不支持|无效|不能接收)|不支持.*(?:文件|文档|附件)/i
+    .test(detail)
+}
+
+function tokenDigest(token: string): string {
+  return createHash('sha256').update(token).digest('hex').slice(0, 24)
 }

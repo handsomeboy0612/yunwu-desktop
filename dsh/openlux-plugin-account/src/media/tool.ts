@@ -31,7 +31,6 @@
 
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ConsoleAccess } from '../market/console.ts'
 import { imageArtifactPath, writeImageArtifact } from './artifact.ts'
@@ -48,7 +47,7 @@ import {
 import type { ImageReference } from './image/provider.ts'
 import { generateImages, ImageGenerationError, size } from './images.ts'
 import { IMAGE_SHOW_TOOL_NAME, IMAGE_TOOL_NAME } from './name.ts'
-import { findLatestImage } from './session-images.ts'
+import { findLatestImage, type SessionEventSource } from './session-images.ts'
 
 export { IMAGE_TOOL_NAME } from './name.ts'
 
@@ -107,6 +106,8 @@ const description = 'Generate one or more images from a text prompt and show the
 export interface ImageToolOptions {
   /** Route origin and token reader, shared with the account face. */
   readonly access: ConsoleAccess
+  /** Capture one token for catalogue selection and the paid request. */
+  readonly captureAccess?: () => Promise<ConsoleAccess>
   /** Model to draw with, or a runtime reader updated by server delivery. */
   readonly model?: string | (() => string | undefined)
 }
@@ -230,6 +231,11 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
       },
     },
     async execute(args, exec) {
+      if (exec.parent !== undefined) {
+        throw new ImageGenerationError(
+          '图片生成必须直接调用 image_generate；Code Mode 的嵌套工具结果不会保存可回放的图片卡片元数据。',
+        )
+      }
       const count = args.n ?? 1
       // Every resolved model is checked against the live catalogue before the
       // paid request, and the check answers two questions at once: whether this
@@ -237,7 +243,8 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
       // is sold on. The delivery endpoint proves neither — it says the token may
       // call a name, not that the name accepts any particular image route.
       const named = typeof args.model === 'string' ? args.model.trim() : ''
-      const catalog = await readImageCatalog(ctx, options.access, exec.signal)
+      const access = await options.captureAccess?.() ?? options.access
+      const catalog = await readImageCatalog(ctx, access, exec.signal)
       const editing = args.edit_last_image === true
       const model = named === '' ? defaultImageModel(catalog, deliveredModel(), editing) : named
       if (model === undefined) throw new ImageGenerationError(imageDefaultRefusal(catalog, editing))
@@ -250,7 +257,7 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
       const reference = editing
         ? await readLastImage(attachments, exec.agent?.session, resolved.canEdit, catalog, model)
         : undefined
-      const outcome = await generateImages(ctx, options.access, resolved.provider, {
+      const outcome = await generateImages(ctx, access, resolved.provider, {
         model,
         prompt: args.prompt,
         count,
@@ -267,6 +274,7 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
             mediaType: image.mediaType,
             name: fileName(args.prompt, index, image.mediaType),
           })
+          const normalized = await attachments.readImage(ref)
           const path = imageArtifactPath(args.prompt, String(ref.attachmentId), ref.mediaType)
           // Best-effort, and after the commit rather than instead of it: the
           // card is what shows this picture, so a machine that cannot take the
@@ -274,7 +282,7 @@ export function registerImageTool(ctx: Context, options: ImageToolOptions): void
           // image. Reported as a per-image note for the same reason a refused
           // save is — silence would leave the model quoting a path that is not
           // there.
-          const written = await writeArtifact(ctx, path, image.data)
+          const written = await writeArtifact(ctx, path, normalized.data)
           if (!written) failures.push(`第 ${String(index + 1)} 张已展示，但文件副本没写成，这一张没有可转述的路径。`)
           saved.push({
             attachmentId: String(ref.attachmentId),
@@ -369,7 +377,7 @@ interface EditSource {
  */
 async function readLastImage(
   attachments: AttachmentStore,
-  session: Session | undefined,
+  session: SessionEventSource | undefined,
   canEdit: boolean,
   catalog: ImageCatalog | undefined,
   model: string,

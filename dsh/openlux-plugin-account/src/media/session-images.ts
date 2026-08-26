@@ -35,7 +35,6 @@
  */
 
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import type { Session } from '@deepseek-ai/dsh-session'
 import { IMAGE_TOOL_NAME } from './name.ts'
 
 /** One image the conversation already contains. */
@@ -46,6 +45,18 @@ export interface SessionImage {
   readonly source: 'attached' | 'generated'
   /** Log position, so a caller can say which one it took. */
   readonly seq: number
+}
+
+/**
+ * The only session surface this walk needs.
+ *
+ * Events are deliberately `unknown`: two workspace consumers can resolve
+ * separate copies of `dsh-session`, whose evolving event unions are not
+ * assignable even though both runtime Session objects expose the same JSON log.
+ * The walk narrows each relevant event below instead of importing either copy.
+ */
+export interface SessionEventSource {
+  readonly events: readonly unknown[]
 }
 
 /** The metadata shape `media/tool.ts` writes for each generated image. */
@@ -63,31 +74,43 @@ interface GeneratedImageMeta {
  * @param session - the agent's live session; its log is the source of truth.
  * @returns the newest image, or undefined when the conversation has none.
  */
-export function findLatestImage(session: Session): SessionImage | undefined {
+export function findLatestImage(session: SessionEventSource): SessionImage | undefined {
   const toolNames = new Map<string, string>()
   let latest: SessionImage | undefined
 
-  for (const event of session.events) {
-    if (event.type === 'tool/call') {
-      toolNames.set(String(event.data.callId), event.data.name)
+  for (const rawEvent of session.events) {
+    const event = record(rawEvent)
+    const data = record(event?.['data'])
+    const type = event?.['type']
+    const seq = event?.['seq']
+    if (event === undefined || data === undefined || typeof seq !== 'number') continue
+    if (type === 'tool/call') {
+      const name = data['name']
+      if (typeof name === 'string') toolNames.set(String(data['callId']), name)
       continue
     }
-    if (event.type === 'user/message') {
-      for (const block of event.data.content) {
-        if (block.type !== 'image') continue
-        latest = { ref: block.attachment, source: 'attached', seq: event.seq }
+    if (type === 'user/message') {
+      const content = data['content']
+      if (!Array.isArray(content)) continue
+      for (const rawBlock of content) {
+        const block = record(rawBlock)
+        if (block?.['type'] !== 'image') continue
+        const ref = asRef(record(block['attachment']) ?? {})
+        if (ref !== undefined) latest = { ref, source: 'attached', seq }
       }
       continue
     }
-    if (event.type !== 'tool/result') continue
-    if (toolNames.get(String(event.data.message.source.callId)) !== IMAGE_TOOL_NAME) continue
+    if (type !== 'tool/result') continue
+    const message = record(data['message'])
+    const source = record(message?.['source'])
+    if (toolNames.get(String(source?.['callId'])) !== IMAGE_TOOL_NAME) continue
     // The error branch has no images to offer, and its meta may be absent.
-    if (event.data.error !== undefined) continue
-    const images = (event.data.meta as { images?: unknown } | undefined)?.images
+    if (data['error'] !== undefined) continue
+    const images = record(data['meta'])?.['images']
     if (!Array.isArray(images)) continue
     for (const image of images) {
-      const ref = asRef(image as GeneratedImageMeta)
-      if (ref !== undefined) latest = { ref, source: 'generated', seq: event.seq }
+      const ref = asRef(record(image) ?? {})
+      if (ref !== undefined) latest = { ref, source: 'generated', seq }
     }
   }
   return latest
@@ -110,4 +133,8 @@ function asRef(image: GeneratedImageMeta): ImageAttachmentRef | undefined {
   if (typeof mediaType !== 'string' || mediaType === '') return undefined
   if (typeof bytes !== 'number' || typeof width !== 'number' || typeof height !== 'number') return undefined
   return { attachmentId, mediaType, bytes, width, height } as ImageAttachmentRef
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : undefined
 }

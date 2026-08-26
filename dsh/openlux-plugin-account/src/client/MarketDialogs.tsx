@@ -14,11 +14,17 @@
  * would receive instead.
  */
 
-import type { CSSProperties, ReactNode } from 'react'
-import { Button, Input, Modal, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { CatalogItem, CustomConnectorSync, CustomOpen, InstallOutcome } from '../market/wire.ts'
+import { useState, type CSSProperties, type ReactNode } from 'react'
+import {
+  Button, IconFullscreenOutline16, IconRightUpOutline14,
+  Input, Modal, Pill, Tooltip,
+} from '@deepseek-ai/dsh-client-ui-primitives'
+import type {
+  CatalogItem, CustomConnectorSync, CustomOpen, HomePlaybook, InstallOutcome, PlaybookArtifact,
+} from '../market/wire.ts'
 import { describe } from './MarketCard.tsx'
 import type { MarketKey } from './market-locales.ts'
+import { PlaybookArtifactPreview } from './PlaybookArtifactPreview.tsx'
 
 /** Copy reader for this section. */
 type T = (key: MarketKey, params?: Record<string, unknown>) => string
@@ -53,6 +59,140 @@ const styles = {
   footer: { display: 'flex', justifyContent: 'flex-end', gap: '8px' },
   note: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', lineHeight: 1.6 },
   refusal: { color: 'var(--dsw-alias-state-error-primary)', fontSize: '13px' },
+  expertDialog: {
+    display: 'flex', flexDirection: 'column', minHeight: 0,
+    maxHeight: 'min(560px, calc(100vh - 48px))',
+  },
+  expertHeader: {
+    position: 'relative', display: 'flex', alignItems: 'center', gap: '20px',
+    padding: '24px 48px 16px 24px', flex: '0 0 auto',
+  },
+  expertAvatar: {
+    position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    width: '56px', height: '56px', flex: '0 0 56px', overflow: 'hidden',
+    borderRadius: '50%', color: '#fff', fontSize: '24px', fontWeight: 600,
+  },
+  expertAvatarImage: {
+    position: 'absolute', inset: 0, width: '100%', height: '100%',
+    objectFit: 'cover', display: 'block',
+  },
+  expertHeading: {
+    display: 'flex', flex: 1, minWidth: 0, flexDirection: 'column',
+    alignItems: 'flex-start', gap: '10px',
+  },
+  expertTitleLine: {
+    display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px', minWidth: 0,
+  },
+  expertTitle: {
+    margin: 0, color: 'var(--dsw-alias-label-primary)', fontSize: '18px',
+    fontWeight: 600, lineHeight: '26px',
+  },
+  expertProfession: {
+    color: 'var(--dsw-alias-label-tertiary)', fontSize: '14px', lineHeight: '22px',
+  },
+  expertUses: {
+    position: 'absolute', top: '25px', right: '52px',
+    color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', lineHeight: '20px',
+  },
+  closeButton: {
+    position: 'absolute', top: '20px', right: '16px', display: 'flex',
+    alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px',
+    padding: 0, border: 0, borderRadius: '8px', background: 'transparent',
+    color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer', fontSize: '20px',
+  },
+  expertScroll: {
+    display: 'flex', flex: 1, minHeight: 0, overflowY: 'auto', flexDirection: 'column',
+    gap: '24px', padding: '0 24px 24px',
+  },
+  expertDescription: {
+    margin: 0, color: 'var(--dsw-alias-label-primary)', fontSize: '13px',
+    lineHeight: 1.65, whiteSpace: 'pre-wrap',
+  },
+  promptSection: { display: 'flex', flexDirection: 'column', gap: '12px' },
+  promptList: {
+    display: 'flex', flexDirection: 'column', gap: '10px',
+    padding: '14px', borderRadius: '14px',
+    background: 'var(--dsw-alias-bg-layer-2)',
+  },
+  expertPrompt: {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px',
+    minHeight: '52px', width: '100%', padding: '11px 16px', border: 0, borderRadius: '12px',
+    textAlign: 'left', cursor: 'pointer', background: 'var(--dsw-alias-interactive-bg-hover)',
+    color: 'var(--dsw-alias-label-primary)', fontSize: '13px', lineHeight: 1.55,
+  },
+  promptSkeleton: {
+    minHeight: '52px', width: '100%', borderRadius: '12px',
+    background: 'var(--dsw-alias-interactive-bg-hover)',
+  },
+  promptIcon: {
+    display: 'flex', flex: '0 0 24px', alignItems: 'center', justifyContent: 'center',
+    width: '24px', height: '24px', borderRadius: '50%',
+    color: 'var(--dsw-alias-label-tertiary)',
+  },
+  sectionTitle: {
+    display: 'flex', alignItems: 'center', gap: '8px',
+    color: 'var(--dsw-alias-label-primary)', fontSize: '15px', fontWeight: 600,
+  },
+  cases: { display: 'flex', flexDirection: 'column', gap: '12px' },
+  caseList: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '10px' },
+  caseCard: {
+    minWidth: 0, padding: 0, overflow: 'hidden', textAlign: 'left', cursor: 'pointer',
+    border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '14px',
+    background: 'var(--dsw-alias-bg-layer-1)', color: 'inherit',
+  },
+  caseCover: { width: '100%', height: '112px', objectFit: 'cover', display: 'block' },
+  caseCoverFallback: {
+    width: '100%', height: '112px', display: 'block',
+    background: 'linear-gradient(135deg, var(--dsw-alias-state-business-tertiary), var(--dsw-alias-interactive-bg-hover))',
+  },
+  caseCopy: { display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0, padding: '9px 10px 11px' },
+  caseTitle: {
+    color: 'var(--dsw-alias-label-primary)', fontSize: '13px', fontWeight: 600,
+    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  },
+  caseSubtitle: {
+    color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px',
+    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  },
+  previewDialog: { display: 'flex', flexDirection: 'column', minHeight: 0, height: '100%' },
+  previewHead: {
+    position: 'relative', display: 'flex', flexDirection: 'column', gap: '8px',
+    padding: '20px 52px 12px 24px',
+  },
+  previewTitleLine: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 },
+  backButton: {
+    display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 28px',
+    width: '28px', height: '28px', padding: 0, border: 0, borderRadius: '8px',
+    background: 'transparent', color: 'var(--dsw-alias-label-primary)',
+    cursor: 'pointer', fontSize: '24px',
+  },
+  previewTitle: {
+    margin: 0, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap', color: 'var(--dsw-alias-label-primary)',
+    fontSize: '18px', fontWeight: 600, lineHeight: '28px',
+  },
+  previewDescription: {
+    margin: 0, color: 'var(--dsw-alias-label-secondary)',
+    fontSize: '13px', lineHeight: 1.55,
+  },
+  expertChip: {
+    display: 'inline-flex', alignItems: 'center', alignSelf: 'flex-start', gap: '6px',
+    padding: '4px 8px', borderRadius: '7px',
+    background: 'var(--dsw-alias-interactive-bg-hover)',
+    color: 'var(--dsw-alias-label-secondary)', fontSize: '12px',
+  },
+  previewStage: {
+    flex: 1, minHeight: 0, margin: '0 24px', overflow: 'hidden',
+    border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '14px',
+    background: 'var(--dsw-alias-bg-layer-1)',
+  },
+  previewFooter: {
+    display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+    gap: '12px', padding: '14px 24px 20px',
+  },
+  previewPrimaryContent: {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+  },
 } satisfies Record<string, CSSProperties>
 
 /** What the detail dialog needs. */
@@ -60,6 +200,14 @@ export interface MarketDetailProps {
   readonly item: CatalogItem | undefined
   readonly language: 'zh' | 'en'
   readonly categoryName: string
+  /**
+   * Which shelf this row came from.
+   *
+   * The sheet used to read every row as an expert: a skill's «类型» said 专家 and
+   * its button said 召唤, because both were derived from `summonable` — which is
+   * a fact about the window, not about the row.
+   */
+  readonly kind: 'expert' | 'skill' | 'connector'
   readonly t: T
   /**
    * The primary action, absent when this row cannot be acted on.
@@ -78,6 +226,24 @@ export interface MarketDetailProps {
    * here as its own way in, which is how WorkBuddy's detail page presents them.
    */
   readonly prompts: readonly string[]
+  /** Keep the prompt section's geometry stable while its per-expert manifest is read. */
+  readonly promptLoading?: boolean
+  /** Cases whose V2 relation explicitly names this expert/team, already capped at three. */
+  readonly relatedCases?: readonly HomePlaybook[]
+  readonly caseOpening?: number
+  readonly caseError?: string
+  readonly casePreview?: { readonly item: HomePlaybook; readonly artifact: PlaybookArtifact }
+  readonly onCaseOpen?: (item: HomePlaybook) => void
+  readonly onCaseBack?: () => void
+  readonly onCaseUse?: (item: HomePlaybook) => void
+  /**
+   * Use what is already installed, when there is a way to.
+   *
+   * Offered instead of the primary action on a row that is already in place: an
+   * installed skill's «安装» button would otherwise install it a second time.
+   */
+  readonly onTry?: () => void
+  readonly tryLabel?: string
   readonly onClose: () => void
 }
 
@@ -87,11 +253,22 @@ export interface MarketDetailProps {
  * @returns the dialog, or null when nothing is selected.
  */
 export function MarketDetail(props: MarketDetailProps): ReactNode {
-  const {
-    item, language, categoryName, t, onPrimary, summonable, blocked, installed, prompts, onClose,
-  } = props
+  const { item, kind } = props
   if (item === undefined) return null
-  const label = summonable ? t('summon') : t('install')
+  return kind === 'expert'
+    ? <ExpertMarketDetail {...props} item={item} />
+    : <StandardMarketDetail {...props} item={item} />
+}
+
+function StandardMarketDetail(props: MarketDetailProps & { readonly item: CatalogItem }): ReactNode {
+  const {
+    item, language, categoryName, kind, t, onPrimary, summonable, blocked, installed,
+    onTry, tryLabel, onClose,
+  } = props
+  const label = kind === 'connector'
+    ? t('connect')
+    : t('install')
+  const use = installed && onTry !== undefined
 
   return (
     <Modal
@@ -102,8 +279,19 @@ export function MarketDetail(props: MarketDetailProps): ReactNode {
       footer={(
         <div style={styles.footer}>
           <Button variant="ghost" onClick={onClose}>{t('detailClose')}</Button>
-          {installed && !summonable && <span style={styles.note}>{t('installed')}</span>}
-          {onPrimary !== undefined && (installed ? summonable : true) && (
+          {installed && !summonable && !use && (
+            <span style={styles.note}>{t(kind === 'connector' ? 'connected' : 'installed')}</span>
+          )}
+          {use && (
+            <Button
+              variant="primary"
+              data-testid="openlux-market-detail-try"
+              onClick={onTry}
+            >
+              {tryLabel ?? t('tryNow')}
+            </Button>
+          )}
+          {!use && onPrimary !== undefined && (installed ? summonable : true) && (
             <Button
               variant="primary"
               data-testid="openlux-market-detail-action"
@@ -120,26 +308,13 @@ export function MarketDetail(props: MarketDetailProps): ReactNode {
     >
       <div style={styles.body}>
         <span style={styles.description}>{describe(item, language)}</span>
-        {summonable && onPrimary !== undefined && prompts.length > 0 && (
-          <div style={styles.prompts}>
-            <span style={styles.promptsLabel}>{t('detailPrompts')}</span>
-            {prompts.map(prompt => (
-              <button
-                key={prompt}
-                type="button"
-                style={styles.prompt}
-                data-testid="openlux-market-prompt"
-                onClick={() => onPrimary(prompt)}
-              >
-                {prompt}
-              </button>
-            ))}
-          </div>
-        )}
         <div style={styles.rows}>
           <div style={styles.row}>
             <span style={styles.label}>{t('detailKind')}</span>
-            <span style={styles.value}>{item.team ? t('kindTeam') : t('kindAgent')}</span>
+            <span style={styles.value}>
+              {kind === 'skill' && t('detailKindSkill')}
+              {kind === 'connector' && t('detailKindConnector')}
+            </span>
           </div>
           {categoryName !== '' && (
             <div style={styles.row}>
@@ -153,6 +328,8 @@ export function MarketDetail(props: MarketDetailProps): ReactNode {
               <span style={styles.value}>{item.version}</span>
             </div>
           )}
+          {/* The card no longer carries these, so this is where the author and
+              the licence a skill ships under are read. */}
           {item.tags.length > 0 && (
             <div style={styles.row}>
               <span style={styles.label}>{t('detailTags')}</span>
@@ -161,9 +338,331 @@ export function MarketDetail(props: MarketDetailProps): ReactNode {
               </span>
             </div>
           )}
+          {item.downloads > 0 && (
+            <div style={styles.row}>
+              <span style={styles.label}>{t('detailDownloads')}</span>
+              <span style={styles.value}>{t('downloads', { count: item.downloads })}</span>
+            </div>
+          )}
         </div>
       </div>
     </Modal>
+  )
+}
+
+function ExpertMarketDetail(props: MarketDetailProps & { readonly item: CatalogItem }): ReactNode {
+  const {
+    item, language, categoryName, t, onPrimary, blocked, prompts,
+    promptLoading = false,
+    relatedCases = [], caseOpening, caseError, casePreview,
+    onCaseOpen, onCaseBack, onCaseUse, onClose,
+  } = props
+  if (casePreview !== undefined) {
+    return (
+      <ExpertCasePreview
+        item={item}
+        preview={casePreview}
+        t={t}
+        {...onCaseBack === undefined ? {} : { onBack: onCaseBack }}
+        {...onCaseUse === undefined ? {} : { onUse: onCaseUse }}
+        onClose={onClose}
+      />
+    )
+  }
+  return (
+    <Modal
+      open
+      headless
+      className="openlux-market-expert-detail-dialog"
+      onClose={onClose}
+      title={item.name}
+      closeLabel={t('detailClose')}
+    >
+      <div style={styles.expertDialog} data-testid="openlux-market-expert-detail">
+        <header style={styles.expertHeader}>
+          <ExpertAvatar item={item} />
+          <div style={styles.expertHeading}>
+            <div style={styles.expertTitleLine}>
+              <h2 style={styles.expertTitle}>{item.name}</h2>
+              {item.team && <Pill>{t('teamBadge')}</Pill>}
+              {categoryName !== '' && <span style={styles.expertProfession}>{categoryName}</span>}
+            </div>
+            {onPrimary !== undefined && (
+              <Button
+                variant="primary"
+                size="sm"
+                data-testid="openlux-market-detail-action"
+                onClick={() => onPrimary()}
+              >
+                {t('summonExpert')}
+              </Button>
+            )}
+            {onPrimary === undefined && blocked !== undefined && (
+              <span style={styles.note}>{blocked}</span>
+            )}
+          </div>
+          {item.downloads > 0 && (
+            <span style={styles.expertUses}>{t('expertUseCount', { count: item.downloads })}</span>
+          )}
+          <button
+            type="button"
+            style={styles.closeButton}
+            aria-label={t('detailClose')}
+            onClick={onClose}
+            onPointerEnter={event => {
+              event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)'
+            }}
+            onPointerLeave={event => { event.currentTarget.style.background = 'transparent' }}
+          >
+            ×
+          </button>
+        </header>
+
+        <div style={styles.expertScroll}>
+          <p style={styles.expertDescription}>{describe(item, language)}</p>
+          {item.tags.length > 0 && (
+            <div style={styles.tags}>
+              {item.tags.map(tag => <Pill key={tag}>{tag}</Pill>)}
+            </div>
+          )}
+
+          {onPrimary !== undefined && (promptLoading || prompts.length > 0) && (
+            <section style={styles.promptSection} aria-label={t('detailPrompts')}>
+              <span style={styles.sectionTitle}><OffersGlyph />{t('detailPrompts')}</span>
+              <div style={styles.promptList}>
+                {promptLoading
+                  ? [0, 1, 2].map(index => (
+                      <span key={index} style={styles.promptSkeleton} aria-hidden="true" />
+                    ))
+                  : prompts.slice(0, 3).map(prompt => (
+                      <button
+                        key={prompt}
+                        type="button"
+                        style={styles.expertPrompt}
+                        data-testid="openlux-market-prompt"
+                        onClick={() => onPrimary(prompt)}
+                        onPointerEnter={event => {
+                          event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-active)'
+                        }}
+                        onPointerLeave={event => {
+                          event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)'
+                        }}
+                      >
+                        <span>{prompt}</span>
+                        <span style={styles.promptIcon} aria-hidden="true"><ChatGlyph /></span>
+                      </button>
+                    ))}
+              </div>
+            </section>
+          )}
+
+          {relatedCases.length > 0 && onCaseOpen !== undefined && (
+            <section style={styles.cases} data-testid="openlux-market-related-cases">
+              <span style={styles.sectionTitle}><CasesGlyph />{t('homeCases')}</span>
+              <div style={styles.caseList}>
+                {relatedCases.map(related => (
+                  <RelatedCaseCard
+                    key={related.id}
+                    item={related}
+                    disabled={caseOpening === related.id}
+                    onOpen={() => onCaseOpen(related)}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+          {caseError !== undefined && <span style={styles.refusal}>{caseError}</span>}
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+function ExpertCasePreview(
+  { item, preview, t, onBack, onUse, onClose }: {
+    readonly item: CatalogItem
+    readonly preview: { readonly item: HomePlaybook; readonly artifact: PlaybookArtifact }
+    readonly t: T
+    readonly onBack?: () => void
+    readonly onUse?: (item: HomePlaybook) => void
+    readonly onClose: () => void
+  },
+): ReactNode {
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <Modal
+      open
+      headless
+      className={`openlux-market-preview-dialog${expanded ? ' openlux-market-preview-dialog-expanded' : ''}`}
+      onClose={onClose}
+      title={preview.item.title}
+      closeLabel={t('homeClose')}
+    >
+      <div style={styles.previewDialog} data-testid="openlux-market-case-preview">
+        <header style={styles.previewHead}>
+          <div style={styles.previewTitleLine}>
+            {onBack !== undefined && (
+              <button
+                type="button"
+                style={styles.backButton}
+                aria-label={t('caseBackToExpert')}
+                onClick={onBack}
+              >
+                ‹
+              </button>
+            )}
+            <h2 style={styles.previewTitle}>{preview.item.title}</h2>
+          </div>
+          {(preview.item.subtitle || preview.item.description) !== '' && (
+            <p style={styles.previewDescription}>
+              {preview.item.subtitle || preview.item.description}
+            </p>
+          )}
+          <span style={styles.expertChip}>{item.name}</span>
+          <button
+            type="button"
+            style={styles.closeButton}
+            aria-label={t('homeClose')}
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </header>
+        <div style={styles.previewStage}>
+          <PlaybookArtifactPreview
+            artifact={preview.artifact}
+            title={preview.item.title}
+            expanded={expanded}
+            t={t}
+          />
+        </div>
+        <footer style={styles.previewFooter}>
+          <Tooltip label={t(expanded ? 'caseCollapse' : 'caseExpand')} side="top">
+            <button
+              type="button"
+              className="openlux-market-preview-toggle"
+              aria-label={t(expanded ? 'caseCollapse' : 'caseExpand')}
+              onClick={() => setExpanded(value => !value)}
+            >
+              {expanded ? <CollapseGlyph /> : <IconFullscreenOutline16 />}
+            </button>
+          </Tooltip>
+          {onUse !== undefined && preview.item.initPrompt !== '' && (
+            <Button
+              variant="primary"
+              data-testid="openlux-market-case-use"
+              onClick={() => onUse(preview.item)}
+            >
+              <span style={styles.previewPrimaryContent}>
+                {t('caseCreateMine')}
+                <IconRightUpOutline14 />
+              </span>
+            </Button>
+          )}
+        </footer>
+      </div>
+    </Modal>
+  )
+}
+
+function avatarHue(seed: string): string {
+  let value = 0
+  for (let index = 0; index < seed.length; index += 1) {
+    value = (value * 31 + seed.charCodeAt(index)) % 360
+  }
+  return `hsl(${value}deg 42% 45%)`
+}
+
+function ExpertAvatar({ item }: { readonly item: CatalogItem }): ReactNode {
+  const [failed, setFailed] = useState(false)
+  const remote = /^https?:\/\//u.test(item.icon)
+  return (
+    <span style={{ ...styles.expertAvatar, background: avatarHue(item.slug) }} aria-hidden="true">
+      {[...item.name][0] ?? '?'}
+      {remote && !failed && (
+        <img
+          src={item.icon}
+          alt=""
+          style={styles.expertAvatarImage}
+          onError={() => setFailed(true)}
+        />
+      )}
+    </span>
+  )
+}
+
+function ChatGlyph(): ReactNode {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M3 3.5h10v6.8H8l-3.2 2.2v-2.2H3z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M6 6.9h4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function CollapseGlyph(): ReactNode {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M2.5 6h3.5V2.5M10 2.5V6h3.5M13.5 10H10v3.5M6 13.5V10H2.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function OffersGlyph(): ReactNode {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M5.1 9.7C4.4 9 4 8 4 7a4 4 0 0 1 8 0c0 1-.4 2-1.1 2.7-.6.6-.9 1.1-.9 1.8H6c0-.7-.3-1.2-.9-1.8Z" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M6.4 13.5h3.2M8 1V.2M13.2 2.8l.6-.6M2.8 2.8l-.6-.6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function CasesGlyph(): ReactNode {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+      <rect x="1.5" y="1.5" width="4" height="4" rx="1" stroke="currentColor" />
+      <rect x="9.5" y="1.5" width="4" height="4" rx="1" stroke="currentColor" />
+      <rect x="1.5" y="9.5" width="4" height="4" rx="1" stroke="currentColor" />
+      <rect x="9.5" y="9.5" width="4" height="4" rx="1" stroke="currentColor" />
+    </svg>
+  )
+}
+
+function RelatedCaseCard(
+  { item, disabled, onOpen }: {
+    readonly item: HomePlaybook
+    readonly disabled: boolean
+    readonly onOpen: () => void
+  },
+): ReactNode {
+  const [imageFailed, setImageFailed] = useState(false)
+  return (
+    <button
+      type="button"
+      style={styles.caseCard}
+      disabled={disabled}
+      title={item.title}
+      data-testid={`openlux-market-related-case-${item.id}`}
+      onClick={onOpen}
+    >
+      {item.cover !== '' && !imageFailed
+        ? (
+          <img
+            src={item.cover}
+            alt=""
+            loading="lazy"
+            style={styles.caseCover}
+            onError={() => setImageFailed(true)}
+          />
+        )
+        : <span style={styles.caseCoverFallback} aria-hidden="true" />}
+      <span style={styles.caseCopy}>
+        <span style={styles.caseTitle}>{item.title}</span>
+        {(item.subtitle || item.description) !== '' && (
+          <span style={styles.caseSubtitle}>{item.subtitle || item.description}</span>
+        )}
+      </span>
+    </button>
   )
 }
 

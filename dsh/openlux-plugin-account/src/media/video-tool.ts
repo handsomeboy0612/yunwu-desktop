@@ -18,8 +18,8 @@
  *   or opening a turn on an idle one. So the model gets told the clip is ready
  *   without polling, and `job_output` lets it wait on purpose when the user
  *   asked it to.
- * - `job_kill` cancels it. Our hooks abort the in-flight request, so a cancelled
- *   job stops paying for a clip nobody will watch.
+ * - `job_kill` stops local tracking. Most upstream video routes have no cancel
+ *   endpoint, so an already-submitted task may continue and still be billed.
  *
  * The registry refuses to start work for an owner no controller serves, which
  * means this tool needs `tool-jobs` in the agent's own composition. Every preset
@@ -52,10 +52,9 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { JobHooks, JobOutcome } from '@deepseek-ai/dsh-jobs'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ConsoleAccess } from '../market/console.ts'
-import type { Session } from '@deepseek-ai/dsh-session'
 import { size } from './images.ts'
 import { VIDEO_TOOL_NAME } from './name.ts'
-import type { SessionImage } from './session-images.ts'
+import type { SessionEventSource, SessionImage } from './session-images.ts'
 import { findLatestImage } from './session-images.ts'
 import { generateVideo, VideoGenerationError } from './video.ts'
 import type { VideoProvider } from './video/provider.ts'
@@ -103,6 +102,8 @@ function describe(firstFrame: boolean): string {
 export interface VideoToolOptions {
   /** Route origin and token reader, shared with the account face. */
   readonly access: ConsoleAccess
+  /** Capture one token for catalogue selection, submit, and polling. */
+  readonly captureAccess?: () => Promise<ConsoleAccess>
   /** Model to film with, or a runtime reader updated by server delivery. */
   readonly model?: string | (() => string | undefined)
 }
@@ -286,7 +287,8 @@ export function registerVideoTool(ctx: Context, options: VideoToolOptions): void
       // it wrong in the other direction is what this replaced: a name outside a
       // three-entry enum used to be dropped, and the user paid for a clip from
       // a model they did not choose.
-      const catalog = await readVideoCatalog(ctx, options.access)
+      const access = await options.captureAccess?.() ?? options.access
+      const catalog = await readVideoCatalog(ctx, access, exec.signal)
       const animating = args.animate_last_image === true
       const named = args.model?.trim() ?? ''
       const model = named === '' ? defaultVideoModel(catalog, deliveredModel(), animating) : named
@@ -350,7 +352,7 @@ export function registerVideoTool(ctx: Context, options: VideoToolOptions): void
         kind: 'video',
         label: `${VIDEO_TOOL_NAME}: ${args.prompt.slice(0, 80)}`,
         ...exec.agent === undefined ? {} : { owner: exec.agent },
-        run: () => filmInBackground(ctx, options.access, provider, {
+        run: () => filmInBackground(ctx, access, provider, {
           model,
           prompt: args.prompt,
           ...resolved.types.length === 0 ? {} : { endpointTypes: resolved.types },
@@ -398,7 +400,7 @@ export function registerVideoTool(ctx: Context, options: VideoToolOptions): void
  * @param session - the calling agent's session, whose log holds the images.
  * @returns the image, as both its reference and the URI the route takes.
  */
-async function readLastImage(ctx: Context, session: Session | undefined): Promise<FirstFrame> {
+async function readLastImage(ctx: Context, session: SessionEventSource | undefined): Promise<FirstFrame> {
   if (session === undefined) {
     throw new VideoGenerationError('这次调用不属于任何会话，取不到会话里的图片，无法做图生视频。')
   }
@@ -509,8 +511,8 @@ function filmInBackground(
       return { status: 'completed', detail: facts }
     } catch (error: unknown) {
       if (stop.signal.aborted) {
-        write('已取消，未产生文件。')
-        return { status: 'killed', detail: '已取消' }
+        write('已停止本地跟踪；上游任务可能仍在继续并计费，稍后请到中转站任务记录确认。')
+        return { status: 'killed', detail: '仅停止本地跟踪，上游任务可能继续并计费' }
       }
       const message = error instanceof Error ? error.message : String(error)
       write(`失败：${message}`)

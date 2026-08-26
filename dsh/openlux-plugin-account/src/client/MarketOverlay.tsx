@@ -11,7 +11,9 @@
 
 import { useEffect, useRef, type CSSProperties, type ReactNode } from 'react'
 import { Button, IconCloseOutline16, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsLocale, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
+import type {
+  HostObservable, InjectFace, PropsLocale, PropsRuntime, PropsStore,
+} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import { MarketSection, type MarketSectionInjected } from './MarketSection.tsx'
 import type { MarketViewStore } from './market-view-store.ts'
@@ -22,8 +24,24 @@ export const MARKET_OVERLAY_ID = 'openlux-market'
 /** Same order as the launcher so the two faces stay a pair. */
 export const MARKET_OVERLAY_ORDER = 10
 
-/** Catalog + summon wiring, supplied by the plugin body. */
-export type MarketOverlayInjected = MarketSectionInjected
+/**
+ * Catalog + summon wiring, supplied by the plugin body.
+ *
+ * `summon` is always there and always safe to hold: this face is built once per
+ * registration and cached for the entry's life (ui-renderer's
+ * `cachedRootInject`), so a conditional member would freeze whichever moment
+ * the overlay first rendered — for a shell-mounted overlay, boot, before the
+ * conversation scope exists. Whether pressing it can land anywhere is the
+ * separate live fact below, read the way ui-workspace reads its own flow
+ * occupancy (`DirectoryPickingInjected.hooks.directoryFlow`).
+ */
+export type MarketOverlayInjected = Omit<MarketSectionInjected, 'summon'> & {
+  readonly summon: NonNullable<MarketSectionInjected['summon']>
+  readonly hooks: {
+    /** Whether a conversation flow is live; the renderer binds it as useSummonReady. */
+    readonly summonReady: HostObservable<boolean>
+  }
+}
 
 const styles = {
   root: {
@@ -76,6 +94,9 @@ const styles = {
     lineHeight: 1.6,
   },
   body: {
+    width: '100%',
+    maxWidth: '100%',
+    boxSizing: 'border-box',
     minWidth: 0,
     minHeight: 0,
     flex: 1,
@@ -93,10 +114,11 @@ export function MarketOverlay(
   props: PropsRuntime<'shell.overlay'>
     & PropsLocale<'openlux.market'>
     & PropsStore<MarketViewStore>
-    & MarketOverlayInjected,
+    & InjectFace<MarketOverlayInjected>,
 ): ReactNode {
-  const { useStore, actions, t, callHost, language, summon } = props
+  const { useStore, actions, t, callHost, language, summon, useSummonReady } = props
   const open = useStore(state => state.open)
+  const summonable = useSummonReady(ready => ready)
   const panel = useRef<HTMLElement>(null)
 
   useEffect(() => {
@@ -150,7 +172,7 @@ export function MarketOverlay(
             language={language}
             showChrome={false}
             onDismiss={() => actions.close()}
-            {...summon === undefined ? {} : { summon }}
+            {...summonable ? { summon } : {}}
           />
         </div>
       </section>

@@ -47,12 +47,13 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { SettingsConflictError, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { ConsoleAccess } from '../market/console.ts'
 import { catalogFacts } from './capabilities.ts'
 import { fetchDeliveredModelConfig, type DeliveredModelConfig } from './delivered.ts'
-import { deliveredIds, isManaged, merge, type ModelEntry } from './delivery.ts'
+import { deliveredIds, FALLBACK_MODELS, isManaged, merge, type ModelEntry } from './delivery.ts'
 import { fetchChatPool } from './pool.ts'
-import { fetchModelOverrides, type ModelOverrides } from './profiles.ts'
+import { fetchModelOverrides, type ModelOverrideSnapshot, type ModelOverrides } from './profiles.ts'
 
 /**
  * The settings namespace that owns provider routes. Not ours — we write into
@@ -92,7 +93,7 @@ export interface SyncOutcome {
    * Why nothing happened, when nothing did. `no-pool` covers "neither source
    * answered": no console list *and* no square, which is the offline case.
    */
-  readonly skipped?: 'no-settings' | 'no-key' | 'no-pool' | 'empty-result' | 'unchanged'
+  readonly skipped?: 'no-settings' | 'no-key' | 'no-pool' | 'empty-result' | 'unchanged' | 'prepared' | 'stale'
   /**
    * Where the delivered ids came from. Worth logging on its own: the two
    * sources fail in different ways, and "which one answered" is the first
@@ -126,8 +127,19 @@ type SettingsOp =
 /** The settings service surface this module uses. */
 interface SettingsLike {
   get(ns: typeof PI_AI_NS): unknown
-  describe(options?: { redactSecrets?: boolean }): readonly { ns: string; user?: unknown }[]
-  mutate(ns: typeof PI_AI_NS, ops: readonly SettingsOp[]): Promise<void>
+  describe(options?: { redactSecrets?: boolean }): readonly {
+    ns: string
+    user?: unknown
+    revision: number
+  }[]
+  mutate(ns: typeof PI_AI_NS, ops: readonly SettingsOp[], expectedRevision?: number): Promise<void>
+}
+
+/** Hooks used by the runtime coordinator without coupling this module to accounts. */
+export interface SyncControl {
+  readonly commit?: boolean
+  readonly canCommit?: () => boolean | Promise<boolean>
+  readonly serializeWrite?: <T>(task: () => Promise<T>) => Promise<T>
 }
 
 /** The two fields of the default-model section this module reads. */
@@ -180,26 +192,34 @@ async function applyDefaultModel(
   if (delivery?.configured !== true) return false
   // Delivered order, but only names that survived this round's merge: seeding a
   // default the picker does not list would recreate the very problem below.
-  const first = delivery.chatModels.find(id => models.some(entry => entry.id === id))
+  const first = models.find(isManaged)?.id
   if (first === undefined) return false
 
-  const written = selectionOf(settings.describe().find(entry => entry.ns === DEFAULT_NS)?.user)
-  if (written.model !== undefined) {
-    if (written.provider !== ROUTE) return false
-    if (models.some(entry => entry.id === written.model)) return false
-  }
-  const resolved = selectionOf(settings.get(DEFAULT_NS))
-  if (resolved.provider === ROUTE && resolved.model === first) return false
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const descriptor = settings.describe().find(entry => entry.ns === DEFAULT_NS)
+    const written = selectionOf(descriptor?.user)
+    if (written.model !== undefined) {
+      if (written.provider !== ROUTE) return false
+      if (models.some(entry => entry.id === written.model)) return false
+    }
+    const resolved = selectionOf(settings.get(DEFAULT_NS))
+    if (resolved.provider === ROUTE && resolved.model === first) return false
 
-  await settings.mutate(DEFAULT_NS, [
-    { op: 'set', path: ['provider'], value: ROUTE },
-    { op: 'set', path: ['model'], value: first },
-    // The effort was chosen for the model being left behind. Levels are
-    // declared per model (`reasoningEfforts`), so carrying one across is at
-    // best meaningless and at worst a level the next model does not have.
-    { op: 'unset', path: ['reasoningEffort'] },
-  ])
-  return true
+    try {
+      await settings.mutate(DEFAULT_NS, [
+        { op: 'set', path: ['provider'], value: ROUTE },
+        { op: 'set', path: ['model'], value: first },
+        // The effort was chosen for the model being left behind. Levels are
+        // declared per model (`reasoningEfforts`), so carrying one across is at
+        // best meaningless and at worst a level the next model does not have.
+        { op: 'unset', path: ['reasoningEffort'] },
+      ], descriptor?.revision)
+      return true
+    } catch (error: unknown) {
+      if (!(error instanceof SettingsConflictError) || attempt > 0) throw error
+    }
+  }
+  return false
 }
 
 function modelsOf(section: unknown): readonly ModelEntry[] | undefined {
@@ -250,14 +270,17 @@ function writtenModels(settings: SettingsLike): readonly ModelEntry[] {
  * @param overrides - the console's statements, empty when it said nothing.
  * @returns the entry with catalog-derived and console-derived fields applied.
  */
-function described(entry: ModelEntry, overrides: ModelOverrides): ModelEntry {
+function described(entry: ModelEntry, overrides: ModelOverrides, resetInput = false): ModelEntry {
   const facts = catalogFacts(entry.id)
   const override = overrides.get(entry.id)
+  const source: Record<string, unknown> = resetInput
+    ? Object.fromEntries(Object.entries(entry).filter(([key]) => key !== 'input'))
+    : { ...entry }
   if (facts === undefined) {
-    if (override?.input === undefined) return entry
-    return { ...entry, input: [...override.input] } as ModelEntry
+    if (override?.input === undefined) return { ...source, id: entry.id } as ModelEntry
+    return { ...source, id: entry.id, input: [...override.input] }
   }
-  const next: Record<string, unknown> = { ...entry }
+  const next: Record<string, unknown> = { ...source }
   if (next['name'] === undefined && facts.name !== undefined) next['name'] = facts.name
   if (next['contextWindow'] === undefined && facts.contextWindow !== undefined) {
     next['contextWindow'] = facts.contextWindow
@@ -297,134 +320,172 @@ function same(a: readonly ModelEntry[], b: readonly ModelEntry[]): boolean {
  * only a machine with nothing written yet comes away untouched, which is the
  * one case where guessing would put rows in the picker nobody asked for.
  * @param ctx - host context.
- * @param options - console origin and how to read the key.
+ * @param options - independent model-directory and product-config access.
  * @param signal - caller cancellation.
  * @returns what the sync did.
  */
 export async function syncModels(
   ctx: Context,
   options: {
-    readonly baseUrl: string
-    readonly apiKey: () => Promise<string | undefined>
+    /** Account-scoped model directory and billing route. */
+    readonly model: ConsoleAccess
+    /** Product configuration route; local integration uses its own station token. */
+    readonly config: ConsoleAccess
   },
   signal?: AbortSignal,
+  control: SyncControl = {},
 ): Promise<SyncOutcome> {
   const settings = ctx.get('settings') as SettingsLike | undefined
   if (settings === undefined) return { changed: false, skipped: 'no-settings' }
 
-  const current = currentModels(settings)
-  const written = writtenModels(settings)
-
-  const apiKey = await options.apiKey()
+  const apiKey = await options.model.apiKey()
   const hasKey = apiKey !== undefined && apiKey !== ''
+  if (!hasKey) return { changed: false, skipped: 'no-key' }
 
-  // The four-purpose snapshot is authoritative when configured. A missing route,
-  // old deployment or transient network failure remains "unknown": do not clear
-  // any local state, and let the packaged/square paths continue to carry chat.
-  let delivery: DeliveredModelConfig | undefined
-  if (hasKey) {
-    try {
-      delivery = await fetchDeliveredModelConfig(options, signal)
-    } catch (error: unknown) {
-      ctx.logger.warn(`openlux: model delivery unavailable; preserving local defaults (${error instanceof Error ? error.message : String(error)})`)
-    }
+  // Model membership is account-scoped and therefore uses this exact key.
+  // Delivery and profiles are product facts from the configuration plane,
+  // which is a separate local station during integration
+  // (`new-yunwu-api/router/api-router.go:573-596`). Keeping the two accesses
+  // distinct prevents an online `/v1/models` route from dragging these reads
+  // to an online deployment that does not serve `/api/desktop-config`.
+  const [deliveryResult, overrideResult, poolResult] = await Promise.allSettled([
+    fetchDeliveredModelConfig(options.config, signal),
+    fetchModelOverrides(options.config, signal),
+    fetchChatPool(ctx, options.model.baseUrl, apiKey, signal),
+  ])
+  signal?.throwIfAborted()
+
+  const delivery = deliveryResult.status === 'fulfilled' ? deliveryResult.value : undefined
+  const overrideSnapshot: ModelOverrideSnapshot | undefined = overrideResult.status === 'fulfilled'
+    ? overrideResult.value
+    : undefined
+  const pool = poolResult.status === 'fulfilled' ? poolResult.value : undefined
+
+  if (deliveryResult.status === 'rejected') {
+    ctx.logger.warn(`openlux: model delivery unavailable; preserving local defaults (${errorText(deliveryResult.reason)})`)
   }
-
-  // The capability layer, read in the same round and treated the same way: a
-  // console this round could not reach states nothing, and nothing is what the
-  // entries keep — the catalog's answer, which is what shipped before this
-  // layer existed.
-  let overrides: ModelOverrides = new Map()
-  if (hasKey) {
-    try {
-      overrides = await fetchModelOverrides(options, signal)
-    } catch (error: unknown) {
-      ctx.logger.warn(`openlux: model capability overrides unavailable; keeping the installed catalog's answer (${error instanceof Error ? error.message : String(error)})`)
-    }
+  if (overrideResult.status === 'rejected') {
+    ctx.logger.warn(`openlux: model capability overrides unavailable; preserving the last confirmed answer (${errorText(overrideResult.reason)})`)
+  }
+  if (poolResult.status === 'rejected') {
+    ctx.logger.warn(`openlux: token model directory unavailable; preserving the last usable list (${errorText(poolResult.reason)})`)
   }
 
   const reportedDelivery = delivery === undefined ? {} : { delivery }
-
-  let ids: readonly string[] | undefined
-  let source: SyncOutcome['source']
-  if (delivery?.configured === true && delivery.chatModels.length > 0) {
-    ids = delivery.chatModels
-    source = 'console'
-  } else if (hasKey) {
-    // Only now is the square worth two requests: reaching it costs `/v1/models`
-    // plus `/api/pricing_new`, and a station that answered the list above has
-    // already told us everything this round needs.
-    const pool = await fetchChatPool(ctx, options.baseUrl, apiKey as string, signal)
-    if (pool !== undefined) {
-      ids = deliveredIds(pool)
-      source = 'square'
-    }
+  if (pool === undefined) {
+    return { changed: false, skipped: 'no-pool', ...reportedDelivery }
   }
 
-  if (ids === undefined && written.length === 0) {
+  const available = new Set(pool.map(model => model.id))
+  let ids: readonly string[]
+  let source: NonNullable<SyncOutcome['source']>
+  if (delivery !== undefined) {
+    const intended = delivery.chatModels.length > 0 ? delivery.chatModels : FALLBACK_MODELS
+    ids = intended.filter(id => available.has(id))
+    source = delivery.chatModels.length > 0 ? 'console' : 'square'
+  } else {
+    // Old deployments without the delivery route keep the existing square-tag
+    // fallback until they are upgraded.
+    ids = deliveredIds(pool)
+    source = 'square'
+  }
+
+  if (ids.length === 0) {
+    return { changed: false, skipped: 'empty-result', source, ...reportedDelivery }
+  }
+
+  const overrides = overrideSnapshot?.overrides ?? new Map()
+  const buildNext = (): readonly ModelEntry[] => {
+    const current = currentModels(settings)
+    const written = writtenModels(settings)
+    const merged = merge(ids, written.filter(entry => !isManaged(entry)))
+    // A failed profile read is unknown, not "remove every override". Carry
+    // existing managed entries forward field-for-field where their ids remain.
+    const previous = overrideSnapshot === undefined
+      ? new Map(current.filter(isManaged).map(entry => [entry.id, entry]))
+      : new Map<string, ModelEntry>()
+    const membership = merged.map(entry => isManaged(entry) ? previous.get(entry.id) ?? entry : entry)
+    return membership.map(entry => described(
+      entry,
+      overrides,
+      overrideSnapshot !== undefined && isManaged(entry),
+    ))
+  }
+
+  const prepared = buildNext()
+  if (control.commit === false) {
     return {
       changed: false,
-      skipped: hasKey ? 'no-pool' : 'no-key',
+      skipped: 'prepared',
+      source,
+      models: prepared.length,
+      managed: prepared.filter(isManaged).length,
+      kept: prepared.filter(entry => !isManaged(entry)).length,
       ...reportedDelivery,
     }
   }
 
-  const membership = ids === undefined
-    ? current
-    : merge(ids, written.filter(entry => !isManaged(entry)))
+  const serializeWrite = control.serializeWrite ?? (async <T>(task: () => Promise<T>): Promise<T> => task())
+  return serializeWrite(async () => {
+    signal?.throwIfAborted()
+    if (await control.canCommit?.() === false) {
+      return { changed: false, skipped: 'stale', source, ...reportedDelivery }
+    }
 
-  // A list that came out empty is a miscalculation upstream of here, never an
-  // instruction to empty the picker — nothing a user or the console can do says
-  // "leave this account with no models". Reaching the console and computing zero
-  // means its answer did not survive our own filters, and the composition floor
-  // is a better thing to leave standing than nothing at all.
-  //
-  // Not hypothetical: against a station whose `models.model_type` is mostly
-  // blank, the pool keeps only the handful that say 对话 (`pool.ts` tests for
-  // that word), none of which are ids the fallback names — so a machine with
-  // nothing written yet computed zero and tried to write `models: []`, and the
-  // picker was left showing only the two rows the composition ships. That is
-  // the case the console list above answers outright: it names the models and
-  // carries their category, so no column has to be guessed from.
-  if (membership.length === 0) {
-    return { changed: false, skipped: 'empty-result', ...reportedDelivery }
-  }
+    let next = prepared
+    let listChanged = false
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      signal?.throwIfAborted()
+      if (await control.canCommit?.() === false) {
+        return { changed: false, skipped: 'stale', source, ...reportedDelivery }
+      }
+      const descriptor = settings.describe().find(entry => entry.ns === PI_AI_NS)
+      const current = currentModels(settings)
+      next = buildNext()
+      listChanged = !same(current, next)
+      if (!listChanged) break
+      try {
+        await settings.mutate(
+          PI_AI_NS,
+          [{ op: 'set', path: ['providers', ROUTE, 'models'], value: next }],
+          descriptor?.revision,
+        )
+        break
+      } catch (error: unknown) {
+        if (!(error instanceof SettingsConflictError) || attempt > 0) throw error
+      }
+    }
 
-  const next = membership.map(entry => described(entry, overrides))
-  // Spread rather than assign: `exactOptionalPropertyTypes` treats an explicit
-  // `undefined` as a different thing from an absent key, and a round that read
-  // neither source has no source to report.
-  const reported = source === undefined ? {} : { source }
-  const listChanged = !same(current, next)
-  if (listChanged) {
-    await settings.mutate(PI_AI_NS, [{ op: 'set', path: ['providers', ROUTE, 'models'], value: next }])
-  }
-  // After the list is written, so the seed can only name a row that is in it,
-  // and caught rather than thrown: another namespace failing must not undo a
-  // list this round already applied.
-  let defaultChanged = false
-  try {
-    defaultChanged = await applyDefaultModel(settings, delivery, next)
-  } catch (error: unknown) {
-    ctx.logger.warn(`openlux: default model could not be aligned with the delivered list (${error instanceof Error ? error.message : String(error)})`)
-  }
-  if (!listChanged) {
+    // The independent default namespace follows only after the model list
+    // commits. A failure there never rolls the list back.
+    let defaultChanged = false
+    try {
+      defaultChanged = await applyDefaultModel(settings, delivery, next)
+    } catch (error: unknown) {
+      ctx.logger.warn(`openlux: default model could not be aligned with the delivered list (${errorText(error)})`)
+    }
+    if (!listChanged) {
+      return {
+        changed: defaultChanged,
+        skipped: 'unchanged',
+        models: next.length,
+        source,
+        ...reportedDelivery,
+      }
+    }
     return {
-      changed: defaultChanged,
-      skipped: 'unchanged',
+      changed: true,
+      source,
       models: next.length,
-      ...reported,
+      managed: next.filter(isManaged).length,
+      kept: next.filter(entry => !isManaged(entry)).length,
+      described: next.filter(entry => entry['reasoningEfforts'] !== undefined).length,
+      overridden: next.filter(entry => overrides.has(entry.id)).length,
       ...reportedDelivery,
     }
-  }
-  return {
-    changed: true,
-    ...reported,
-    models: next.length,
-    managed: next.filter(isManaged).length,
-    kept: next.filter(entry => !isManaged(entry)).length,
-    described: next.filter(entry => entry['reasoningEfforts'] !== undefined).length,
-    overridden: next.filter(entry => overrides.has(entry.id)).length,
-    ...reportedDelivery,
-  }
+  })
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }

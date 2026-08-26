@@ -34,11 +34,16 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { signIn } from './account/auth.ts'
 import { BalanceReader } from './account/balance.ts'
 import { fetchCaptcha, fetchCaptchaConfig, verifyCaptcha, type CaptchaType } from './account/captcha.ts'
-import { clearSession, readSession } from './account/session.ts'
+import { clearSession, readSession, saveSession, type StoredSession } from './account/session.ts'
+import { TokenManager } from './account/tokens.ts'
+import { installAutomationRuntime } from './automation.ts'
 import { FILE_STAGE_ENDPOINT, FILE_VISION_ENDPOINT } from './files/name.ts'
 import { stageFile } from './files/stage.ts'
 import { readCatalog, type Catalog, type CatalogType } from './market/catalog.ts'
 import { readExpertManifest, type ConsoleAccess } from './market/console.ts'
+import {
+  readFeaturedScenes, readHomeContent, readPlaybookArtifact, readRelatedPlaybooks,
+} from './market/home-content.ts'
 import { installPreset, readInstallTarget, type InstallOutcome, type InstallRequest, type InstallTarget } from './market/install.ts'
 import { importLocalSkill, installSkill, readSkillTarget, removeSkill } from './market/skill-install.ts'
 import {
@@ -46,6 +51,7 @@ import {
   readConnectorRequirement, readConnectorTarget, remountConnector, restoreConnectors,
   syncCustomConnectors, uninstallConnector,
 } from './market/connector-install.ts'
+import { registerConnectorOfferTool } from './market/connector-offer.ts'
 import type { ConnectorRequest } from './market/wire.ts'
 import { registerImageAskTool } from './media/ask-tool.ts'
 import { registerDocumentAskTool } from './media/doc-tool.ts'
@@ -55,7 +61,8 @@ import { registerImageShowTool } from './media/show-tool.ts'
 import { registerImageTool } from './media/tool.ts'
 import { registerVideoTool } from './media/video-tool.ts'
 import { imageCapableModels } from './media/vision.ts'
-import { ROUTE, syncModels, type SyncOutcome } from './models/sync.ts'
+import { ModelSyncCoordinator, type MutableModelDefaults } from './models/coordinator.ts'
+import { ROUTE, type SyncOutcome } from './models/sync.ts'
 import { registerToolReality } from './persona/tool-reality.ts'
 import { registerSearchProvider } from './web/search/provider.ts'
 
@@ -91,30 +98,17 @@ export interface Config {
   readonly videoModel?: string
 }
 
-interface RuntimeModelDefaults {
-  imageModel: string | undefined
-  videoModel: string | undefined
-  /**
-   * Models web search may spend a turn on, in the console's own order.
-   *
-   * A list rather than one name because that is what the console has always
-   * promised for this one purpose — first entry first, next entry when it does
-   * not work out — and `web/search/provider.ts` is what finally honours it.
-   */
-  searchModels: readonly string[]
-}
+type RuntimeModelDefaults = MutableModelDefaults
 
 /**
  * Default console origin.
  *
- * One station serves everything this product talks to — sign-in, the model
- * pool, the balance, the market, the image and video calls — and the chat
- * requests themselves leave from the kernel's own route rather than from here.
- * So the origin has to be stated in more than one place (`cordis.patch.yml`
- * carries it for the `llm-pi-ai` route and for web search), and the only way
- * those places stay in step is by reading the same variable. Point the variable
- * at a local relay and the whole product follows; leave it unset and every one
- * of them is production, which is what a shipped build wants.
+ * One station serves the account and every billed model call — sign-in, the
+ * model pool, balance, chat, search, image, and video. So that origin has to be
+ * stated in more than one place (`cordis.patch.yml` carries it for the
+ * `llm-pi-ai` route and for web search), and those places stay in step by
+ * reading the same variable. Product configuration and market content may be
+ * split in development; their routing is resolved independently below.
  *
  * The env seam is upstream's own idiom for exactly this, values included
  * (`dsh-base/cordis.patch.yml:151-154` reads
@@ -128,25 +122,6 @@ interface RuntimeModelDefaults {
  * localhost:3001` serves 101 models, `Host: 127.0.0.1:3001` serves nothing).
  */
 const DEFAULT_BASE_URL = process.env.OPENLUX_BASE_URL ?? 'https://api.openlux.ai'
-
-/**
- * TEMP 2026-08-21 — pin *only the market* at local admin-server so experts can
- * be browsed and installed while login / balance / models stay on
- * `DEFAULT_BASE_URL`. This is the old client's `YUNWU_MARKET_*` split, inlined
- * for one test session rather than added as a product knob.
- *
- * Verified the same hour: this token against
- * `http://localhost:3000/api/desktop-market/snapshot?type=expert` → HTTP 200,
- * 407 items. The production token against that origin is 401 (different
- * `tokens` table), which is why the pair has to be separate.
- *
- * After the test: set this to `null`. Do not ship it; the production shape is
- * still one origin once `/api/desktop-market/` is reverse-proxied there.
- */
-const TEMP_MARKET: { readonly baseUrl: string; readonly token: string } | null = {
-  baseUrl: 'http://localhost:3000',
-  token: 'sk-3vnqdqmSBpX9y4yTc2YyHoaJGNcqg1AOcyf574ifw5l9UfMS',
-}
 
 /** Who is signed in, as far as the browser needs to know. */
 export interface AccountStatus {
@@ -170,6 +145,14 @@ export function apply(ctx: Context, config: Config = {}): void {
     videoModel: config.videoModel,
     searchModels: [],
   }
+  const modelCoordinator = new ModelSyncCoordinator(
+    ctx,
+    baseUrl,
+    desktopConfigAccess(ctx, baseUrl),
+    modelDefaults,
+  )
+  const tokens = new TokenManager(ctx, balance, modelCoordinator)
+  const automations = installAutomationRuntime(ctx)
 
   // Installs run one at a time. They stage inside the same preset root and
   // verify by re-reading the roster, so two in flight could rename over each
@@ -182,11 +165,34 @@ export function apply(ctx: Context, config: Config = {}): void {
     return result
   }
 
+  // Account/session/key mutations use a distinct queue from market installs.
+  // A login and a token switch must never interleave their session and key.
+  let accountQueue: Promise<unknown> = Promise.resolve()
+  const serializeAccount: Serializer = <T>(task: () => Promise<T>): Promise<T> => {
+    const result = accountQueue.then(task, task)
+    accountQueue = result.catch(() => undefined)
+    return result
+  }
+
   // `handle` registers through the calling fiber's own effect, so the route
   // and its disposal already follow this plugin's lifetime.
   ctx.connection.rpc.handle(ACCOUNT_CHANNEL, async (endpoint, payload, signal) => {
     try {
-      return await route(ctx, baseUrl, balance, modelDefaults, serialize, endpoint, payload, signal)
+      if (endpoint.startsWith('automations.')) {
+        return { ok: true, value: await (await automations.get()).call(endpoint, payload) }
+      }
+      return await route(
+        ctx,
+        baseUrl,
+        balance,
+        tokens,
+        modelCoordinator,
+        serialize,
+        serializeAccount,
+        endpoint,
+        payload,
+        signal,
+      )
     } catch (error: unknown) {
       // A handler that throws becomes a plain-text 500 upstream
       // (`client/connection/src/rpc-host.ts:183-185`), and the browser sees a
@@ -214,9 +220,16 @@ export function apply(ctx: Context, config: Config = {}): void {
   // screen waits on is unchanged.
   ctx.effect(() => {
     const stop = new AbortController()
-    void syncCatalog(ctx, baseUrl, modelDefaults, 'startup', stop.signal)
+    void safeSyncCatalog(ctx, modelCoordinator, 'startup', stop.signal)
     return () => stop.abort()
   })
+
+  // Credential writes made outside this page (settings UI or external file
+  // edits) converge through the same latest-wins coordinator.
+  ctx.effect(() => ctx.on('credentials/reference-updated', (ref) => {
+    if (ref !== API_KEY_REF) return
+    void safeSyncCatalog(ctx, modelCoordinator, 'credential-update')
+  }))
 
   // Connectors the user connected on an earlier launch. They are loader entries
   // rather than files, so nothing else brings them back; and they are mounted
@@ -240,14 +253,20 @@ export function apply(ctx: Context, config: Config = {}): void {
   // The same origin and the same key serve the model-facing side of the
   // account: drawing and filming are billed to whoever is signed in here.
   const access = { baseUrl, apiKey: () => apiKey(ctx) }
-  registerImageTool(ctx, {
+  const captureAccess = async (): Promise<ConsoleAccess> => {
+    const captured = await modelCoordinator.captureAccess()
+    return { baseUrl: captured.baseUrl, apiKey: async () => captured.apiKey }
+  }
+  ctx.inject(['tools', 'attachments'], scope => registerImageTool(scope, {
     access,
+    captureAccess,
     model: () => modelDefaults.imageModel,
-  })
-  registerVideoTool(ctx, {
+  }))
+  ctx.inject(['tools', 'attachments'], scope => registerVideoTool(scope, {
     access,
+    captureAccess,
     model: () => modelDefaults.videoModel,
-  })
+  }))
   // Reaches no route and spends nothing: it shows a picture this machine already
   // has, which is how a delegated member's image gets back to the user at all
   // (`media/show-tool.ts`).
@@ -256,11 +275,18 @@ export function apply(ctx: Context, config: Config = {}): void {
   // picture to one that can, chosen from what was delivered rather than from a
   // name in this build (`media/vision.ts`). No `model` option for that reason —
   // the pick is per call, off the settings document the sync layer maintains.
-  registerImageAskTool(ctx, { access })
+  ctx.inject(['tools'], scope => registerImageAskTool(scope, { access, captureAccess }))
   // And the same move for documents, which no model here opens itself and the
   // kernel deliberately does not carry (`media/documents.ts`). Same reason for
   // having no `model` option: the pick is per call, off the delivered list.
-  registerDocumentAskTool(ctx, { access })
+  ctx.inject(['tools'], scope => registerDocumentAskTool(scope, { access, captureAccess }))
+
+  // The same shape once more, for capabilities no model can substitute for: when
+  // the ask needs somebody else's service, offer to connect one and carry on with
+  // the tools that arrive (`market/connector-offer.ts`). It pauses on the kernel's
+  // own question seam, so it registers itself only where that seam is mounted.
+  //
+  registerConnectorOfferTool(ctx, { access })
 
   // Web search is the fourth model-facing capability that has to pick a model
   // this key can actually use, and the one the console's delivered priority list
@@ -269,6 +295,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // still useful there.
   ctx.inject(['web'], scope => registerSearchProvider(scope, {
     access,
+    captureAccess,
     models: () => modelDefaults.searchModels,
   }))
 
@@ -285,6 +312,7 @@ export function apply(ctx: Context, config: Config = {}): void {
  * @param ctx - host context.
  * @param baseUrl - console origin.
  * @param balance - the per-process balance cache.
+ * @param tokens - host-only token and credential operations.
  * @param serialize - runs one task at a time across this channel.
  * @param endpoint - method name within this plugin's channel.
  * @param payload - request body, shaped per endpoint.
@@ -295,8 +323,10 @@ async function route(
   ctx: Context,
   baseUrl: string,
   balance: BalanceReader,
-  modelDefaults: RuntimeModelDefaults,
+  tokens: TokenManager,
+  modelCoordinator: ModelSyncCoordinator,
   serialize: Serializer,
+  serializeAccount: Serializer,
   endpoint: string,
   payload: unknown,
   signal?: AbortSignal,
@@ -315,23 +345,86 @@ async function route(
       return { ok: true, value: await runVerifyCaptcha(ctx, baseUrl, payload, signal) }
 
     case 'sign-in':
-      return { ok: true, value: await runSignIn(ctx, baseUrl, modelDefaults, payload, signal) }
+      return {
+        ok: true,
+        value: await serializeAccount(() => runSignIn(ctx, baseUrl, balance, modelCoordinator, payload, signal)),
+      }
 
     case 'sign-out':
-      return { ok: true, value: await runSignOut(ctx, balance) }
+      return {
+        ok: true,
+        value: await serializeAccount(() => runSignOut(ctx, balance, modelCoordinator)),
+      }
 
     case 'balance':
       return { ok: true, value: await balance.read(forceOf(payload), signal) }
 
+    case 'tokens.list':
+      return { ok: true, value: await tokens.list(signal) }
+
+    case 'tokens.groups':
+      return { ok: true, value: await tokens.groups(signal) }
+
+    case 'tokens.create':
+      return { ok: true, value: await serializeAccount(() => tokens.create(payload, signal)) }
+
+    case 'tokens.update':
+      return { ok: true, value: await serializeAccount(() => tokens.update(payload, signal)) }
+
+    case 'tokens.use':
+      return { ok: true, value: await serializeAccount(() => tokens.use(payload, signal)) }
+
+    case 'tokens.delete':
+      return { ok: true, value: await serializeAccount(() => tokens.remove(payload, signal)) }
+
     // Hand refresh. Mount and sign-in run their own rounds, so this is for the
     // case where the account gained models after both.
-    case 'models.sync':
-      return { ok: true, value: await syncCatalog(ctx, baseUrl, modelDefaults, 'manual', signal) }
+    case 'models.sync': {
+      const outcome = await safeSyncCatalog(ctx, modelCoordinator, 'manual', signal)
+      if (outcome.skipped === 'no-key' || outcome.skipped === 'no-pool' || outcome.skipped === 'empty-result') {
+        throw new Error('模型配置刷新失败，已保留上一次可用目录')
+      }
+      return {
+        ok: true,
+        value: {
+          outcome,
+          ...modelCoordinator.status(),
+        },
+      }
+    }
 
     // What the console offers this kernel. The browser cannot ask for itself:
     // the route authenticates with our token and answers without CORS headers.
     case 'market.catalog':
-      return { ok: true, value: await marketCatalog(ctx, marketAccess(ctx, baseUrl), payload, signal) }
+      return { ok: true, value: await marketCatalog(ctx, desktopConfigAccess(ctx, baseUrl), payload, signal) }
+
+    case 'market.home':
+      return { ok: true, value: await readHomeContent(ctx, desktopConfigAccess(ctx, baseUrl), signal) }
+
+    case 'market.featuredScenes':
+      return { ok: true, value: await readFeaturedScenes(ctx, desktopConfigAccess(ctx, baseUrl), signal) }
+
+    case 'market.relatedPlaybooks':
+      return {
+        ok: true,
+        value: await readRelatedPlaybooks(
+          ctx,
+          desktopConfigAccess(ctx, baseUrl),
+          slugOf(payload),
+          signal,
+        ),
+      }
+
+    case 'market.playbookArtifact':
+      return {
+        ok: true,
+        value: await readPlaybookArtifact(
+          ctx,
+          desktopConfigAccess(ctx, baseUrl),
+          positiveIdOf(payload),
+          signal,
+        ),
+      }
 
     // Where an install would land, and what the roster already holds. The
     // gallery needs both before it can mark a card installed, and the
@@ -340,7 +433,7 @@ async function route(
       return { ok: true, value: await marketTarget(ctx) }
 
     case 'market.install':
-      return await marketInstall(ctx, marketAccess(ctx, baseUrl), serialize, payload, signal)
+      return await marketInstall(ctx, desktopConfigAccess(ctx, baseUrl), serialize, payload, signal)
 
     // The skill partition's own "what is already there". Not folded into
     // `market.target`: that one answers for the preset roster, which can be
@@ -368,7 +461,9 @@ async function route(
     case 'market.connectorRequirement':
       return {
         ok: true,
-        value: await readConnectorRequirement(ctx, marketAccess(ctx, baseUrl), slugOf(payload), signal),
+        value: await readConnectorRequirement(
+          ctx, desktopConfigAccess(ctx, baseUrl), slugOf(payload), signal,
+        ),
       }
 
     // Start / stop one MCP server. The kernel has no `mcp set` and no browser
@@ -378,7 +473,7 @@ async function route(
       return {
         ok: true,
         value: await serialize(() => installConnector(
-          ctx, marketAccess(ctx, baseUrl), connectorRequestOf(payload), signal,
+          ctx, desktopConfigAccess(ctx, baseUrl), connectorRequestOf(payload), signal,
         )),
       }
 
@@ -388,7 +483,9 @@ async function route(
     case 'market.connectorAuthorize':
       return {
         ok: true,
-        value: await authorizeConnector(ctx, marketAccess(ctx, baseUrl), slugOf(payload), signal),
+        value: await authorizeConnector(
+          ctx, desktopConfigAccess(ctx, baseUrl), slugOf(payload), signal,
+        ),
       }
 
     case 'market.connectorAuthorizeState':
@@ -422,7 +519,10 @@ async function route(
     // because the manifest is a longtext column the snapshot withholds, and
     // asked only for the item whose detail page is open.
     case 'market.prompts':
-      return { ok: true, value: await marketPrompts(ctx, marketAccess(ctx, baseUrl), payload, signal) }
+      return {
+        ok: true,
+        value: await marketPrompts(ctx, desktopConfigAccess(ctx, baseUrl), payload, signal),
+      }
 
     // One file the user attached in the composer, on its way to becoming a path
     // the model's own tools can open. See `files/stage.ts` for why the bytes
@@ -524,6 +624,12 @@ async function marketCatalog(
 function catalogTypeOf(payload: unknown): CatalogType {
   const type = (payload as { type?: unknown } | null)?.type
   return type === 'skill' || type === 'connector' ? type : 'expert'
+}
+
+function positiveIdOf(payload: unknown): number {
+  const raw = (payload as { id?: unknown } | null)?.id
+  const id = typeof raw === 'number' ? raw : Number(raw)
+  return Number.isSafeInteger(id) && id > 0 ? id : 0
 }
 
 /**
@@ -757,7 +863,8 @@ type SignInReply =
 async function runSignIn(
   ctx: Context,
   baseUrl: string,
-  modelDefaults: RuntimeModelDefaults,
+  balance: BalanceReader,
+  modelCoordinator: ModelSyncCoordinator,
   payload: unknown,
   signal?: AbortSignal,
 ): Promise<SignInReply> {
@@ -771,8 +878,26 @@ async function runSignIn(
   if (outcome.kind !== 'ok') return outcome
 
   try {
+    await modelCoordinator.preflight(outcome.apiKey, signal)
+  } catch (error: unknown) {
+    return {
+      kind: 'failed',
+      message: `账号登录成功，但令牌模型目录校验失败：${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+  const previousSession = await readSession(ctx)
+  try {
+    await saveSession(ctx, outcome.session)
+  } catch (error: unknown) {
+    return {
+      kind: 'failed',
+      message: error instanceof Error ? error.message : String(error),
+    }
+  }
+  try {
     await ctx.credentials.set(API_KEY_REF, outcome.apiKey)
   } catch (error: unknown) {
+    await restoreSession(ctx, previousSession).catch(() => {})
     // The account is fine; this machine just cannot store the key, which
     // almost always means an environment variable is shadowing the slot. It
     // has to read as a failed sign-in, because nothing would work afterwards.
@@ -784,11 +909,28 @@ async function runSignIn(
         : `密钥保存失败：${detail}`,
     }
   }
-  // Seeding needs the key that was just stored, so a fresh account gets its
-  // list here rather than at the next launch. Detached on purpose: a slow
-  // square must not hold the sign-in screen open.
-  void syncCatalog(ctx, baseUrl, modelDefaults, 'sign-in')
+  balance.forget()
+  try {
+    await modelCoordinator.refresh('sign-in', signal, outcome.apiKey)
+  } catch (error: unknown) {
+    return {
+      kind: 'failed',
+      message: `登录和令牌保存成功，但模型目录刷新失败，可在设置中重试：${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
   return { kind: 'ok', userId: outcome.userId, username: outcome.username }
+}
+
+async function restoreSession(ctx: Context, session: StoredSession | undefined): Promise<void> {
+  if (session === undefined) {
+    await clearSession(ctx)
+    return
+  }
+  await saveSession(ctx, {
+    userId: session.userId,
+    baseUrl: session.baseUrl,
+    cookie: session.cookie,
+  })
 }
 
 /** Read the stored key, treating any credential fault as "not signed in yet". */
@@ -797,18 +939,55 @@ async function apiKey(ctx: Context): Promise<string | undefined> {
 }
 
 /**
- * Origin + token the market RPCs actually use.
+ * Origin + token for desktop product and market-client reads.
  *
- * Login, balance, model sync, and the media tools keep the console `baseUrl`.
- * Only catalog / prompts / install take this, which is how a TEMP local pair
- * can sit beside a production account without swapping credentials.
+ * Account/model traffic stays on the online station. Product configuration and
+ * every desktop-readable market contract live on local new-yunwu-api:
+ * `/api/desktop-content/*` is registered in
+ * `new-yunwu-api/router/api-router.go:554-570`. Admin-server owns the operator
+ * write routes only, so pointing these reads at it returns a real HTTP 404.
  */
-function marketAccess(ctx: Context, consoleBaseUrl: string): ConsoleAccess {
-  if (TEMP_MARKET !== null) {
-    const token = TEMP_MARKET.token
-    return { baseUrl: TEMP_MARKET.baseUrl, apiKey: async () => token }
+function desktopConfigAccess(ctx: Context, accountBaseUrl: string): ConsoleAccess {
+  const resolved = resolveDesktopConfigAccess(accountBaseUrl)
+  return {
+    baseUrl: resolved.baseUrl,
+    apiKey: resolved.token === undefined ? () => apiKey(ctx) : async () => resolved.token,
   }
-  return { baseUrl: consoleBaseUrl, apiKey: () => apiKey(ctx) }
+}
+
+/**
+ * Resolve product-config routing without exposing or persisting either token.
+ *
+ * Production remains same-origin when no local token is configured. During
+ * integration, `YUNWU_MARKET_TOKEN` is the local-station credential already
+ * used by the market, while the config read defaults to new-yunwu-api on 3001.
+ * `YUNWU_CONFIG_BASE_URL` exists for private deployments and non-default ports.
+ */
+export function resolveDesktopConfigAccess(
+  accountBaseUrl: string,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): { readonly baseUrl: string; readonly token?: string } {
+  const token = environment.YUNWU_MARKET_TOKEN?.trim()
+  const configuredBaseUrl = environment.YUNWU_CONFIG_BASE_URL?.trim()
+  const baseUrl = (
+    configuredBaseUrl
+    || (token === undefined || token === '' ? accountBaseUrl : 'http://localhost:3001')
+  ).replace(/\/+$/, '')
+  return { baseUrl, ...(token === undefined || token === '' ? {} : { token }) }
+}
+
+/** Resolve the account/market split without exposing or persisting either credential. */
+export function resolveMarketAccess(
+  consoleBaseUrl: string,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): { readonly baseUrl: string; readonly token?: string } {
+  const token = environment.YUNWU_MARKET_TOKEN?.trim()
+  const configuredBaseUrl = environment.YUNWU_MARKET_BASE_URL?.trim()
+  const baseUrl = (
+    configuredBaseUrl
+    || (token === undefined || token === '' ? consoleBaseUrl : 'http://localhost:3000')
+  ).replace(/\/+$/, '')
+  return { baseUrl, ...(token === undefined || token === '' ? {} : { token }) }
 }
 
 /**
@@ -823,53 +1002,14 @@ function marketAccess(ctx: Context, consoleBaseUrl: string): ConsoleAccess {
  * @param reason - what triggered it, for the log line.
  * @param signal - cancellation, when the caller owns a lifetime.
  */
-async function syncCatalog(
+async function safeSyncCatalog(
   ctx: Context,
-  baseUrl: string,
-  modelDefaults: RuntimeModelDefaults,
+  coordinator: ModelSyncCoordinator,
   reason: string,
   signal?: AbortSignal,
 ): Promise<SyncOutcome> {
   try {
-    const outcome = await syncModels(ctx, { baseUrl, apiKey: () => apiKey(ctx) }, signal)
-    let defaultsChanged = false
-    if (outcome.delivery?.configured === true) {
-      if (outcome.delivery.defaultImageModel !== undefined
-        && outcome.delivery.defaultImageModel !== modelDefaults.imageModel) {
-        modelDefaults.imageModel = outcome.delivery.defaultImageModel
-        defaultsChanged = true
-      }
-      if (outcome.delivery.defaultVideoModel !== undefined
-        && outcome.delivery.defaultVideoModel !== modelDefaults.videoModel) {
-        modelDefaults.videoModel = outcome.delivery.defaultVideoModel
-        defaultsChanged = true
-      }
-      // Search takes the list as it arrives, including empty: an operator who
-      // cleared the box means "go back to whatever the route can search with",
-      // and the provider reads that as no preference rather than as a refusal.
-      if (JSON.stringify(outcome.delivery.searchModels) !== JSON.stringify(modelDefaults.searchModels)) {
-        modelDefaults.searchModels = outcome.delivery.searchModels
-        defaultsChanged = true
-      }
-    }
-    const reported = defaultsChanged && !outcome.changed ? { ...outcome, changed: true } : outcome
-    if (reported.changed) {
-      // The source belongs in this line: "delivered 3 models" reads the same
-      // whether operations chose them or the built-in fallback did, and telling
-      // those apart is the first step of every "wrong rows in the picker" report.
-      ctx.logger.info(`openlux: model delivery synced (${reason}): `
-        + `${reported.models ?? 0} chat models, `
-        + `${reported.delivery?.searchModels.length ?? 0} search models, `
-        // "catalogue" rather than a name: with nothing delivered the media tools
-        // pick from what this key can serve at call time, so there is no answer
-        // to print here — and printing a build-time one would be a lie, which
-        // is what this line said before the compiled defaults were removed.
-        + `image=${modelDefaults.imageModel ?? 'catalogue'}, `
-        + `video=${modelDefaults.videoModel ?? 'catalogue'}`)
-    } else {
-      ctx.logger.debug(`openlux: model sync (${reason}) changed nothing: ${reported.skipped}`)
-    }
-    return reported
+    return await coordinator.refresh(reason, signal)
   } catch (error: unknown) {
     if (signal?.aborted !== true) {
       ctx.logger.warn(`openlux: model sync (${reason}) failed; leaving the list as it was`)
@@ -886,10 +1026,21 @@ async function syncCatalog(
  * the UI shows as signed out, which is the kind of gap that gets discovered as
  * an unexplained charge.
  */
-async function runSignOut(ctx: Context, balance: BalanceReader): Promise<{ ok: true }> {
-  balance.forget()
-  await clearSession(ctx)
+async function runSignOut(
+  ctx: Context,
+  balance: BalanceReader,
+  modelCoordinator: ModelSyncCoordinator,
+): Promise<{ ok: true }> {
+  // Disable paid API access first. If session clearing then fails the UI can
+  // safely retry; the inverse order can leave an invisible billable key live.
   await ctx.credentials.unset(API_KEY_REF)
+  modelCoordinator.invalidate()
+  balance.forget()
+  try {
+    await clearSession(ctx)
+  } catch (error: unknown) {
+    throw new Error(`API 密钥已停用，但登录会话清理失败，请重试退出：${error instanceof Error ? error.message : String(error)}`)
+  }
   return { ok: true }
 }
 

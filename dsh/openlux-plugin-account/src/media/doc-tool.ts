@@ -67,6 +67,8 @@ const description = 'Read a local document (PDF, Word, Excel, PowerPoint) by han
 export interface DocumentAskOptions {
   /** Route origin and token reader, shared with the account face. */
   readonly access: ConsoleAccess
+  /** Capture one token for candidate discovery and every upload attempt. */
+  readonly captureAccess?: () => Promise<ConsoleAccess>
 }
 
 /** What one call returns to the model. */
@@ -151,7 +153,8 @@ export function registerDocumentAskTool(ctx: Context, options: DocumentAskOption
       if (mismatch !== undefined) throw new DocumentError(`${path}：${mismatch}`)
 
       const asked = args.question?.trim()
-      const outcome = await askAboutDocument(ctx, options.access, {
+      const access = await options.captureAccess?.() ?? options.access
+      const outcome = await askAboutDocument(ctx, access, {
         data,
         mediaType,
         filename: basename(path),

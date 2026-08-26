@@ -18,18 +18,24 @@
  * would be a second answer. This one browses and installs.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
-import { Button, Input, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsLocale, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import {
+  Button, IconFolderOpenOutline16, IconPlusOutline16, IconRefreshOutline14, IconSearchOutline16,
+  IconSkillOutline16, Input, Menu, Pill,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
   Catalog, CatalogFailure, CatalogItem, CatalogType, ConnectorAuthorizationStart,
   ConnectorAuthorizationState, ConnectorRequirement, ConnectorTarget, CustomConnectorSync,
-  CustomOpen, InstallOutcome, InstallTarget, InstalledConnector, InstalledPreset, RemountOutcome,
-  SkillTarget,
+  CustomOpen, HomePlaybook, HomeShowcase, InstallOutcome, InstallTarget, InstalledConnector,
+  InstalledPreset, PlaybookArtifact, RemountOutcome, SkillTarget,
 } from '../market/wire.ts'
+import type { MarketKey } from './market-locales.ts'
 import { pickSkillDirectory } from './skill-pick.ts'
+import { skillCreationDraft } from './skill-create.ts'
 import { connectorRow } from './connector-rows.ts'
+import { FeaturedScenes } from './FeaturedScenes.tsx'
+import { useHorizontalDrag, useHorizontalWheel } from './horizontal-scroll.ts'
 import { MarketCard, describe, type CardState } from './MarketCard.tsx'
 import {
   ConnectorToken, CustomConnector, MarketConfirm, MarketDetail, MarketOutcome,
@@ -68,6 +74,14 @@ export interface MarketSectionInjected {
   readonly showChrome?: boolean
 }
 
+/** Market copy passed by the locale-owning overlay. */
+type MarketTranslate = (key: MarketKey, params?: Record<string, unknown>) => string
+
+/** The section is rendered directly by the overlay rather than by a slot. */
+type MarketSectionProps = MarketSectionInjected & {
+  readonly t: MarketTranslate
+}
+
 /**
  * The kernel preset that writes presets.
  *
@@ -89,6 +103,14 @@ const AUTHORIZE_TIMEOUT_MS = 5 * 60 * 1000
 type Kind = 'all' | 'agent' | 'team'
 
 /**
+ * How many rows the featured strip holds.
+ *
+ * Three, which is one grid row at the overlay's width — the same count
+ * WorkBuddy's «精选技能» shows above its own «换一换».
+ */
+const SPOTLIGHT = 3
+
+/**
  * Which partition the gallery is showing.
  *
  * The same three the console partitions its catalog into, and the same three
@@ -102,11 +124,40 @@ const TABS = ['expert', 'skill', 'connector'] as const
 /** One of {@link TABS}. */
 type Tab = typeof TABS[number]
 
+/**
+ * WorkBuddy keeps its expert first-page snapshot, featured scenes, and detail
+ * projections in module-level Maps. Match that process-lifetime contract:
+ * reopening the market reuses this snapshot; restarting the app creates a new
+ * module instance and performs one fresh revalidation.
+ */
+interface MarketProcessSnapshot {
+  readonly catalogs: Partial<Record<Tab, Catalog>>
+  target?: InstallTarget
+  skills?: SkillTarget
+  connectors?: ConnectorTarget
+  readonly prompts: Record<string, readonly string[]>
+  readonly relatedCasesBySlug: Record<string, readonly HomePlaybook[]>
+  featuredScenes?: readonly HomeShowcase[]
+}
+
+const marketProcessSnapshot: MarketProcessSnapshot = {
+  catalogs: {},
+  prompts: {},
+  relatedCasesBySlug: {},
+}
+
 /** Which tab's copy a key belongs to. */
 const TAB_COPY = {
-  expert: { name: 'tabExperts', intro: 'intro', search: 'searchPlaceholder' },
-  skill: { name: 'tabSkills', intro: 'introSkill', search: 'searchSkillPlaceholder' },
-  connector: { name: 'tabConnectors', intro: 'introConnector', search: 'searchConnectorPlaceholder' },
+  expert: {
+    name: 'tabExperts', intro: 'intro', search: 'searchPlaceholder', featured: 'featuredExperts',
+  },
+  skill: {
+    name: 'tabSkills', intro: 'introSkill', search: 'searchSkillPlaceholder', featured: 'featuredSkills',
+  },
+  connector: {
+    name: 'tabConnectors', intro: 'introConnector', search: 'searchConnectorPlaceholder',
+    featured: 'featuredConnectors',
+  },
 } as const
 
 /** A connect waiting on the secret its manifest asks for. */
@@ -132,7 +183,10 @@ interface PendingSummon {
 }
 
 const styles = {
-  root: { display: 'flex', flexDirection: 'column', gap: '12px' },
+  root: {
+    display: 'flex', flexDirection: 'column', gap: '12px',
+    width: '100%', minWidth: 0, maxWidth: '100%', overflowX: 'hidden',
+  },
   title: { color: 'var(--dsw-alias-label-primary)', fontSize: '15px', fontWeight: 600 },
   intro: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px', lineHeight: 1.6 },
   tabs: {
@@ -152,8 +206,35 @@ const styles = {
     borderBottom: '2px solid var(--dsw-alias-label-primary)', marginBottom: '-1px',
   },
   tabFill: { flex: 1 },
-  filters: { display: 'flex', flexDirection: 'column', gap: '8px' },
+  filters: {
+    display: 'flex', flexDirection: 'column', gap: '8px',
+    width: '100%', minWidth: 0, maxWidth: '100%',
+  },
+  // `contents` so the ref wrapper does not become a box of its own in the
+  // column: the Input keeps sitting where it sat.
+    searchRow: { display: 'flex', alignItems: 'center', gap: '8px' },
+    searchGrow: { display: 'flex', flex: 1, minWidth: 0 },
   chips: { display: 'flex', flexWrap: 'wrap', gap: '6px' },
+  categoryWrap: {
+    position: 'relative', width: '100%', minWidth: 0, maxWidth: '100%', overflow: 'hidden',
+  },
+  categoryChips: {
+    display: 'flex', flexWrap: 'nowrap', gap: '6px', minWidth: 0,
+    overflowX: 'auto', overflowY: 'hidden', paddingRight: '30px',
+    scrollbarWidth: 'none', cursor: 'grab', userSelect: 'none', touchAction: 'pan-y',
+  },
+  categoryItem: { display: 'inline-flex', flex: '0 0 auto' },
+  categoryNext: {
+    position: 'absolute', zIndex: 2, top: '50%', right: 0,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    width: '26px', height: '26px', padding: 0, border: 0, borderRadius: '50%',
+    transform: 'translateY(-50%)',
+    background: 'color-mix(in srgb, var(--dsw-alias-bg-layer-2) 94%, transparent)',
+    color: 'var(--dsw-alias-label-primary)', boxShadow: 'var(--dsw-shadow-lv1)',
+    cursor: 'pointer', fontSize: '20px', lineHeight: 1,
+  },
+  strip: { display: 'flex', alignItems: 'center', gap: '8px' },
+  stripTitle: { flex: 1, color: 'var(--dsw-alias-label-primary)', fontSize: '13px', fontWeight: 600 },
   grid: {
     display: 'grid',
     // Three columns in the 800px overlay panel, without hardcoding that width.
@@ -184,7 +265,7 @@ const styles = {
  * @param t - this section's copy.
  * @returns one sentence for the failure row.
  */
-function failureText(failure: CatalogFailure, t: TranslateNS<'openlux.market'>): string {
+function failureText(failure: CatalogFailure, t: MarketTranslate): string {
   switch (failure.kind) {
     case 'signed-out': return t('failedSignedOut')
     case 'http': return t('failedHttp', { status: failure.status })
@@ -199,7 +280,7 @@ function failureText(failure: CatalogFailure, t: TranslateNS<'openlux.market'>):
  * @returns the section content.
  */
 export function MarketSection(
-  props: PropsLocale<'openlux.market'> & MarketSectionInjected,
+  props: MarketSectionProps,
 ): ReactNode {
   const { callHost, language, summon, onDismiss, showChrome = true, t } = props
   const active = language()
@@ -214,16 +295,58 @@ export function MarketSection(
   //
   // `undefined` is "not read yet" and an empty item list is "read, and empty" —
   // the two render differently, so a boolean flag would lose the distinction.
-  const [catalogs, setCatalogs] = useState<Partial<Record<Tab, Catalog>>>({})
-  const [target, setTarget] = useState<InstallTarget | null>(null)
-  const [skills, setSkills] = useState<SkillTarget | null>(null)
-  const [connectors, setConnectors] = useState<ConnectorTarget | null>(null)
+  const [catalogs, setCatalogs] = useState<Partial<Record<Tab, Catalog>>>(
+    () => ({ ...marketProcessSnapshot.catalogs }),
+  )
+  const [target, setTarget] = useState<InstallTarget | null>(
+    () => marketProcessSnapshot.target ?? null,
+  )
+  const [skills, setSkills] = useState<SkillTarget | null>(
+    () => marketProcessSnapshot.skills ?? null,
+  )
+  const [connectors, setConnectors] = useState<ConnectorTarget | null>(
+    () => marketProcessSnapshot.connectors ?? null,
+  )
   const [reading, setReading] = useState(false)
+  const installedReads = useRef(new Set<Tab>())
 
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState<Kind>('all')
   const [category, setCategory] = useState(0)
+  // «我安装的»: a filter over the grid that is already on screen rather than a
+  // page of its own. See the copy note on `mineInstalled`.
+  const [onlyMine, setOnlyMine] = useState(false)
+  // Where the featured strip's window starts; «换一换» advances it.
+  const [spotlightAt, setSpotlightAt] = useState(0)
+  const [adding, setAdding] = useState(false)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const categoryRef = useRef<HTMLDivElement>(null)
   const catalog = catalogs[tab] ?? null
+  const [canCategoryNext, setCanCategoryNext] = useState(false)
+  const {
+    dragHandlers: categoryDragHandlers,
+    isDragging: categoryDragging,
+  } = useHorizontalDrag<HTMLDivElement>()
+  useHorizontalWheel(categoryRef, (catalog?.categories.length ?? 0) > 0)
+
+  const updateCategoryArrow = useCallback((): void => {
+    const row = categoryRef.current
+    if (row === null) return
+    setCanCategoryNext(row.scrollLeft + row.clientWidth < row.scrollWidth - 1)
+  }, [])
+
+  useEffect(() => {
+    updateCategoryArrow()
+    const row = categoryRef.current
+    if (row === null) return
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateCategoryArrow)
+      return () => window.removeEventListener('resize', updateCategoryArrow)
+    }
+    const observer = new ResizeObserver(updateCategoryArrow)
+    observer.observe(row)
+    return () => observer.disconnect()
+  }, [catalog?.categories.length, updateCategoryArrow])
 
   const [detail, setDetail] = useState<CatalogItem | undefined>()
   // The confirmation carries the question that opened it, not just the row: the
@@ -239,22 +362,52 @@ export function MarketSection(
   const [outcome, setOutcome] = useState<{ item: CatalogItem; outcome: InstallOutcome } | undefined>()
   // Opening questions per slug, asked once each: the manifest is a per-item
   // read the catalog snapshot deliberately withholds.
-  const [prompts, setPrompts] = useState<Record<string, readonly string[]>>({})
+  const [prompts, setPrompts] = useState<Record<string, readonly string[]>>(
+    () => ({ ...marketProcessSnapshot.prompts }),
+  )
+  // WorkBuddy resolves cases from one shared discover cache and renders no case
+  // placeholder. Keep the same per-session stability with a cache by expert.
+  const [relatedCasesBySlug, setRelatedCasesBySlug] = useState<
+    Record<string, readonly HomePlaybook[]>
+  >(() => ({ ...marketProcessSnapshot.relatedCasesBySlug }))
+  const [caseOpening, setCaseOpening] = useState<number>()
+  const [caseError, setCaseError] = useState<string>()
+  const [casePreview, setCasePreview] = useState<{
+    readonly item: HomePlaybook
+    readonly artifact: PlaybookArtifact
+  }>()
+  // WorkBuddy's expert center owns this strip. It is deliberately independent
+  // from the blank-session home, whose product content is not designed yet.
+  const [featuredScenes, setFeaturedScenes] = useState<readonly HomeShowcase[] | undefined>(
+    () => marketProcessSnapshot.featuredScenes,
+  )
+  const [featuredScenesReading, setFeaturedScenesReading] = useState(false)
+  const featuredScenesRequested = useRef(marketProcessSnapshot.featuredScenes !== undefined)
 
   /** Re-read what is installed for one partition; the card state derives from it. */
   const readInstalled = useCallback(async (which: Tab): Promise<void> => {
+    installedReads.current.add(which)
     if (which === 'skill') {
       const held = await callHost<SkillTarget>('market.skills', {})
-      if (held.ok) setSkills(held.value)
+      if (held.ok) {
+        marketProcessSnapshot.skills = held.value
+        setSkills(held.value)
+      }
       return
     }
     if (which === 'connector') {
       const live = await callHost<ConnectorTarget>('market.connectors', {})
-      if (live.ok) setConnectors(live.value)
+      if (live.ok) {
+        marketProcessSnapshot.connectors = live.value
+        setConnectors(live.value)
+      }
       return
     }
     const where = await callHost<InstallTarget>('market.target', {})
-    if (where.ok) setTarget(where.value)
+    if (where.ok) {
+      marketProcessSnapshot.target = where.value
+      setTarget(where.value)
+    }
   }, [callHost])
 
   const read = useCallback(async (which: Tab): Promise<void> => {
@@ -263,24 +416,44 @@ export function MarketSection(
       callHost<Catalog>('market.catalog', { type: which satisfies CatalogType }),
       readInstalled(which),
     ])
-    setCatalogs(current => ({
-      ...current,
-      [which]: rows.ok
-        ? rows.value
-        : {
-          kernelApi: '', items: [], categories: [],
-          failure: { kind: 'transport', message: rows.error.message },
-        },
-    }))
+    const next = rows.ok
+      ? rows.value
+      : {
+        kernelApi: '', items: [], categories: [],
+        failure: { kind: 'transport' as const, message: rows.error.message },
+      }
+    if (rows.ok) marketProcessSnapshot.catalogs[which] = rows.value
+    setCatalogs(current => ({ ...current, [which]: next }))
     setReading(false)
   }, [callHost, readInstalled])
 
-  // One read per partition, on first sight of it. A tab the user never opens
-  // costs no request.
+  // WorkBuddy reads each remote partition once per app process. Reopening this
+  // overlay restores the module snapshot synchronously; local install state is
+  // likewise reused and is refreshed by the install actions themselves.
   useEffect(() => {
-    if (catalogs[tab] !== undefined) return
-    void read(tab)
-  }, [tab, catalogs, read])
+    if (catalogs[tab] === undefined) {
+      void read(tab)
+      return
+    }
+    const installedKnown = tab === 'expert'
+      ? marketProcessSnapshot.target !== undefined
+      : tab === 'skill'
+        ? marketProcessSnapshot.skills !== undefined
+        : marketProcessSnapshot.connectors !== undefined
+    if (!installedKnown && !installedReads.current.has(tab)) void readInstalled(tab)
+  }, [tab, catalogs, read, readInstalled])
+
+  useEffect(() => {
+    if (tab !== 'expert' || featuredScenesRequested.current) return
+    featuredScenesRequested.current = true
+    setFeaturedScenesReading(true)
+    void callHost<readonly HomeShowcase[]>('market.featuredScenes', {}).then(reply => {
+      const next = reply.ok ? reply.value : []
+      if (reply.ok && next.length > 0) marketProcessSnapshot.featuredScenes = next
+      setFeaturedScenes(next)
+      setFeaturedScenesReading(false)
+    })
+  }, [callHost, tab])
 
   const installedById = useMemo(() => {
     const map = new Map<string, InstalledPreset>()
@@ -305,6 +478,36 @@ export function MarketSection(
     [categories],
   )
 
+  /**
+   * How many rows of this partition the user holds, when that is a number this
+   * surface owns and it is not zero.
+   *
+   * Absent on the expert tab: the roster it would count includes presets we
+   * never installed (the kernel's own, and anything authored by hand), so the
+   * count would not be «我安装的». That tab has «我的专家» for this errand.
+   * Absent at zero because a chip that filters to nothing is not a filter —
+   * which is the same condition WorkBuddy's own count button carries
+   * (`totalInstalledCount > 0 &&`).
+   */
+  const mineCount = useMemo((): number | undefined => {
+    const held = tab === 'skill'
+      ? skills?.installed.length
+      : tab === 'connector' ? connectors?.installed.length : undefined
+    return held === undefined || held === 0 ? undefined : held
+  }, [tab, skills, connectors])
+
+  // Removing the last installed row takes the chip away with it; without this
+  // the filter would stay on with nothing left to turn it off.
+  useEffect(() => {
+    if (mineCount === undefined && onlyMine) setOnlyMine(false)
+  }, [mineCount, onlyMine])
+
+  /** Whether one row of the partition on screen is already in place. */
+  const isInstalled = useCallback((slug: string): boolean => {
+    if (tab === 'skill') return installedSkills.has(slug)
+    return tab === 'connector' ? connectedBySlug.has(slug) : installedById.has(slug)
+  }, [tab, installedSkills, connectedBySlug, installedById])
+
   const shown = useMemo(() => {
     const needle = query.trim().toLowerCase()
     return (catalog?.items ?? []).filter(item => {
@@ -312,12 +515,49 @@ export function MarketSection(
       // no such halves, and its rows all carry `team: false`.
       if (tab === 'expert' && kind === 'team' && !item.team) return false
       if (tab === 'expert' && kind === 'agent' && item.team) return false
+      if (onlyMine && !isInstalled(item.slug)) return false
       if (category !== 0 && item.categoryId !== category) return false
       if (needle === '') return true
       const haystack = [item.name, item.slug, describe(item, active), ...item.tags].join(' ').toLowerCase()
       return haystack.includes(needle)
     })
-  }, [catalog, query, kind, category, active, tab])
+  }, [catalog, query, kind, category, active, tab, onlyMine, isInstalled])
+
+  /**
+   * The strip above the grid: what the console marked as featured.
+   *
+   * Only while nothing is filtered — the strip answers «有什么值得看的», and a
+   * user who has typed a query or picked a category has already answered it.
+   * An installed row is dropped rather than shown with a check, because the
+   * strip exists to introduce rows and that one is introduced.
+   */
+  const spotlight = useMemo(() => {
+    // Experts are curated by scene, not by a second copy of expert cards.
+    if (tab === 'expert') return []
+    if (query.trim() !== '' || category !== 0 || onlyMine || kind !== 'all') return []
+    const rows = (catalog?.items ?? []).filter(
+      item => item.featured && item.unavailable === undefined && !isInstalled(item.slug),
+    )
+    if (rows.length < SPOTLIGHT) return rows
+    return Array.from(
+      { length: SPOTLIGHT },
+      (_, index) => rows[(spotlightAt + index) % rows.length] as CatalogItem,
+    )
+  }, [catalog, query, category, onlyMine, kind, isInstalled, spotlightAt, tab])
+
+  /**
+   * The grid, minus whatever the strip is already showing.
+   *
+   * The catalog arrives featured-first, so the three rows in the strip were also
+   * the first three of the grid: the same cards appeared twice, adjacent, which
+   * reads as a rendering fault rather than as a recommendation. «换一换» moves
+   * the strip's window, and a row it drops reappears in the grid on the spot.
+   */
+  const grid = useMemo(() => {
+    if (spotlight.length === 0) return shown
+    const above = new Set(spotlight.map(row => row.slug))
+    return shown.filter(row => !above.has(row.slug))
+  }, [shown, spotlight])
 
   /** Why one row cannot be installed, or undefined when it can. */
   const blockedReason = useCallback((item: CatalogItem): string | undefined => {
@@ -420,9 +660,23 @@ export function MarketSection(
     if (known !== undefined) return known
     const reply = await callHost<{ prompts: readonly string[] }>('market.prompts', { id: slug })
     const rows = reply.ok ? reply.value.prompts : []
+    marketProcessSnapshot.prompts[slug] = rows
     setPrompts(current => ({ ...current, [slug]: rows }))
     return rows
   }, [callHost, prompts])
+
+  /** Resolve a related case's short-lived artifact without changing the market page. */
+  const openRelatedCase = useCallback(async (item: HomePlaybook): Promise<void> => {
+    setCaseOpening(item.id)
+    setCaseError(undefined)
+    const reply = await callHost<PlaybookArtifact>('market.playbookArtifact', { id: item.id })
+    setCaseOpening(undefined)
+    if (!reply.ok) {
+      setCaseError(t('homeOpenFailed', { message: reply.error.message }))
+      return
+    }
+    setCasePreview({ item, artifact: reply.value })
+  }, [callHost, t])
 
   /**
    * Leave the overlay for a new session running this expert.
@@ -444,6 +698,7 @@ export function MarketSection(
     const opening = prompt
       ?? carried?.[0]
       ?? installedById.get(item.slug)?.prompts?.[0]
+      ?? item.openingPrompts?.[0]
       ?? (await readPrompts(item.slug))[0]
     setDetail(undefined)
     summon({ preset: item.slug, prompt: opening ?? '' })
@@ -777,6 +1032,38 @@ export function MarketSection(
   }, [callHost, readInstalled, t])
 
   /**
+   * «试一试» on a skill that is already installed.
+   *
+   * A session with the skill named in the composer, and no preset switch: a
+   * skill is not a composition, it is a document whichever agent is running may
+   * open, so the useful landing is the ordinary agent holding a sentence that
+   * mentions it. WorkBuddy's own installed card does the same thing under the
+   * same tooltip (`skills.tryNow` -> `onTryNow`).
+   */
+  const trySkill = useCallback((item: CatalogItem): void => {
+    if (summon === undefined) return
+    setDetail(undefined)
+    summon({ prompt: t('skillTryPrompt', { name: item.name }) })
+    onDismiss?.()
+  }, [summon, onDismiss, t])
+
+  /**
+   * «创建技能»: start writing one in a session.
+   *
+   * WorkBuddy enters this flow with `skill-creator` active. DSH already has the
+   * equivalent literal `/name` invocation pipeline, so the draft builder uses
+   * it when that skill is installed and keeps the descriptive prompt as the
+   * safe fallback. A skill remains independent of an Agent preset: it is a
+   * directory with a `SKILL.md` which the current agent writes.
+   */
+  const createSkill = useCallback((): void => {
+    if (summon === undefined || skills === null) return
+    const prompt = t('skillCreatePrompt')
+    summon(skillCreationDraft(skills, prompt))
+    onDismiss?.()
+  }, [summon, onDismiss, skills, t])
+
+  /**
    * Land on an expert that is already on disk.
    *
    * Straight to the summon: the opening question rides in the sidecar the
@@ -810,20 +1097,42 @@ export function MarketSection(
     onDismiss?.()
   }, [summon, onDismiss, t])
 
-  /** Whether one row of the partition on screen is already in place. */
-  const isInstalled = useCallback((slug: string): boolean => {
-    if (tab === 'skill') return installedSkills.has(slug)
-    return tab === 'connector' ? connectedBySlug.has(slug) : installedById.has(slug)
-  }, [tab, installedSkills, connectedBySlug, installedById])
-
   const destination = target?.root === undefined || pending === undefined
     ? ''
     : `${target.root}\\${pending.item.slug}`
   const detailBlocked = detail === undefined ? undefined : blockedReason(detail)
-  // The sidecar copy first: an installed expert answers this without a request.
+  // The catalog carries these exactly as WorkBuddy's expert object does, so a
+  // first-open detail does not grow its question section after a network read.
   const detailPrompts = detail === undefined
     ? []
-    : installedById.get(detail.slug)?.prompts ?? prompts[detail.slug] ?? []
+    : detail.openingPrompts
+      ?? installedById.get(detail.slug)?.prompts
+      ?? prompts[detail.slug]
+      ?? []
+  const relatedCases = detail === undefined ? undefined : relatedCasesBySlug[detail.slug]
+
+  const openDetail = useCallback((item: CatalogItem): void => {
+    setDetail(item)
+    setCasePreview(undefined)
+    setCaseError(undefined)
+  }, [])
+
+  useEffect(() => {
+    if (detail === undefined || tab !== 'expert') return
+    if (relatedCasesBySlug[detail.slug] !== undefined) return
+    let active = true
+    void callHost<readonly HomePlaybook[]>('market.relatedPlaybooks', { slug: detail.slug }).then(reply => {
+      if (!active) return
+      if (reply.ok) {
+        marketProcessSnapshot.relatedCasesBySlug[detail.slug] = reply.value
+        setRelatedCasesBySlug(current => ({ ...current, [detail.slug]: reply.value }))
+        return
+      }
+      setRelatedCasesBySlug(current => ({ ...current, [detail.slug]: [] }))
+      setCaseError(t('caseLoadFailed', { message: reply.error.message }))
+    })
+    return () => { active = false }
+  }, [callHost, detail, relatedCasesBySlug, tab, t])
 
   // Suggestions are only worth reading where they can be acted on, and only for
   // the one item whose sheet is open — the manifest is a per-item read.
@@ -832,9 +1141,65 @@ export function MarketSection(
     // Opening questions are an expert's; a skill publishes none, and asking for
     // one would spend a per-item console read to be told so.
     if (tab !== 'expert') return
+    if (detail.openingPrompts !== undefined) return
     if (detailPrompts.length > 0) return
     void readPrompts(detail.slug)
   }, [tab, detail, summon, detailPrompts, readPrompts])
+
+  /**
+   * Draw one row, wired to whichever partition is on screen.
+   *
+   * A function rather than repeated JSX: the featured strip and the grid below
+   * it hold the same kind of row, and two copies of this wiring would drift.
+   * @param item - the catalog row.
+   * @returns its card.
+   */
+  const card = (item: CatalogItem, index: number): ReactNode => (
+    <MarketCard
+      key={item.slug}
+      item={item}
+      state={stateOf(item)}
+      language={active}
+      t={t}
+      // A skill is never summoned into a session: it is loaded by the model when
+      // the task matches, so its button says "install" even in a window that
+      // has a conversation.
+      summonable={tab === 'expert' && summon !== undefined}
+      priorityAvatarLoad={index < 4}
+      // The expert tab keeps the word, the other two the plus — which is how
+      // WorkBuddy draws its two shelves (see `primaryLook`). A plus on an expert
+      // card says «add this to my machine», and that is the skill shelf's act,
+      // not this one's.
+      primaryLook={tab === 'expert' ? 'text' : 'glyph'}
+      {...tab === 'connector'
+        ? {
+          words: {
+            primary: t('connect'),
+            busy: t('connecting'),
+            done: t('connected'),
+            unhealthy: t('connectorOfflineBadge'),
+          },
+        }
+        : {}}
+      {...tab === 'expert' && summon !== undefined && installedById.has(item.slug)
+        ? { onTry: () => { void primary(item) }, tryLabel: t('summon') }
+        : {}}
+      {...tab === 'skill' && summon !== undefined && installedSkills.has(item.slug)
+        ? { onTry: () => trySkill(item), tryLabel: t('tryNow') }
+        : {}}
+      {...tab === 'skill' && installedSkills.has(item.slug)
+        ? { onRemove: () => { void removeSkill(item.slug) }, removeLabel: t('skillRemove') }
+        : {}}
+      {...tab === 'connector' && connectedBySlug.has(item.slug)
+        ? { onRemove: () => { void disconnect(item.slug) }, removeLabel: t('disconnect') }
+        : {}}
+      {...connectorRow(connectedBySlug.get(item.slug), installing === item.slug)?.repairable === true
+        ? { onRepair: () => { void repair(item) }, repairLabel: t('connectorReauthorize') }
+        : {}}
+      onOpen={() => openDetail(item)}
+      onPrimary={() => { void primary(item) }}
+    />
+  )
 
   // A whole-body swap rather than a tab: the page has its own bar, and the
   // catalog's filters would say nothing about a roster read from disk. This is
@@ -880,6 +1245,15 @@ export function MarketSection(
               setTab(id)
               setCategory(0)
               setQuery('')
+              setOnlyMine(false)
+              setSpotlightAt(0)
+              // The sheet belongs to the row that opened it, and that row
+              // belongs to the tab being left: an open sheet would keep the
+              // skill on screen while the sheet reads it as a connector, since
+              // what it is is now taken from the tab rather than guessed.
+              setDetail(undefined)
+              setCasePreview(undefined)
+              setCaseError(undefined)
             }}
           >
             {t(TAB_COPY[id].name)}
@@ -903,26 +1277,72 @@ export function MarketSection(
             {t('mine')}
           </Button>
         )}
+        {/*
+          «添加技能» opens the same two-way choice WorkBuddy's does — find one, or
+          write one — with «从本地添加» kept as a third row because a directory on
+          this machine is a skill the shelf will never carry.
+        */}
         {tab === 'skill' && (
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={installing !== undefined}
-            data-testid="openlux-market-add-skill"
-            onClick={() => { void addLocalSkill() }}
-          >
-            {t('skillAddLocal')}
-          </Button>
+          <Menu
+            open={adding}
+            align="end"
+            portal
+            items={[
+              { id: 'find', label: t('skillFind'), icon: <IconSearchOutline16 /> },
+              ...summon === undefined
+                ? []
+                : [{
+                  id: 'create',
+                  label: t('skillCreate'),
+                  icon: <IconSkillOutline16 />,
+                  disabled: skills === null,
+                }],
+              {
+                id: 'local',
+                label: t('skillAddLocal'),
+                icon: <IconFolderOpenOutline16 />,
+                disabled: installing !== undefined,
+              },
+            ]}
+            onClose={() => setAdding(false)}
+            onSelect={id => {
+              setAdding(false)
+              if (id === 'find') {
+                searchRef.current?.querySelector('input')?.focus()
+                return
+              }
+              if (id === 'create') {
+                createSkill()
+                return
+              }
+              void addLocalSkill()
+            }}
+            anchor={(
+              <Button
+                variant="primary"
+                size="sm"
+                icon={<IconPlusOutline16 />}
+                data-testid="openlux-market-add-skill"
+                onClick={() => setAdding(open => !open)}
+              >
+                {t('skillAdd')}
+              </Button>
+            )}
+          />
         )}
         {/*
           Beside the tabs rather than among the cards, which is where WorkBuddy
           puts the same button (`ec-topbar__right`): what it opens is a file,
           and a card for a row this gallery cannot edit would be a lie.
         */}
+        {/* Primary, like «添加技能» one tab over: on both tabs this seat is «add
+            one the shelf does not have», and two shapes for one act read as two
+            different kinds of thing. */}
         {tab === 'connector' && connectors?.mountable === true && (
           <Button
-            variant="ghost"
+            variant="primary"
             size="sm"
+            icon={<IconPlusOutline16 />}
             data-testid="openlux-market-custom"
             onClick={() => { void openCustom() }}
           >
@@ -934,12 +1354,52 @@ export function MarketSection(
       </div>
 
       <div style={styles.filters}>
-        <Input
-          value={query}
-          placeholder={t(TAB_COPY[tab].search)}
-          data-testid="openlux-market-search"
-          onChange={event => setQuery(event.target.value)}
-        />
+        <div style={styles.searchRow}>
+          {/* The span carries the ref: this Input is a function component on
+              React 18, so a ref passed to it would not reach the field that
+              «查找技能» has to focus. */}
+          <span ref={searchRef} style={styles.searchGrow}>
+            <Input
+              value={query}
+              icon={<IconSearchOutline16 />}
+              placeholder={t(TAB_COPY[tab].search)}
+              // The primitive's wrapper is `flex: 0 1 auto` and takes no style of
+              // its own, so the field is as wide as its intrinsic size and no
+              // wrapper of ours can stretch it. `size` is that intrinsic size —
+              // a plain attribute that passes through to the input — and the
+              // wrapper still shrinks when the dialog gets narrow.
+              size={44}
+              data-testid="openlux-market-search"
+              onChange={event => setQuery(event.target.value)}
+            />
+          </span>
+          {/* Beside the search field rather than among the categories: it answers
+              a different question from them («哪些是我的» against «这一类有什么»),
+              and a returning user reaches for it before reading any chip. */}
+          {mineCount !== undefined && (
+            <Pill
+              active={onlyMine}
+              data-testid="openlux-market-mine-filter"
+              onClick={() => setOnlyMine(current => !current)}
+            >
+              {t(tab === 'connector' ? 'mineConnected' : 'mineInstalled', { count: mineCount })}
+            </Pill>
+          )}
+        </div>
+        {tab === 'expert'
+          && query.trim() === ''
+          && !onlyMine && (
+            <FeaturedScenes
+              scenes={featuredScenes ?? []}
+              experts={catalog?.items ?? []}
+              loading={featuredScenesReading}
+              resolvingExperts={catalog === null}
+              title={t('featuredExperts')}
+              previousLabel={t('scrollPrevious')}
+              nextLabel={t('scrollNext')}
+              onExpertOpen={openDetail}
+            />
+          )}
         {tab === 'expert' && (
           <div style={styles.chips}>
             {([['all', 'kindAll'], ['agent', 'kindAgent'], ['team', 'kindTeam']] as const).map(([id, key]) => (
@@ -948,13 +1408,37 @@ export function MarketSection(
           </div>
         )}
         {categories.length > 0 && (
-          <div style={styles.chips}>
-            <Pill active={category === 0} onClick={() => setCategory(0)}>{t('categoryAll')}</Pill>
-            {categories.map(row => (
-              <Pill key={row.id} active={category === row.id} onClick={() => setCategory(row.id)}>
-                {row.name}
-              </Pill>
-            ))}
+          <div style={styles.categoryWrap}>
+            <div
+              ref={categoryRef}
+              style={{
+                ...styles.categoryChips,
+                cursor: categoryDragging ? 'grabbing' : 'grab',
+              }}
+              onScroll={updateCategoryArrow}
+              {...categoryDragHandlers}
+            >
+              <span style={styles.categoryItem}>
+                <Pill active={category === 0} onClick={() => setCategory(0)}>{t('categoryAll')}</Pill>
+              </span>
+              {categories.map(row => (
+                <span key={row.id} style={styles.categoryItem}>
+                  <Pill active={category === row.id} onClick={() => setCategory(row.id)}>
+                    {row.name}
+                  </Pill>
+                </span>
+              ))}
+            </div>
+            {canCategoryNext && (
+              <button
+                type="button"
+                style={styles.categoryNext}
+                aria-label={t('scrollNext')}
+                onClick={() => categoryRef.current?.scrollBy({ left: 160, behavior: 'smooth' })}
+              >
+                ›
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -1017,58 +1501,70 @@ export function MarketSection(
         <span style={styles.status}>{t('emptyCatalog')}</span>
       )}
 
-      {shown.length > 0 && (
-        <div style={styles.grid}>
-          {shown.map(item => (
-            <MarketCard
-              key={item.slug}
-              item={item}
-              state={stateOf(item)}
-              language={active}
-              t={t}
-              // A skill is never summoned into a session: it is loaded by the
-              // model when the task matches, so its button says "install" even
-              // in a window that has a conversation.
-              summonable={tab === 'expert' && summon !== undefined}
-              {...tab === 'connector'
-                ? {
-                  words: {
-                    primary: t('connect'),
-                    busy: t('connecting'),
-                    done: t('connected'),
-                    unhealthy: t('connectorOfflineBadge'),
-                  },
-                }
-                : {}}
-              {...tab === 'skill' && installedSkills.has(item.slug)
-                ? { onRemove: () => { void removeSkill(item.slug) }, removeLabel: t('skillRemove') }
-                : {}}
-              {...tab === 'connector' && connectedBySlug.has(item.slug)
-                ? { onRemove: () => { void disconnect(item.slug) }, removeLabel: t('disconnect') }
-                : {}}
-              {...connectorRow(connectedBySlug.get(item.slug), installing === item.slug)?.repairable === true
-                ? { onRepair: () => { void repair(item) }, repairLabel: t('connectorReauthorize') }
-                : {}}
-              onOpen={() => setDetail(item)}
-              onPrimary={() => { void primary(item) }}
-            />
-          ))}
-        </div>
+      {spotlight.length > 0 && (
+        <>
+          <div style={styles.strip}>
+            <span style={styles.stripTitle}>{t(TAB_COPY[tab].featured)}</span>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<IconRefreshOutline14 />}
+              data-testid="openlux-market-shuffle"
+              onClick={() => setSpotlightAt(at => at + SPOTLIGHT)}
+            >
+              {t('shuffle')}
+            </Button>
+          </div>
+          <div style={styles.grid}>{spotlight.map(card)}</div>
+        </>
       )}
+
+      {grid.length > 0 && <div style={styles.grid}>{grid.map(card)}</div>}
 
       <MarketDetail
         item={detail}
         language={active}
         categoryName={detail === undefined ? '' : categoryName(detail.categoryId)}
+        kind={tab}
         t={t}
         summonable={tab === 'expert' && summon !== undefined}
         installed={detail !== undefined && isInstalled(detail.slug)}
         prompts={detail === undefined ? [] : detailPrompts}
+        promptLoading={detail !== undefined
+          && tab === 'expert'
+          && summon !== undefined
+          && detail.openingPrompts === undefined
+          && installedById.get(detail.slug)?.prompts === undefined
+          && prompts[detail.slug] === undefined}
+        {...relatedCases === undefined ? {} : { relatedCases }}
+        {...caseOpening === undefined ? {} : { caseOpening }}
+        {...caseError === undefined ? {} : { caseError }}
+        {...casePreview === undefined ? {} : { casePreview }}
+        onCaseOpen={item => { void openRelatedCase(item) }}
+        onCaseBack={() => {
+          setCasePreview(undefined)
+          setCaseError(undefined)
+        }}
+        {...summon === undefined || detail === undefined
+          ? {}
+          : {
+            onCaseUse: (playbook: HomePlaybook): void => {
+              setCasePreview(undefined)
+              void primary(detail, playbook.initPrompt)
+            },
+          }}
+        {...tab === 'skill' && summon !== undefined && detail !== undefined
+          ? { onTry: () => trySkill(detail), tryLabel: t('tryNow') }
+          : {}}
         {...detailBlocked === undefined ? {} : { blocked: detailBlocked }}
         {...detail === undefined || detailBlocked !== undefined
           ? {}
           : { onPrimary: (prompt?: string): void => { void primary(detail, prompt) } }}
-        onClose={() => setDetail(undefined)}
+        onClose={() => {
+          setDetail(undefined)
+          setCasePreview(undefined)
+          setCaseError(undefined)
+        }}
       />
 
       <MarketConfirm

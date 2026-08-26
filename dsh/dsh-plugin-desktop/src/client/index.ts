@@ -11,11 +11,21 @@ import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
 import { applyAdvancedShell } from './advanced-shell.ts'
 import { startRendererBootReporter } from './boot-health.ts'
 import { BRAND_PRIORITY, BrandMark, BrandName } from './Brand.tsx'
+import {
+  installDesktopDirectoryPickerBridge,
+  requestDesktopDirectoryValidation,
+} from './directory-picker.ts'
 import { keepDocumentTitle } from './document-title.ts'
 import { parseDesktopClientEnvironment } from './environment.ts'
+import { installWorkspaceFolderDrop } from './workspace-folder-drop.ts'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
 export { BRAND_PRIORITY, BrandMark, BrandName } from './Brand.tsx'
+export {
+  installDesktopDirectoryPickerBridge,
+  requestDesktopDirectory,
+  requestDesktopDirectoryValidation,
+} from './directory-picker.ts'
 export { brandedTitle, keepDocumentTitle } from './document-title.ts'
 export {
   RENDERER_BOOT_REPORT_PATH,
@@ -27,11 +37,12 @@ export type { RendererBootLoader, RendererBootReport } from './boot-health.ts'
 export { parseDesktopClientEnvironment } from './environment.ts'
 export type { DesktopClientEnvironment, DesktopClientMode, DesktopClientPlatform } from './environment.ts'
 
-/** Services required by Desktop settings and advanced presentation. */
+/** Services required by Desktop presentation and Workspace adoption. */
 export const inject = [
   'slots',
   'sessions',
   'theme',
+  'workspaces',
 ]
 
 /** Register desktop-owned client surfaces for the current BrowserWindow mode. @param ctx - browser Cordis context. */
@@ -45,6 +56,14 @@ export function apply(ctx: ClientContext): void {
   // The served title holds until a session is opened; after that the title is
   // the kernel's to write, and it writes upstream's name (`document-title.ts`).
   ctx.effect(() => keepDocumentTitle(), 'dsh-plugin-desktop: window title brand')
+  ctx.effect(
+    () => installWorkspaceFolderDrop({
+      create: input => ctx.workspaces.create(input),
+      startSession: workspaceId => { ctx.workspaces.startSession(workspaceId) },
+      validateDirectory: requestDesktopDirectoryValidation,
+    }),
+    'dsh-plugin-desktop: Workspace folder drop',
+  )
   // Both modes render the upstream sidebar and hero, so both seats are taken
   // here rather than inside the advanced branch. Each registration waits on its
   // slot: the declaring packages activate independently of this one.
@@ -60,5 +79,11 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.hero.brand.mark',
     priority: BRAND_PRIORITY,
   }, BrandMark))
+  if (environment.platform === 'win32') {
+    ctx.effect(
+      () => installDesktopDirectoryPickerBridge(),
+      'dsh-plugin-desktop: native directory picker bridge',
+    )
+  }
   if (environment.mode === 'advanced') applyAdvancedShell(ctx, environment)
 }

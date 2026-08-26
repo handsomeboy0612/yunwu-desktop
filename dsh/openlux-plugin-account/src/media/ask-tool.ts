@@ -23,6 +23,7 @@ import { readFile, stat } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { isTokenCredentialFailure } from '../account/http.ts'
 import type { ConsoleAccess } from '../market/console.ts'
 import { sniffImageType } from './images.ts'
 import { IMAGE_ASK_TOOL_NAME } from './name.ts'
@@ -59,6 +60,8 @@ const description = 'Look at a local image file by having it read by a model tha
 export interface ImageAskOptions {
   /** Route origin and token reader, shared with the account face. */
   readonly access: ConsoleAccess
+  /** Capture one token for catalogue selection and every paid attempt. */
+  readonly captureAccess?: () => Promise<ConsoleAccess>
 }
 
 /** What one call returns to the model. */
@@ -141,23 +144,35 @@ export function registerImageAskTool(ctx: Context, options: ImageAskOptions): vo
         throw new VisionError(`${path} 不是 PNG / JPEG / WebP / GIF 图片，读图这条路只认这四种格式。`)
       }
 
+      const access = await options.captureAccess?.() ?? options.access
       const capable = imageCapableModels(ctx)
-      const model = capable[0]
-      if (model === undefined) {
+      const candidates = capable.slice(0, 3)
+      if (candidates.length === 0) {
         // Nothing local can fix this, and the operator's console is where it is
         // fixed, so the refusal says that instead of naming a model we wish for.
         throw new VisionError('当前账号下没有能读图的模型可用：模型清单里没有一个标着可以收图。'
           + '请在管理端的模型下发里放一个支持图片输入的对话模型，或改用能读图的模型继续。')
       }
-      const outcome = await lookAtImage(ctx, options.access, {
-        data,
-        mediaType,
-        question: args.question?.trim() === undefined || args.question.trim() === ''
-          ? DEFAULT_QUESTION
-          : args.question.trim(),
-        model,
-      }, exec.signal)
-      return { answer: outcome.answer, model: outcome.model }
+      const failures: string[] = []
+      for (const [index, model] of candidates.entries()) {
+        try {
+          const outcome = await lookAtImage(ctx, access, {
+            data,
+            mediaType,
+            question: args.question?.trim() === undefined || args.question.trim() === ''
+              ? DEFAULT_QUESTION
+              : args.question.trim(),
+            model,
+          }, exec.signal)
+          ctx.logger.info(`openlux: image_ask succeeded after ${String(index + 1)} attempt(s)`)
+          return { answer: outcome.answer, model: outcome.model }
+        } catch (error: unknown) {
+          if (exec.signal.aborted) throw error
+          if (error instanceof VisionError && isTokenCredentialFailure(error.status, error.message)) throw error
+          failures.push(`${model}：${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      throw new VisionError(`试过 ${String(candidates.length)} 个识图模型都没有成功：\n${failures.join('\n')}`)
     },
   })))
 }

@@ -180,6 +180,49 @@ try {
   if (legacyPreset.id !== 'minimal') {
     throw new Error(`assembled Windows profile remapped legacy preset to ${legacyPreset.id}`)
   }
+
+  // Automations expose these four execution-context choices. Probe the real
+  // assembled profile rather than trusting package presence: each service can
+  // disappear independently when a composition row is removed.
+  const workspaceRegistry = ctx.get('workspaceRegistry')
+  const skills = ctx.get('skills')
+  const permissionPresets = ctx.get('permissionPresets')
+  const llm = ctx.get('llm')
+  if (workspaceRegistry === undefined || skills === undefined
+    || permissionPresets === undefined || llm === undefined) {
+    throw new Error('assembled Windows profile is missing automation execution-context services')
+  }
+  const probeWorkspace = await workspaceRegistry.create(home, 'Automation profile probe')
+  if (probeWorkspace.path !== home || await probeWorkspace.status() !== 'ok') {
+    throw new Error('workspace registry could not round-trip the automation probe directory')
+  }
+  await workspaceRegistry.delete(probeWorkspace.id)
+  const permissionNames = permissionPresets.names
+  for (const name of ['workspace-write', 'danger-full-access']) {
+    if (!permissionNames.includes(name)) {
+      throw new Error(`assembled Windows profile is missing the ${name} permission preset`)
+    }
+  }
+  const standardSkills = await skills.list({
+    cwd: home,
+    scope: await agentPresets.standingKeyFor('standard'),
+  })
+  // The automation editor offers only installed (user-trust) experts and the
+  // llm registry's advisory model catalog; surface both for external parsing.
+  const installedExpertIds = (await agentPresets.list())
+    .filter(preset => preset.trust === 'user')
+    .map(preset => preset.id)
+  const modelProviders = llm.listProviders().map(provider => provider.id)
+  console.log(JSON.stringify({
+    automationContextServices: {
+      workspaces: 'ready',
+      experts: presetIds,
+      installedExperts: installedExpertIds,
+      modelProviders,
+      skills: standardSkills.map(skill => skill.name),
+      permissions: permissionNames,
+    },
+  }))
   const hostServiceProbe = ctx.get(HOST_SERVICE_PROBE_KEY)
   if (hostServiceProbe?.current?.name !== 'desktop'
     || hostServiceProbe.current.dir !== prepared.profile.dir
@@ -202,7 +245,10 @@ try {
   // re-enabled against dsh-web-app's disable, and a patch aimed at a row this
   // composition never mounts is dead config that nothing else reports.
   const toolNames = new Set(ctx.tools.schemas().map(schema => schema.name))
-  for (const name of ['image_generate', 'video_generate', 'web_fetch']) {
+  // `connector_offer` is here for one more reason than the others: it registers
+  // itself only where `userQuestions` is mounted, so an ordering change in the
+  // profile would drop it with no error anywhere (`market/connector-offer.ts`).
+  for (const name of ['image_generate', 'video_generate', 'web_fetch', 'connector_offer']) {
     if (!toolNames.has(name)) {
       throw new Error(
         `assembled desktop profile offers no ${name} tool (global tools: ${[...toolNames].join(', ')})`,
@@ -345,6 +391,11 @@ try {
     '@deepseek-ai/dsh-client-ui-directory-picker-native',
   ]) {
     if (ids.has(id)) throw new Error(`assembled advanced Web graph unexpectedly includes ${id}`)
+  }
+  const holdMs = Number(process.env.DSH_PROFILE_SMOKE_HOLD_MS ?? 0)
+  if (Number.isFinite(holdMs) && holdMs > 0) {
+    console.log(`PROFILE_SMOKE_URL=${expectedUrl}`)
+    await new Promise(resolve => setTimeout(resolve, holdMs))
   }
 } finally {
   await ctx?.fiber.dispose()

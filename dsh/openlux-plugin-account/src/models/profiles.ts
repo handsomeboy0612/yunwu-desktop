@@ -46,6 +46,12 @@ export interface ModelOverride {
 /** Model id to the console's statement about it. */
 export type ModelOverrides = ReadonlyMap<string, ModelOverride>
 
+/** Rollout state is distinct from an empty override table. */
+export interface ModelOverrideSnapshot {
+  readonly enabled: boolean
+  readonly overrides: ModelOverrides
+}
+
 /**
  * The scope naming "the platform's own provider" in the profile table.
  *
@@ -96,7 +102,7 @@ interface ApiEnvelope {
 export async function fetchModelOverrides(
   access: ConsoleAccess,
   signal?: AbortSignal,
-): Promise<ModelOverrides> {
+): Promise<ModelOverrideSnapshot> {
   const token = await access.apiKey()
   if (token === undefined || token.trim() === '') throw new Error('no desktop token')
 
@@ -118,8 +124,8 @@ export async function fetchModelOverrides(
       throw new Error(envelope.message?.trim() || 'desktop config returned an invalid envelope')
     }
     const section = envelope.data?.modelProfiles
-    if (section?.rollout?.enabled !== true) return new Map()
-    return parseItems(section.items)
+    if (section?.rollout?.enabled !== true) return { enabled: false, overrides: new Map() }
+    return { enabled: true, overrides: parseItems(section.items) }
   } finally {
     clearTimeout(timeout)
     signal?.removeEventListener('abort', abort)

@@ -476,6 +476,33 @@ function omitUnresolvedOptionalEntries(
   }
 }
 
+/**
+ * Load the machine-wide patch layer, reading a blank document as no layer.
+ *
+ * `loadOptionalPatches` sorts a patch file into two outcomes — absent, or
+ * present and usable — and a file holding nothing but comments is neither: YAML
+ * reads it as null, which the loader rejects as "not a top-level array". People
+ * do create this file before they have anything to put in it, and on a desktop
+ * product that error arrives as a shell that will not start. So the blank case
+ * is answered here, and everything else still goes to the loader, which keeps
+ * `!!js` evaluation and every diagnostic message upstream's.
+ *
+ * The `dsh` CLI in the built-in terminal reads the same file through the
+ * kernel's own watcher and still refuses a blank one. That is stock DSH
+ * behaviour on every install, and it is loud rather than silent.
+ * @param home - Harness home holding the machine-wide patch file.
+ * @returns the parsed patch layer, empty when the file is missing or blank.
+ */
+function loadMachineWidePatches(home: string): PatchOptions[] {
+  const path = join(home, PROFILE_PATCH_FILENAME)
+  try {
+    if (parseDocument(readFileSync(path, 'utf8')).contents === null) return []
+  } catch {
+    // Unreadable or unparsable: the loader owns both messages.
+  }
+  return loadOptionalPatches(BIN_NAME, path) ?? []
+}
+
 interface MarketPatchFilter {
   readonly patches: PatchOptions[]
   readonly removedProviderReference: boolean
@@ -648,7 +675,7 @@ export function prepareDesktopProfile(
     throw new Error(`${BIN_NAME}: desktop profile is missing @deepseek-ai/dsh-web-app`)
   }
 
-  const loadedHomePatches = loadOptionalPatches(BIN_NAME, join(home, PROFILE_PATCH_FILENAME)) ?? []
+  const loadedHomePatches = loadMachineWidePatches(home)
   const { patches: homePatches, skipped: skippedOptionalEntries } = omitUnresolvedOptionalEntries(
     loadedHomePatches,
     bareModuleBaseUrl,

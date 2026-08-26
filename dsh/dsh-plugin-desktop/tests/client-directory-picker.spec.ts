@@ -48,6 +48,12 @@ describe('desktop directory picker client bridge', () => {
     })
   })
 
+  it('keeps a native chooser cancellation distinct from a failed route', async () => {
+    const request = vi.fn(async () => new Response(JSON.stringify({ path: null })))
+    await expect(requestDesktopDirectory(request)).resolves.toBeNull()
+    expect(request).toHaveBeenCalledOnce()
+  })
+
   it('installs and restores the window bridge consumed by the browse panel', async () => {
     const previous = vi.fn(async () => null)
     const previousValidation = vi.fn(async () => true)

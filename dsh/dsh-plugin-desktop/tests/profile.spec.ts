@@ -521,6 +521,25 @@ describe('desktop profile composition', {
     }))
   })
 
+  it('settles the Web runtime on no external browser in every profile it composes', () => {
+    // This is the layer that used to be a patch inside dsh-web-app's own bundle
+    // file. The bundle ships `!!js ctx.webStartup.openBrowser` — a CLI operator's
+    // answer — and this launcher has no operator waiting at a terminal, so the
+    // desktop layer settles it after the bundle rather than editing the bundle.
+    const desktopHome = temporaryHome()
+    const desktop = composeEntries([prepareDesktopProfile(undefined, desktopHome, 'win32').patches])
+
+    const webHome = temporaryHome()
+    installWebClient(webHome, 'fixture-web-client')
+    const web = composeEntries([prepareDesktopProfile(undefined, webHome, 'win32', 'web').patches])
+
+    for (const rows of [desktop, web]) {
+      expect(rows.find(row => row.id === 'web-runtime')).toEqual(expect.objectContaining({
+        config: expect.objectContaining({ openBrowser: false }),
+      }))
+    }
+  })
+
   it('projects YAML startup settings into the Host, Web server, and client Loader rows', () => {
     const home = temporaryHome()
     writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: advanced\n  port: 43189\n')

@@ -67,7 +67,7 @@ export async function signArtifact(
   const body = await read<{ url?: unknown; sha256?: unknown; size?: unknown }>(
     ctx,
     access,
-    `items/${encodeURIComponent(type)}/${encodeURIComponent(slug)}/download-url`
+    `catalog/${encodeURIComponent(type)}/${encodeURIComponent(slug)}/download-url`
       + `?format=${encodeURIComponent(format)}`,
     'POST',
     signal,
@@ -126,20 +126,26 @@ export async function readExpertManifest(
   slug: string,
   signal?: AbortSignal,
 ): Promise<ExpertManifest> {
-  let manifest: { bundledSkills?: unknown; defaultInitPrompt?: unknown; quickPrompts?: unknown } | null
   try {
-    const item = await read<{ manifest?: unknown }>(
-      ctx, access, `items/expert/${encodeURIComponent(slug)}`, 'GET', signal,
+    const detail = await read<{
+      expert_profile?: { default_init_prompt?: unknown }
+      skills?: unknown
+      prompts?: unknown
+    }>(
+      ctx, access, `catalog/expert/${encodeURIComponent(slug)}`, 'GET', signal,
     )
-    manifest = (typeof item.manifest === 'string' ? JSON.parse(item.manifest) : item.manifest) as typeof manifest
+    const skills = Array.isArray(detail.skills)
+      ? detail.skills.map(row => field(row, 'slug'))
+      : []
+    const prompts = Array.isArray(detail.prompts)
+      ? detail.prompts.map(row => field(row, 'prompt'))
+      : []
+    return {
+      bundledSkills: texts(skills, Number.MAX_SAFE_INTEGER),
+      prompts: texts([detail.expert_profile?.default_init_prompt, prompts], MAX_PROMPTS),
+    }
   } catch {
     return NO_MANIFEST
-  }
-  return {
-    // Deduplicated because the list is the console's, and a repeat would mean
-    // downloading and unpacking the same archive twice into the same directory.
-    bundledSkills: texts(manifest?.bundledSkills, Number.MAX_SAFE_INTEGER),
-    prompts: texts([manifest?.defaultInitPrompt, manifest?.quickPrompts], MAX_PROMPTS),
   }
 }
 
@@ -188,26 +194,46 @@ export async function readConnectorManifest(
   slug: string,
   signal?: AbortSignal,
 ): Promise<ConnectorManifest> {
-  const item = await read<{ manifest?: unknown }>(
-    ctx, access, `items/connector/${encodeURIComponent(slug)}`, 'GET', signal,
+  const detail = await read<{
+    connector_profile?: {
+      mcp_name?: unknown
+      server_json?: unknown
+      auth_json?: unknown
+    }
+  }>(
+    ctx, access, `catalog/connector/${encodeURIComponent(slug)}`, 'GET', signal,
   )
-  let parsed: unknown
+  const profile = detail.connector_profile
+  const mcpName = typeof profile?.mcp_name === 'string' ? profile.mcp_name.trim() : ''
+  if (mcpName === '') throw new ConsoleError(`连接器 ${slug} 的配置里没有 mcp_name。`)
+
+  let server: unknown
+  let auth: unknown
   try {
-    parsed = typeof item.manifest === 'string' ? JSON.parse(item.manifest) : item.manifest
+    server = typeof profile?.server_json === 'string' ? JSON.parse(profile.server_json) : profile?.server_json
+    auth = typeof profile?.auth_json === 'string' && profile.auth_json.trim() !== ''
+      ? JSON.parse(profile.auth_json)
+      : profile?.auth_json
   } catch {
     throw new ConsoleError(`连接器 ${slug} 的 MCP 配置不是合法 JSON。`)
   }
-  const row = parsed as Partial<ConnectorManifest> | null
-  const mcpName = typeof row?.mcpName === 'string' ? row.mcpName.trim() : ''
-  if (mcpName === '') throw new ConsoleError(`连接器 ${slug} 的配置里没有 mcpName。`)
-  if (typeof row?.server !== 'object' || row.server === null || Array.isArray(row.server)) {
+  if (typeof server !== 'object' || server === null || Array.isArray(server)) {
     throw new ConsoleError(`连接器 ${slug} 的配置里没有 server。`)
   }
+  const authValue = typeof auth === 'object' && auth !== null
+    ? auth as NonNullable<ConnectorManifest['auth']>
+    : undefined
   return {
     mcpName,
-    server: row.server,
-    ...typeof row.auth === 'object' && row.auth !== null ? { auth: row.auth } : {},
+    server: server as Readonly<Record<string, unknown>>,
+    ...authValue === undefined ? {} : { auth: authValue },
   }
+}
+
+function field(raw: unknown, key: string): unknown {
+  return raw !== null && typeof raw === 'object'
+    ? (raw as Record<string, unknown>)[key]
+    : undefined
 }
 
 /**
@@ -244,7 +270,7 @@ async function read<T>(
 ): Promise<T> {
   const token = await access.apiKey()
   if (token === undefined) throw new ConsoleError('当前没有登录凭据，无法向控制台取制品。')
-  const url = `${normalizeBase(access.baseUrl)}/api/desktop-market/${path}`
+  const url = `${normalizeBase(access.baseUrl)}/api/desktop-content/${path}`
   const reply = await requestJson(
     ctx,
     url,

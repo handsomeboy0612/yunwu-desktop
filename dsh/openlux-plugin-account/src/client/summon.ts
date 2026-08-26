@@ -40,14 +40,35 @@
 
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
-import type { ReferenceInsert, TokenSpan } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
+import type {
+  InputTriggerController,
+  ReferenceInsert,
+  TokenSpan,
+} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 
 /** What one summon carries. */
 export interface SummonRequest {
-  /** Installed preset id (the market slug; the two are the same by design). */
-  readonly preset: string
+  /**
+   * Installed preset id (the market slug; the two are the same by design).
+   *
+   * Absent when the errand is only the composer: «试一试» on an installed skill
+   * and «创建技能» both want a blank session holding an opening line, and a
+   * skill belongs to no composition — it is read by whichever agent is running.
+   * Passing the default's id instead is not available to this caller, and
+   * passing an empty one would ask the kernel to switch to a preset that does
+   * not exist.
+   */
+  readonly preset?: string
   /** Opening question to prefill; empty means land on the preset with a clean composer. */
   readonly prompt: string
+  /**
+   * Name of a leading `/name` token already present in {@link prompt}.
+   *
+   * The token is the host-side invocation contract. This hint only lets the
+   * client prime DSH's native skill lexicon so the same literal text receives
+   * its derived chip decoration on a cold session.
+   */
+  readonly skillToken?: string
 }
 
 /**
@@ -91,6 +112,48 @@ export interface SessionComposer {
   readonly state: { getSnapshot(): { draft: string; draftRev: number } }
 }
 
+type SkillTriggerController = Pick<InputTriggerController, 'dismiss' | 'lexicon' | 'track'>
+
+/**
+ * Warm the native slash source for one explicit skill token without leaving its
+ * candidate menu open.
+ *
+ * `track` starts each source's candidate call synchronously. DSH's skill source
+ * keeps its session catalog single-flight outside the menu abort signal, so an
+ * immediate dismiss prevents a menu flash while the settling catalog still
+ * publishes the lexicon that drives plain-text chip decoration.
+ */
+export function primeSkillDecoration(
+  controller: SkillTriggerController,
+  draft: string,
+  draftRev: number,
+  skill: string,
+): void {
+  const token = `/${skill}`
+  if (!draft.startsWith(`${token} `)) return
+  if (controller.lexicon.getSnapshot().get('/')?.includes(skill) === true) return
+  controller.track(draft, token.length, { tier: 'plain' }, draftRev)
+  controller.dismiss()
+}
+
+/** Structural sessions face shared safely across workspace package junctions. */
+interface SummonSessions {
+  scope(id: SessionId): ClientContext | undefined
+  readonly list: {
+    getSnapshot(): {
+      readonly current?: SessionId
+      readonly byId: Readonly<Record<string, {
+        readonly blank: boolean
+        readonly agentPreset?: string
+      } | undefined>>
+    }
+  }
+}
+
+function sessionsOf(scope: ClientContext): SummonSessions {
+  return scope.sessions as unknown as SummonSessions
+}
+
 /**
  * One session's composer, or `undefined` while no conversation view is mounted
  * for it.
@@ -105,7 +168,7 @@ export interface SessionComposer {
  * @returns that composer's facade, when it exists.
  */
 export function composerFor(scope: ClientContext, id: SessionId): SessionComposer | undefined {
-  const actx = scope.sessions.scope(id)
+  const actx = sessionsOf(scope).scope(id)
   if (actx === undefined) return undefined
   const conversation = actx.get('conversation') as ConversationFace | undefined
   return conversation?.input.for(actx)
@@ -163,7 +226,7 @@ export class SummonController {
     // Cleared before the await: the list fires again during the switch, and a
     // second entrant would select the same preset twice.
     this.pending = undefined
-    if (session.agentPreset !== pending.preset) {
+    if (pending.preset !== undefined && session.agentPreset !== pending.preset) {
       const api = (this.scope.get('connection') as ConnectionHandle | undefined)?.api
       if (api === undefined) return
       const reply = await api.agentPresets.select({
@@ -179,12 +242,12 @@ export class SummonController {
       // The `agent-preset/selected` broadcast moves the chip and the header
       // label (ui-agent-preset subscribes to it), so nothing is noted here.
     }
-    this.draft(session.id, pending.prompt)
+    this.draft(session.id, pending.prompt, pending.skillToken)
   }
 
   /** The current session when it is blank, with the preset it already runs. */
   private blankCurrent(): { id: SessionId; agentPreset: string | undefined } | undefined {
-    const state = this.scope.sessions.list.getSnapshot()
+    const state = sessionsOf(this.scope).list.getSnapshot()
     const id = state.current
     if (id === undefined) return undefined
     const summary = state.byId[id]
@@ -198,8 +261,9 @@ export class SummonController {
    * Prefill the composer, unless the user has text of their own there.
    * @param id - the receiving session.
    * @param text - the opening question; empty writes nothing.
+   * @param skillToken - explicit leading skill token whose decoration should be primed.
    */
-  private draft(id: SessionId, text: string): void {
+  private draft(id: SessionId, text: string, skillToken?: string): void {
     if (text === '') return
     const input = this.inputFor(id)
     if (input === undefined) return
@@ -207,6 +271,17 @@ export class SummonController {
     if (draft !== '' && draft !== this.written.get(id)) return
     input.setDraft(text)
     this.written.set(id, text)
+    if (skillToken === undefined) return
+    const actx = sessionsOf(this.scope).scope(id)
+    const inputTriggers = actx?.get('inputTriggers')
+    if (actx === undefined || inputTriggers === undefined) return
+    const written = input.state.getSnapshot()
+    primeSkillDecoration(
+      inputTriggers.sessionOf(actx),
+      written.draft,
+      written.draftRev,
+      skillToken,
+    )
   }
 
   /** Route a failure to the session's own composer notice strip. */

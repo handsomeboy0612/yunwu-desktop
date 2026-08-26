@@ -61,21 +61,22 @@ interface SelfData {
 }
 
 /** How the site renders quota integers as money. */
-interface Currency {
-  perUnit: number
-  symbol: string
-  rate: number
+export interface Currency {
+  readonly perUnit: number
+  readonly symbol: string
+  readonly rate: number
   /** TOKENS sites show the raw quota with no symbol and no conversion. */
-  tokens: boolean
+  readonly tokens: boolean
 }
 
-const DEFAULT_CURRENCY: Currency = { perUnit: 500_000, symbol: '$', rate: 1, tokens: false }
+export const DEFAULT_CURRENCY: Currency = { perUnit: 500_000, symbol: '$', rate: 1, tokens: false }
 
 /** Per-process balance state; the sidebar is the only consumer. */
 export class BalanceReader {
-  private currency: { value: Currency; at: number } | undefined
+  private readonly currencies = new Map<string, { value: Currency; at: number }>()
   private last: Balance | undefined
-  private inFlight: Promise<BalanceSnapshot> | undefined
+  private inFlight: { generation: number; promise: Promise<BalanceSnapshot> } | undefined
+  private generation = 0
 
   constructor(private readonly ctx: Context) {}
 
@@ -89,16 +90,28 @@ export class BalanceReader {
     if (!force && this.last !== undefined && Date.now() - this.last.fetchedAt < FRESH_TTL_MS) {
       return { status: 'ok', balance: this.last }
     }
-    this.inFlight ??= this.fetch(signal).finally(() => { this.inFlight = undefined })
-    return this.inFlight
+    const generation = this.generation
+    if (this.inFlight?.generation === generation) return this.inFlight.promise
+    const promise = this.fetch(generation, signal).finally(() => {
+      if (this.inFlight?.promise === promise) this.inFlight = undefined
+    })
+    this.inFlight = { generation, promise }
+    return promise
   }
 
   /** Drop the cached value so the next account does not see the previous one's. */
   forget(): void {
+    this.generation += 1
     this.last = undefined
+    this.inFlight = undefined
   }
 
-  private async fetch(signal?: AbortSignal): Promise<BalanceSnapshot> {
+  /** Currency rules shared by balance and token-quota configuration surfaces. */
+  async currencyFor(baseUrl: string, signal?: AbortSignal): Promise<Currency> {
+    return this.readCurrency(baseUrl, signal)
+  }
+
+  private async fetch(generation: number, signal?: AbortSignal): Promise<BalanceSnapshot> {
     const session = await readSession(this.ctx)
     if (session === undefined) {
       return { status: 'expired', ...this.lastIfAny(), message: '登录后即可查看余额' }
@@ -143,6 +156,9 @@ export class BalanceReader {
 
     const self = envelope.data
     const money = await currency
+    if (generation !== this.generation) {
+      return { status: 'unavailable', message: '账户已切换，旧余额结果已丢弃' }
+    }
     const quota = Number(self.quota) || 0
     const balance: Balance = {
       quota,
@@ -179,8 +195,9 @@ export class BalanceReader {
    * that hardly ever varies would be the worse trade.
    */
   private async readCurrency(baseUrl: string, signal?: AbortSignal): Promise<Currency> {
-    if (this.currency !== undefined && Date.now() - this.currency.at < CURRENCY_TTL_MS) {
-      return this.currency.value
+    const cached = this.currencies.get(baseUrl)
+    if (cached !== undefined && Date.now() - cached.at < CURRENCY_TTL_MS) {
+      return cached.value
     }
     try {
       const { response, body } = await requestJson(
@@ -191,12 +208,17 @@ export class BalanceReader {
         signal,
       )
       const envelope = asEnvelope<Record<string, unknown>>(body)
-      if (!response.ok || envelope.data === undefined) return this.currency?.value ?? DEFAULT_CURRENCY
+      if (!response.ok || envelope.data === undefined) return cached?.value ?? DEFAULT_CURRENCY
       const value = parseCurrency(envelope.data)
-      this.currency = { value, at: Date.now() }
+      this.currencies.set(baseUrl, { value, at: Date.now() })
+      while (this.currencies.size > 4) {
+        const oldest = this.currencies.keys().next().value as string | undefined
+        if (oldest === undefined) break
+        this.currencies.delete(oldest)
+      }
       return value
     } catch {
-      return this.currency?.value ?? DEFAULT_CURRENCY
+      return cached?.value ?? DEFAULT_CURRENCY
     }
   }
 }
@@ -205,22 +227,20 @@ export class BalanceReader {
 function parseCurrency(data: Record<string, unknown>): Currency {
   const perUnit = Number(data.quota_per_unit)
   const type = String(data.currency_type ?? 'USD').toUpperCase()
-  const currency: Currency = {
-    perUnit: Number.isFinite(perUnit) && perUnit > 0 ? perUnit : DEFAULT_CURRENCY.perUnit,
-    symbol: '$',
-    rate: 1,
-    tokens: type === 'TOKENS',
-  }
+  const resolvedPerUnit = Number.isFinite(perUnit) && perUnit > 0 ? perUnit : DEFAULT_CURRENCY.perUnit
   if (type === 'CNY') {
-    currency.symbol = '¥'
-    currency.rate = Number(data.usd_exchange_rate) || 1
-  } else if (type === 'CUSTOM') {
-    currency.symbol = String(data.custom_currency_symbol ?? '¤')
-    currency.rate = Number(data.custom_currency_exchange_rate) || 1
-  } else if (currency.tokens) {
-    currency.symbol = ''
+    return { perUnit: resolvedPerUnit, symbol: '¥', rate: Number(data.usd_exchange_rate) || 1, tokens: false }
   }
-  return currency
+  if (type === 'CUSTOM') {
+    return {
+      perUnit: resolvedPerUnit,
+      symbol: String(data.custom_currency_symbol ?? '¤'),
+      rate: Number(data.custom_currency_exchange_rate) || 1,
+      tokens: false,
+    }
+  }
+  if (type === 'TOKENS') return { perUnit: resolvedPerUnit, symbol: '', rate: 1, tokens: true }
+  return { perUnit: resolvedPerUnit, symbol: '$', rate: 1, tokens: false }
 }
 
 /** Render a quota integer the way the console's own web UI does. */

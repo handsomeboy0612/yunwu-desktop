@@ -1,5 +1,5 @@
 diff --git a/lib/client.js b/lib/client.js
-index fff5f43f9aa239e2c0524103e77398e0988bb7e0..dd43a1212d5fb05224210c84a0293979d8320754 100644
+index fff5f43f9aa239e2c0524103e77398e0988bb7e0..ff3e9cfc82cf8144e22dc3dbd3453fbebae3df8a 100644
 --- a/lib/client.js
 +++ b/lib/client.js
 @@ -55,7 +55,7 @@ window.__ModuleLoader__.load({
@@ -273,25 +273,202 @@ index fff5f43f9aa239e2c0524103e77398e0988bb7e0..dd43a1212d5fb05224210c84a0293979
  						})]
  					})
  				]
-@@ -1529,6 +1642,8 @@ window.__ModuleLoader__.load({
+@@ -1385,6 +1498,95 @@ window.__ModuleLoader__.load({
+ 			const named = typeof profile === "object" && profile !== null ? profile.apiKeyEnv : void 0;
+ 			return typeof named === "string" && named.length > 0 ? named : deriveKeyRef(provider);
+ 		}
++		/** OpenLux account tokens replace the editable API-key field for the official route. */
++		function OpenLuxTokenControl({ callAccount, disabled, openSection, t }) {
++			const [snapshot, setSnapshot] = (0, react.useState)(void 0);
++			const [loading, setLoading] = (0, react.useState)(true);
++			const [switching, setSwitching] = (0, react.useState)(false);
++			const [failure, setFailure] = (0, react.useState)(void 0);
++			const load = (0, react.useCallback)(async (signal) => {
++				const result = await callAccount("tokens.list", {}, signal);
++				if (!result.ok) throw new Error(result.error.message);
++				setSnapshot(result.value);
++			}, [callAccount]);
++			(0, react.useEffect)(() => {
++				const stop = new AbortController();
++				setLoading(true);
++				load(stop.signal).catch((error) => {
++					if (!stop.signal.aborted) setFailure(messageOf(error));
++				}).finally(() => {
++					if (!stop.signal.aborted) setLoading(false);
++				});
++				return () => {
++					stop.abort();
++				};
++			}, [load]);
++			const useToken = async (id) => {
++				setSwitching(true);
++				setFailure(void 0);
++				try {
++					const result = await callAccount("tokens.use", { id });
++					if (!result.ok) throw new Error(result.error.message);
++					await load();
++				} catch (error) {
++					setFailure(messageOf(error));
++				} finally {
++					setSwitching(false);
++				}
++			};
++			const labelOf = (token) => {
++				const routing = token.routingPriority === "" ? token.groupNames.length === 0 ? t("tokenManual") : `${t("tokenManual")} · ${token.groupNames.join(" + ")}` : {
++					auto: t("tokenRouteAuto"),
++					price: t("tokenRoutePrice"),
++					speed: t("tokenRouteSpeed"),
++					success_rate: t("tokenRouteSuccess")
++				}[token.routingPriority] ?? t("tokenRouteAuto");
++				return `${token.name} · ${token.maskedKey} · ${routing}`;
++			};
++			return (0, react_jsx_runtime.jsxs)("div", {
++				className: ModelsSection_module_css_default["field"],
++				children: [(0, react_jsx_runtime.jsx)("span", {
++					className: ModelsSection_module_css_default["fieldLabel"],
++					children: t("currentToken")
++				}), (0, react_jsx_runtime.jsxs)("div", {
++					className: ModelsSection_module_css_default["rowHead"],
++					children: [(0, react_jsx_runtime.jsxs)("select", {
++						className: `${ModelsSection_module_css_default["input"]} ${ModelsSection_module_css_default["selectInput"]}`,
++						value: snapshot?.currentId === void 0 ? "" : String(snapshot.currentId),
++						"aria-label": t("currentToken"),
++						disabled: disabled || loading || switching || snapshot?.credentialWritable === false,
++						onChange: (event) => {
++							const id = Number(event.target.value);
++							if (Number.isInteger(id) && id > 0) useToken(id);
++						},
++						children: [
++							snapshot?.currentId === void 0 ? (0, react_jsx_runtime.jsx)("option", {
++								value: "",
++								children: loading ? t("tokenLoading") : t("tokenUnmatched")
++							}) : null,
++							...(snapshot?.tokens ?? []).map((token) => (0, react_jsx_runtime.jsx)("option", {
++								value: String(token.id),
++								disabled: token.status !== 1,
++								children: labelOf(token)
++							}, token.id))
++						]
++					}), (0, react_jsx_runtime.jsx)("button", {
++						type: "button",
++						className: ModelsSection_module_css_default["linkButton"],
++						onClick: () => {
++							openSection("openlux-token-section");
++						},
++						children: t("manageTokens")
++					})]
++				}), (0, react_jsx_runtime.jsx)("p", {
++					className: ModelsSection_module_css_default["advancedHint"],
++					children: snapshot?.credentialWritable === false ? t("tokenReadOnly") : t("tokenCredentialHint")
++				}), failure === void 0 ? null : (0, react_jsx_runtime.jsx)("p", {
++					className: ModelsSection_module_css_default["error"],
++					children: failure
++				})]
++			});
++		}
+ 		/**
+ 		* Render one provider's editing card.
+ 		* @param props - the addressed profile plus wire faces and copy.
+@@ -1528,7 +1730,10 @@ window.__ModuleLoader__.load({
+ 			* renders the hint instead and never reaches this body.
  			*/
  			const curatedFields = (family) => {
- 				const ownsIdentity = family === "pi-ai" && props.declared === true;
+-				const ownsIdentity = family === "pi-ai" && props.declared === true;
++				const managed = props.provider === "openlux";
++				const ownsIdentity = family === "pi-ai" && props.declared === true && !managed;
 +				const baseURLOverridden = schema.hasPath(draft, ["baseURL"]);
 +				const canCustomizeApi = ownsIdentity || baseURLOverridden;
  				const customModels = schema.getPath(draft, ["models"]);
  				const modelsOverridden = schema.hasPath(draft, ["models"]);
  				const models = modelDrafts(modelsOverridden ? customModels : inheritedModels());
-@@ -1617,7 +1732,7 @@ window.__ModuleLoader__.load({
+@@ -1548,7 +1753,12 @@ window.__ModuleLoader__.load({
+ 						setDraft((current) => schema.deletePath(current, ["models"]));
+ 					}
+ 				};
+-				return (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [(0, react_jsx_runtime.jsxs)("div", {
++				return (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [managed ? (0, react_jsx_runtime.jsx)(OpenLuxTokenControl, {
++					callAccount: props.callAccount,
++					disabled,
++					openSection: props.openSection,
++					t
++				}) : (0, react_jsx_runtime.jsxs)("div", {
+ 					className: ModelsSection_module_css_default["field"],
+ 					children: [
+ 						(0, react_jsx_runtime.jsx)("span", {
+@@ -1600,7 +1810,7 @@ window.__ModuleLoader__.load({
+ 									}
+ 								})]
+ 							}) : null,
+-							(0, react_jsx_runtime.jsxs)("div", {
++							managed && !baseURLOverridden ? null : (0, react_jsx_runtime.jsxs)("div", {
+ 								className: ModelsSection_module_css_default["field"],
+ 								children: [(0, react_jsx_runtime.jsx)("span", {
+ 									className: ModelsSection_module_css_default["fieldLabel"],
+@@ -1617,7 +1827,7 @@ window.__ModuleLoader__.load({
  									}
  								})]
  							}),
 -							ownsIdentity ? (0, react_jsx_runtime.jsxs)("div", {
-+							canCustomizeApi ? (0, react_jsx_runtime.jsxs)("div", {
++							!managed && canCustomizeApi ? (0, react_jsx_runtime.jsxs)("div", {
  								className: ModelsSection_module_css_default["field"],
  								children: [(0, react_jsx_runtime.jsx)("span", {
  									className: ModelsSection_module_css_default["fieldLabel"],
-@@ -2554,6 +2669,8 @@ window.__ModuleLoader__.load({
+@@ -1790,18 +2000,20 @@ window.__ModuleLoader__.load({
+ 		* @returns the section, or null while the shell has not injected yet.
+ 		*/
+ 		function ModelsSection(props) {
+-			const { controller, useSnapshot, api, schema, t } = props;
+-			if (controller === void 0 || useSnapshot === void 0 || api === void 0 || schema === void 0 || t === void 0) return null;
++			const { controller, useSnapshot, api, schema, t, accountCall } = props;
++			if (controller === void 0 || useSnapshot === void 0 || api === void 0 || schema === void 0 || t === void 0 || accountCall === void 0 || props.openSection === void 0) return null;
+ 			return (0, react_jsx_runtime.jsx)(Loaded, { injected: {
+ 				controller,
+ 				useSnapshot,
+ 				api,
+ 				schema,
+-				t
++				t,
++				accountCall,
++				openSection: props.openSection
+ 			} });
+ 		}
+ 		function Loaded({ injected }) {
+-			const { controller, api, schema, t } = injected;
++			const { controller, api, schema, t, accountCall, openSection } = injected;
+ 			const state = injected.useSnapshot((snapshot) => snapshot);
+ 			const [editing, setEditing] = (0, react.useState)(void 0);
+ 			const [adding, setAdding] = (0, react.useState)(false);
+@@ -1919,6 +2131,8 @@ window.__ModuleLoader__.load({
+ 									schema,
+ 									api,
+ 									t,
++									callAccount: accountCall,
++									openSection,
+ 									readOnly: !state.writable,
+ 									onClose: (changed) => {
+ 										closeSetup(changed, target);
+@@ -1939,7 +2153,10 @@ window.__ModuleLoader__.load({
+ 												className: ModelsSection_module_css_default["rowName"],
+ 												children: row.entry.displayName
+ 											}),
+-											row.entry.declared === true ? (0, react_jsx_runtime.jsx)("span", {
++											row.entry.provider === "openlux" ? (0, react_jsx_runtime.jsx)("span", {
++												className: ModelsSection_module_css_default["managedTag"],
++												children: t("officialTag")
++											}) : row.entry.declared === true ? (0, react_jsx_runtime.jsx)("span", {
+ 												className: ModelsSection_module_css_default["rowTag"],
+ 												children: t("customTag")
+ 											}) : null,
+@@ -1987,6 +2204,8 @@ window.__ModuleLoader__.load({
+ 									schema,
+ 									api,
+ 									t,
++									callAccount: accountCall,
++									openSection,
+ 									readOnly: !state.writable,
+ 									onClose: (changed) => {
+ 										closeEditor(changed, target);
+@@ -2554,6 +2773,8 @@ window.__ModuleLoader__.load({
  			modelAdvanced: "Capacities",
  			addModel: "Add model",
  			removeModel: "Delete model",
@@ -300,7 +477,7 @@ index fff5f43f9aa239e2c0524103e77398e0988bb7e0..dd43a1212d5fb05224210c84a0293979
  			modelsEmpty: "No models will be shown in the selector. Unlisted IDs can still be sent directly.",
  			keyBlank: "Enter the API key, or leave the field empty to keep the stored one.",
  			keyBlankNew: "Enter the API key, or leave the field empty if this provider authenticates another way.",
-@@ -2577,6 +2694,13 @@ window.__ModuleLoader__.load({
+@@ -2577,9 +2798,28 @@ window.__ModuleLoader__.load({
  			fetchSelectAll: "Select all",
  			fetchDeselectAll: "Deselect all",
  			fetchAdopt: "Add selected",
@@ -314,7 +491,22 @@ index fff5f43f9aa239e2c0524103e77398e0988bb7e0..dd43a1212d5fb05224210c84a0293979
  			customAdd: "Add a custom provider",
  			customTitle: "Custom provider",
  			customTag: "Custom",
-@@ -2652,6 +2776,8 @@ window.__ModuleLoader__.load({
++			officialTag: "Official",
++			currentToken: "Current token",
++			manageTokens: "Manage",
++			tokenLoading: "Loading tokens…",
++			tokenUnmatched: "Current credential does not match an account token",
++			tokenManual: "Manual groups",
++			tokenRouteAuto: "Automatic",
++			tokenRoutePrice: "Price first",
++			tokenRouteSpeed: "Speed first",
++			tokenRouteSuccess: "Success rate first",
++			tokenCredentialHint: "The account issues and stores this credential locally. This page never displays or accepts the key.",
++			tokenReadOnly: "The current key comes from a read-only environment source. Remove that override before switching tokens here.",
+ 			customRoute: "Provider ID",
+ 			customRouteHint: "Lowercase identifier, starting with a letter, that uniquely names this provider in requests and as its credential name.",
+ 			customRouteInvalid: "Start with a lowercase letter; then lowercase letters, digits, and dashes.",
+@@ -2652,6 +2892,8 @@ window.__ModuleLoader__.load({
  			modelAdvanced: "容量",
  			addModel: "添加模型",
  			removeModel: "删除模型",
@@ -323,7 +515,7 @@ index fff5f43f9aa239e2c0524103e77398e0988bb7e0..dd43a1212d5fb05224210c84a0293979
  			modelsEmpty: "模型选择器中将不显示任何模型；目录外 ID 仍可直接发送。",
  			keyBlank: "请输入 API 密钥；留空则保持已存储的密钥。",
  			keyBlankNew: "请输入 API 密钥；若该提供方以其他方式鉴权，可以留空。",
-@@ -2675,6 +2801,13 @@ window.__ModuleLoader__.load({
+@@ -2675,9 +2917,28 @@ window.__ModuleLoader__.load({
  			fetchSelectAll: "全选",
  			fetchDeselectAll: "取消全选",
  			fetchAdopt: "添加所选",
@@ -337,7 +529,38 @@ index fff5f43f9aa239e2c0524103e77398e0988bb7e0..dd43a1212d5fb05224210c84a0293979
  			customAdd: "添加自定义提供方",
  			customTitle: "自定义提供方",
  			customTag: "自定义",
-@@ -2788,12 +2921,8 @@ window.__ModuleLoader__.load({
++			officialTag: "官方",
++			currentToken: "当前令牌",
++			manageTokens: "管理",
++			tokenLoading: "正在读取令牌…",
++			tokenUnmatched: "当前凭据未匹配到账户令牌",
++			tokenManual: "手动分组",
++			tokenRouteAuto: "智能自动",
++			tokenRoutePrice: "价格优先",
++			tokenRouteSpeed: "速度优先",
++			tokenRouteSuccess: "成功率优先",
++			tokenCredentialHint: "密钥由账户签发并保存在本机凭据库，页面不展示也不接受手填。",
++			tokenReadOnly: "当前密钥来自只读环境变量；移除该覆盖后，才能在这里切换令牌。",
+ 			customRoute: "Provider ID",
+ 			customRouteHint: "以小写字母开头的标识，在请求中唯一标识该提供方，并用于派生凭据名。",
+ 			customRouteInvalid: "需以小写字母开头，之后可用小写字母、数字和短横线。",
+@@ -2741,12 +3002,14 @@ window.__ModuleLoader__.load({
+ 			const schema = createSettingsSchemaOperations(ctx.settingsSchema);
+ 			const controller = new ModelsSettingsStore(connection.api, schema, ctx.settingsScope.describe());
+ 			const t = ctx.locale.bind(NS);
++			const accountCall = (method, payload, signal) => connection.rpc.call("/openlux", method, payload, signal);
+ 			const injected = () => ({
+ 				controller,
+ 				hooks: { snapshot: controller.store },
+ 				api: connection.api,
+ 				schema,
+-				t
++				t,
++				accountCall
+ 			});
+ 			const deepSeekOnboardingInjected = () => ({
+ 				controller,
+@@ -2788,12 +3051,8 @@ window.__ModuleLoader__.load({
  				label: () => t("nav"),
  				inject: injected
  			}, ModelsSection));

@@ -37,9 +37,9 @@ export async function requestDesktopDirectory(
     method: 'POST',
     headers: { accept: 'application/json' },
   })
-  if (!response.ok) throw new Error('DSH Desktop could not open the system folder picker')
+  if (!response.ok) throw new Error('OpenLux Desktop could not open the system folder picker')
   const value: unknown = await response.json()
-  if (!isResponse(value)) throw new Error('DSH Desktop received an invalid response from the system folder picker')
+  if (!isResponse(value)) throw new Error('OpenLux Desktop received an invalid response from the system folder picker')
   return value.path
 }
 
@@ -56,9 +56,9 @@ export async function requestDesktopDirectoryValidation(
     },
     body: JSON.stringify({ path }),
   })
-  if (!response.ok) throw new Error('DSH Desktop could not validate the selected workspace')
+  if (!response.ok) throw new Error('OpenLux Desktop could not validate the selected workspace')
   const value: unknown = await response.json()
-  if (!isValidationResponse(value)) throw new Error('DSH Desktop received an invalid workspace validation response')
+  if (!isValidationResponse(value)) throw new Error('OpenLux Desktop received an invalid workspace validation response')
   return value.allowed
 }
 
@@ -70,7 +70,8 @@ export function installDesktopDirectoryPickerBridge(
   const previousPicker = target.__DSH_DESKTOP_PICK_DIRECTORY__
   const previousValidator = target.__DSH_DESKTOP_VALIDATE_DIRECTORY__
   const pick = async (): Promise<string | null> => await requestDesktopDirectory(request)
-  const validate = async (path: string): Promise<boolean> => await requestDesktopDirectoryValidation(path, request)
+  const validate = async (path: string): Promise<boolean> =>
+    await requestDesktopDirectoryValidation(path, request)
   target.__DSH_DESKTOP_PICK_DIRECTORY__ = pick
   target.__DSH_DESKTOP_VALIDATE_DIRECTORY__ = validate
   return () => {

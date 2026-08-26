@@ -29,8 +29,10 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { createHash } from 'node:crypto'
 import { normalizeBase, requestJson } from '../../account/http.ts'
 import type { ConsoleAccess } from '../../market/console.ts'
+import { registerModelCacheInvalidator } from '../../models/runtime-cache.ts'
 import { bailianProvider } from './bailian.ts'
 import { doubaoProvider } from './doubao.ts'
 import { grokProvider } from './grok.ts'
@@ -124,6 +126,7 @@ interface CatalogRow {
 }
 
 const cache = new Map<string, VideoCatalog>()
+registerModelCacheInvalidator(() => cache.clear())
 
 /**
  * Read the servable video models, from cache when it is current.
@@ -141,7 +144,7 @@ export async function readVideoCatalog(
   const token = await access.apiKey()
   if (token === undefined || token === '') return undefined
   const base = normalizeBase(access.baseUrl)
-  const key = `${base}|${token}`
+  const key = `${base}|${createHash('sha256').update(token).digest('hex').slice(0, 24)}`
   const cached = cache.get(key)
   if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) return cached
 
@@ -174,6 +177,11 @@ export async function readVideoCatalog(
     if (models.size === 0) return cached
     const fresh: VideoCatalog = { models, at: Date.now() }
     cache.set(key, fresh)
+    while (cache.size > 8) {
+      const oldest = cache.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      cache.delete(oldest)
+    }
     return fresh
   } catch (error: unknown) {
     ctx.logger.warn(`openlux: video catalogue unreadable (${error instanceof Error ? error.message : String(error)}); leaving the model unchecked`)
