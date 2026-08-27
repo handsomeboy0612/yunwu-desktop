@@ -61,7 +61,7 @@ import type {
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { AuthorizationDeclinedError } from '@deepseek-ai/dsh-authorization'
-import type { AuthorizationSession } from '@deepseek-ai/dsh-authorization'
+import type { AuthorizationService, AuthorizationSession } from '@deepseek-ai/dsh-authorization'
 import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import type { CredentialKey } from '@deepseek-ai/dsh-credentials'
 
@@ -451,9 +451,15 @@ export async function hasConnectorGrant(ctx: Context, slug: string): Promise<boo
  * @param name - what to call it in the seam's roster.
  * @param serverUrl - the endpoint being signed in to.
  */
-function ensureFlow(ctx: Context, slug: string, name: string, serverUrl: string): void {
+function ensureFlow(
+  authorization: AuthorizationService,
+  ctx: Context,
+  slug: string,
+  name: string,
+  serverUrl: string,
+): void {
   if (flows.has(slug)) return
-  const dispose = ctx.authorization.registerFlow({
+  const dispose = authorization.registerFlow({
     key: keyFor(slug),
     label: name,
     methods: [{ id: 'oauth', label: '在浏览器中授权' }],
@@ -554,20 +560,27 @@ export async function startConnectorAuthorization(
   name: string,
   serverUrl: string,
 ): Promise<AuthorizationStart> {
-  if (ctx.get('authorization') === undefined) {
+  // Held as a handle rather than read as `ctx.authorization`: the seam is not
+  // in this plugin's `inject` list — deliberately, a composition without it
+  // must still load the account face — and cordis's reflect proxy fails an
+  // undeclared property read outright ("cannot get property without inject").
+  // Every in-app web sign-in hit that throw until this read went through
+  // `ctx.get`, the same distinction `marketTarget` documents for the roster.
+  const authorization = ctx.get('authorization')
+  if (authorization === undefined) {
     return { kind: 'refused', message: '当前部署没有挂载授权服务，无法完成网页授权。' }
   }
   if (attempts.get(slug)?.state.kind === 'pending') {
     return { kind: 'refused', message: '这个连接器的授权已经在进行中了。' }
   }
-  ensureFlow(ctx, slug, name, serverUrl)
+  ensureFlow(authorization, ctx, slug, name, serverUrl)
 
   const opened = Promise.withResolvers<string>()
   const attempt: Attempt = {
     state: { kind: 'pending' },
     settled: (async (): Promise<AuthorizationState> => {
       try {
-        const outcome = await ctx.authorization.begin({
+        const outcome = await authorization.begin({
           key: keyFor(slug),
           interaction: {
             notify: (notice: { readonly url?: string }) => {
@@ -607,4 +620,26 @@ export async function startConnectorAuthorization(
  */
 export function readAuthorizationState(slug: string): AuthorizationState {
   return attempts.get(slug)?.state ?? { kind: 'idle' }
+}
+
+/**
+ * Withdraw the attempt that is running for one connector.
+ *
+ * The kernel's own second-call knob: `authorization.cancel(key)` exists
+ * because a request/response transport answers a cancel button with a second
+ * call that cannot reach the first call's signal (the package README says
+ * exactly this). The `begin()` above then settles `{ status: 'cancelled' }`,
+ * the attempt records it, and the gallery's next poll reads it — the same
+ * path an abandoned browser tab takes, so nothing downstream needs a second
+ * story.
+ * @param ctx - host context.
+ * @param slug - the connector.
+ * @returns whether a pending attempt was there to withdraw.
+ */
+export function withdrawAuthorization(ctx: Context, slug: string): boolean {
+  if (attempts.get(slug)?.state.kind !== 'pending') return false
+  const authorization = ctx.get('authorization')
+  if (authorization === undefined) return false
+  authorization.cancel(keyFor(slug))
+  return true
 }

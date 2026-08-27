@@ -136,6 +136,8 @@ export const zh = {
   'connectorOffline': '这次启动没连上：{message}',
   'connectorOfflineBadge': '未连上',
   'connectorReauthorize': '重新授权',
+  // 连接中的卡片角标在指针下换成 ✕,按下撤回正在等浏览器的那次授权。
+  'connectorCancelAuth': '取消连接',
   // WorkBuddy 已连接卡片的悬停动作:图标换成聊天气泡,气泡提示就是这三个字。
   'connectorChat': '去对话',
   // 输入框旁那颗连接器入口的悬停提示;第二条是「记录在册但这次没挂上」的情形。
@@ -339,6 +341,7 @@ export const en = {
   'connectorOffline': 'Did not connect on this launch: {message}',
   'connectorOfflineBadge': 'Offline',
   'connectorReauthorize': 'Sign in again',
+  'connectorCancelAuth': 'Cancel connection',
   'connectorChat': 'Open chat',
   'connectorCapsule': '{count} connector(s) connected — click to manage',
   'connectorCapsuleOffline': 'A connector did not come up this launch — click to see',

@@ -66,7 +66,7 @@ import { ConsoleError, readConnectorManifest, type ConsoleAccess } from './conso
 import type { ConnectorManifest } from './console.ts'
 import {
   forgetConnectorGrant, hasConnectorGrant, readAuthorizationState, readConnectorToken,
-  startConnectorAuthorization,
+  startConnectorAuthorization, withdrawAuthorization,
 } from './connector-oauth.ts'
 import type { ConnectorAuthorizationStart, ConnectorAuthorizationState } from './wire.ts'
 import type {
@@ -301,6 +301,22 @@ export async function authorizeConnector(
  */
 export function connectorAuthorizationState(slug: string): ConnectorAuthorizationState {
   return readAuthorizationState(slug)
+}
+
+/**
+ * Withdraw one connector's running sign-in, from the gallery's cancel button.
+ *
+ * Answers whether anything was pending, so a cancel that raced the flow's own
+ * end reads as the no-op it was. Not serialized with the config writes: the
+ * withdrawal touches only the in-memory attempt and the kernel's authorization
+ * seam, and the poll that observes it is not serialized either.
+ * @param ctx - host context.
+ * @param slug - the connector.
+ * @returns whether a pending attempt was withdrawn.
+ */
+export function cancelConnectorAuthorization(ctx: Context, slug: string): { cancelled: boolean } {
+  if (!CONNECTOR_SLUG.test(slug)) return { cancelled: false }
+  return { cancelled: withdrawAuthorization(ctx, slug) }
 }
 
 /**

@@ -206,7 +206,7 @@ describe('published package surface', () => {
       expect(code).toContain('YUNWU_MARKET_BASE_URL')
       expect(code).toContain('YUNWU_MARKET_TOKEN')
       expect(code).not.toContain('TEMP_MARKET')
-      expect(code).toContain('http://localhost:3000')
+      expect(code).toContain('http://localhost:3001')
       expect(code).not.toMatch(/sk-[A-Za-z0-9]{24,}/u)
     }
   })

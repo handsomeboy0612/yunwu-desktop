@@ -49,7 +49,8 @@ import {
   importLocalSkill, installSkill, readSkillTarget, removeSkill, setSkillEnabled,
 } from './market/skill-install.ts'
 import {
-  authorizeConnector, connectorAuthorizationState, installConnector, openCustomFile,
+  authorizeConnector, cancelConnectorAuthorization, connectorAuthorizationState,
+  installConnector, openCustomFile,
   readConnectorRequirement, readConnectorTarget, readCustomFileContent, remountConnector,
   restoreConnectors, saveCustomFileContent, syncCustomConnectors, uninstallConnector,
 } from './market/connector-install.ts'
@@ -498,6 +499,11 @@ async function route(
 
     case 'market.connectorAuthorizeState':
       return { ok: true, value: connectorAuthorizationState(slugOf(payload)) }
+
+    // The cancel button's second call (the kernel knob the poll cannot reach):
+    // the attempt settles `cancelled` and the poll above reads it.
+    case 'market.connectorAuthorizeCancel':
+      return { ok: true, value: cancelConnectorAuthorization(ctx, slugOf(payload)) }
 
     case 'market.connectorUninstall':
       return {
@@ -1004,7 +1010,15 @@ export function resolveDesktopConfigAccess(
   return { baseUrl, ...(token === undefined || token === '' ? {} : { token }) }
 }
 
-/** Resolve the account/market split without exposing or persisting either credential. */
+/**
+ * Resolve the account/market split without exposing or persisting either credential.
+ *
+ * The integration default is new-yunwu-api on 3001, the same process the
+ * config read uses: the V2 content platform moved every client-facing market
+ * route (`/api/desktop-content/…`, `controller/desktop_market_client.go`)
+ * there, and admin-server on 3000 kept only the operator routes and the
+ * artifact bytes — a market pointed at 3000 reads the catalog as a 404.
+ */
 export function resolveMarketAccess(
   consoleBaseUrl: string,
   environment: Readonly<Record<string, string | undefined>> = process.env,
@@ -1013,7 +1027,7 @@ export function resolveMarketAccess(
   const configuredBaseUrl = environment.YUNWU_MARKET_BASE_URL?.trim()
   const baseUrl = (
     configuredBaseUrl
-    || (token === undefined || token === '' ? consoleBaseUrl : 'http://localhost:3000')
+    || (token === undefined || token === '' ? consoleBaseUrl : 'http://localhost:3001')
   ).replace(/\/+$/, '')
   return { baseUrl, ...(token === undefined || token === '' ? {} : { token }) }
 }

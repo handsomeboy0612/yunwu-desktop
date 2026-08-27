@@ -27,7 +27,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import {
   Button, IconCheckOutline14, IconEllipsisOutline16,
-  IconPlayOutline16, IconPlusOutline16, Menu, Tooltip,
+  IconCloseFill14, IconPlayOutline16, IconPlusOutline16, Menu, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { CatalogItem } from '../market/wire.ts'
@@ -113,6 +113,15 @@ export interface MarketCardProps {
    * draws what it is told; deciding the state stays with the section.
    */
   readonly dot?: 'connected' | 'connecting' | 'offline'
+  /**
+   * Withdraw the flow a busy row is waiting on, when it can be withdrawn.
+   *
+   * Only the browser sign-in wait passes this (a config write cannot be
+   * un-asked mid-flight). The seat stays the spinner; the pointer turns it
+   * into a ✕ — WorkBuddy's cancellable connecting state, same seat, same swap.
+   */
+  readonly onCancel?: () => void
+  readonly cancelLabel?: string
   /**
    * Installed-skill overflow, WorkBuddy's ⋯ on a done row.
    *
@@ -328,7 +337,7 @@ export function MarketCard(
   {
     item, state, language, t, onOpen, onPrimary, summonable,
     onRemove, removeLabel, onRepair, repairLabel, onTry, tryLabel, tryGlyph, menu, words,
-    dot, primaryLook = 'glyph', priorityAvatarLoad = false,
+    dot, onCancel, cancelLabel, primaryLook = 'glyph', priorityAvatarLoad = false,
   }: MarketCardProps,
 ): ReactNode {
   const [imageFailed, setImageFailed] = useState(false)
@@ -406,6 +415,29 @@ export function MarketCard(
       )
     }
     if (busy) {
+      // A wait that can be withdrawn keeps the spinner as its resting face and
+      // turns into a ✕ under the pointer — WorkBuddy's cancellable connecting
+      // seat. The plain wait stays a statement.
+      if (onCancel !== undefined) {
+        return (
+          <Tooltip label={cancelLabel ?? t('connectorCancelAuth')} side="top">
+            <button
+              type="button"
+              style={styles.cornerQuietPress}
+              aria-label={cancelLabel ?? t('connectorCancelAuth')}
+              data-testid={`openlux-market-cancel-${item.slug}`}
+              onPointerEnter={() => setHovering(true)}
+              onPointerLeave={() => setHovering(false)}
+              onClick={(event) => {
+                event.stopPropagation()
+                onCancel()
+              }}
+            >
+              {hovering ? <IconCloseFill14 /> : <span {...{ [SPIN_ATTR]: '' }} />}
+            </button>
+          </Tooltip>
+        )
+      }
       // WorkBuddy swaps the plus for `.skill-install-loading` (a 14px ring that
       // actually rotates). The kernel loading glyph is a still picture.
       return (

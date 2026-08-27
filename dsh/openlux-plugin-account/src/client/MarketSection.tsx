@@ -103,6 +103,19 @@ const AUTHORIZE_POLL_MS = 1500
 /** Matches the host listener's own patience, so neither side gives up alone. */
 const AUTHORIZE_TIMEOUT_MS = 5 * 60 * 1000
 
+/**
+ * How long a finished connector flow keeps the queue before the next one runs.
+ *
+ * WorkBuddy's connect queue is the model: one flow at a time
+ * (`MAX_CONCURRENT_CONNECTS = 1`) with the slot released half a second late,
+ * so two presses in a row cannot race two browser windows or two config
+ * writes, and the row that queued second visibly waits its turn.
+ */
+const CONNECT_RELEASE_MS = 500
+
+/** For settling the connect chain without caring how the turn ended. */
+const noop = (): void => {}
+
 /** Which half of the roster the user is looking at. */
 type Kind = 'all' | 'agent' | 'team'
 
@@ -349,7 +362,15 @@ export function MarketSection(
   const [token, setToken] = useState<PendingToken | undefined>()
   // The user's own servers: one open panel, and the last re-read of their file.
   const [custom, setCustom] = useState<CustomState | undefined>()
-  const [installing, setInstalling] = useState<string | undefined>()
+  /**
+   * Every row with a flow in flight, not a single slug: two connectors can be
+   * mid-connect at once (one on the queue, one waiting for its browser), and a
+   * string here made the second press silently stop the first row's spinner —
+   * WorkBuddy keeps the same fact as its `connectingIds` set.
+   */
+  const [installing, setInstalling] = useState<ReadonlySet<string>>(() => new Set())
+  /** The rows whose browser sign-in is being waited on; these can be cancelled. */
+  const [authWaiting, setAuthWaiting] = useState<ReadonlySet<string>>(() => new Set())
   const [outcome, setOutcome] = useState<{ item: CatalogItem; outcome: InstallOutcome } | undefined>()
   // Opening questions per slug, asked once each: the manifest is a per-item
   // read the catalog snapshot deliberately withholds.
@@ -374,6 +395,34 @@ export function MarketSection(
   )
   const [featuredScenesReading, setFeaturedScenesReading] = useState(false)
   const featuredScenesRequested = useRef(marketProcessSnapshot.featuredScenes !== undefined)
+
+  /** Turn one row's in-flight flag on or off. */
+  const mark = useCallback((slug: string, on: boolean): void => {
+    setInstalling((current) => {
+      if (current.has(slug) === on) return current
+      const next = new Set(current)
+      if (on) next.add(slug)
+      else next.delete(slug)
+      return next
+    })
+  }, [])
+
+  const connectChain = useRef<Promise<unknown>>(Promise.resolve())
+
+  /**
+   * Run one connector flow at a time (see {@link CONNECT_RELEASE_MS}).
+   *
+   * A promise chain rather than a store: the queue's whole life is inside this
+   * component, and a turn that throws must not wedge the chain — the release
+   * step runs on both settles.
+   */
+  const enqueue = useCallback(<T,>(work: () => Promise<T>): Promise<T> => {
+    const turn = connectChain.current.then(work, work)
+    connectChain.current = turn.then(noop, noop).then(
+      () => new Promise((done) => { setTimeout(done, CONNECT_RELEASE_MS) }),
+    )
+    return turn
+  }, [])
 
   /** Re-read what is installed for one partition; the card state derives from it. */
   const readInstalled = useCallback(async (which: Tab): Promise<void> => {
@@ -548,7 +597,7 @@ export function MarketSection(
   const stateOf = useCallback((item: CatalogItem): CardState => {
     if (tab === 'connector') {
       const connected = connectedBySlug.get(item.slug)
-      const row = connectorRow(connected, installing === item.slug)
+      const row = connectorRow(connected, installing.has(item.slug))
       if (row !== undefined) {
         if (row.kind === 'working') return { kind: 'installing' }
         // A connector that did not come up this launch is still connected — the
@@ -558,14 +607,14 @@ export function MarketSection(
           ? { kind: 'installed' }
           : { kind: 'installed', broken: t('connectorOffline', { message: connected?.failure ?? '' }) }
       }
-      if (installing === item.slug) return { kind: 'installing' }
+      if (installing.has(item.slug)) return { kind: 'installing' }
       const blocked = blockedReason(item)
       return blocked === undefined ? { kind: 'ready' } : { kind: 'blocked', reason: blocked }
     }
     if (tab === 'skill') {
       const held = installedSkillBySlug.get(item.slug)
       if (held !== undefined) return { kind: 'installed', closed: !held.enabled }
-      if (installing === item.slug) return { kind: 'installing' }
+      if (installing.has(item.slug)) return { kind: 'installing' }
       const blocked = blockedReason(item)
       return blocked === undefined ? { kind: 'ready' } : { kind: 'blocked', reason: blocked }
     }
@@ -575,14 +624,14 @@ export function MarketSection(
         ? { kind: 'installed' }
         : { kind: 'installed', broken: installed.broken }
     }
-    if (installing === item.slug) return { kind: 'installing' }
+    if (installing.has(item.slug)) return { kind: 'installing' }
     const reason = blockedReason(item)
     return reason === undefined ? { kind: 'ready' } : { kind: 'blocked', reason }
   }, [tab, installedById, installedSkillBySlug, connectedBySlug, installing, blockedReason, t])
 
   const install = useCallback(async (item: CatalogItem): Promise<InstallOutcome | undefined> => {
     if (item.artifact === undefined) return undefined
-    setInstalling(item.slug)
+    mark(item.slug, true)
     const result = await callHost<InstallOutcome>('market.install', {
       id: item.slug,
       name: item.name,
@@ -601,7 +650,7 @@ export function MarketSection(
       ...item.version === '' ? {} : { version: item.version },
       kernelApi: item.artifact.kernelApi,
     })
-    setInstalling(undefined)
+    mark(item.slug, false)
     setPending(undefined)
     const outcome: InstallOutcome = result.ok
       ? result.value
@@ -613,7 +662,7 @@ export function MarketSection(
     // it rather than assuming this install landed.
     await readInstalled(tab)
     return outcome
-  }, [callHost, tab, readInstalled])
+  }, [callHost, mark, tab, readInstalled])
 
   /**
    * The opening questions one expert publishes, asked once per slug.
@@ -700,18 +749,24 @@ export function MarketSection(
    * reads what to spawn from the console's manifest. That is the same rule the
    * preset installs follow, for the same reason — a renderer choosing what the
    * main process runs is the sink, whether it runs a fetch or a process.
+   *
+   * Success says nothing: the dot goes green, the corner turns into 「去对话」,
+   * and the composer capsule picks the row up — WorkBuddy's connect ends in a
+   * toast, not a dialog, and ours ends in the same quiet. Only a refusal earns
+   * the dialog, because a refusal is the one outcome with a next move to read.
+   * The in-flight flag belongs to the callers (`beginConnect`, `submitToken`),
+   * which hold it across the whole flow this call is one step of.
    */
   const connect = useCallback(async (item: CatalogItem, secret?: string): Promise<void> => {
-    setInstalling(item.slug)
     const result = await callHost<InstallOutcome>('market.connectorInstall', {
       slug: item.slug,
       name: item.name,
       ...item.version === '' ? {} : { version: item.version },
       ...secret === undefined ? {} : { token: secret },
     })
-    setInstalling(undefined)
     setToken(undefined)
     await readInstalled('connector')
+    if (result.ok && result.value.kind === 'installed') return
     setOutcome({
       item,
       outcome: result.ok
@@ -825,7 +880,6 @@ export function MarketSection(
       slug: item.slug,
     })
     if (!started.ok || started.value.kind === 'refused') {
-      setInstalling(undefined)
       setOutcome({
         item,
         outcome: {
@@ -838,32 +892,52 @@ export function MarketSection(
     }
     window.open(started.value.url, '_blank', 'noopener,noreferrer')
 
-    for (let waited = 0; waited < AUTHORIZE_TIMEOUT_MS; waited += AUTHORIZE_POLL_MS) {
-      await new Promise((settle) => { setTimeout(settle, AUTHORIZE_POLL_MS) })
-      const state = await callHost<ConnectorAuthorizationState>('market.connectorAuthorizeState', {
-        slug: item.slug,
-      })
-      if (!state.ok || state.value.kind === 'pending') continue
-      if (state.value.kind === 'authorized') {
-        // The grant is stored, so whichever path the caller came in on now
-        // finds a token: a first connect writes the record, a repair remounts
-        // the record that is already there.
-        setInstalling(undefined)
-        await settle(item)
+    // While this set holds the slug, the card's spinner is a cancel button.
+    setAuthWaiting(current => new Set(current).add(item.slug))
+    try {
+      for (let waited = 0; waited < AUTHORIZE_TIMEOUT_MS; waited += AUTHORIZE_POLL_MS) {
+        await new Promise((tick) => { setTimeout(tick, AUTHORIZE_POLL_MS) })
+        const state = await callHost<ConnectorAuthorizationState>('market.connectorAuthorizeState', {
+          slug: item.slug,
+        })
+        if (!state.ok || state.value.kind === 'pending') continue
+        if (state.value.kind === 'authorized') {
+          // The grant is stored, so whichever path the caller came in on now
+          // finds a token: a first connect writes the record, a repair remounts
+          // the record that is already there.
+          await settle(item)
+          return
+        }
+        if (state.value.kind === 'failed') {
+          setOutcome({
+            item,
+            outcome: { kind: 'refused', reason: 'needs-authorization', message: state.value.message },
+          })
+        }
+        // `cancelled` and `idle` say nothing: the one hand that could have
+        // cancelled is the user's own — on our button or on the browser tab —
+        // and the row going back to rest is the whole answer.
         return
       }
-      setInstalling(undefined)
-      setOutcome({
-        item,
-        outcome: {
-          kind: 'refused',
-          reason: 'needs-authorization',
-          message: state.value.kind === 'failed' ? state.value.message : '授权被取消了。',
-        },
+    } finally {
+      setAuthWaiting((current) => {
+        const next = new Set(current)
+        next.delete(item.slug)
+        return next
       })
-      return
     }
-    setInstalling(undefined)
+  }, [callHost])
+
+  /**
+   * Withdraw a running web sign-in, from the connecting card's cancel button.
+   *
+   * One call, no local bookkeeping: the host settles the attempt as
+   * `cancelled` (the kernel's own second-call knob,
+   * `ctx.authorization.cancel`), and the poll above reads that on its next
+   * tick — the same path an abandoned browser tab takes.
+   */
+  const cancelAuthorization = useCallback(async (item: CatalogItem): Promise<void> => {
+    await callHost<{ cancelled: boolean }>('market.connectorAuthorizeCancel', { slug: item.slug })
   }, [callHost])
 
   /**
@@ -877,27 +951,30 @@ export function MarketSection(
    */
   const repair = useCallback(async (item: CatalogItem): Promise<void> => {
     setDetail(undefined)
-    setInstalling(item.slug)
-    await authorize(item, async signedIn => {
-      const result = await callHost<RemountOutcome>('market.connectorRemount', {
-        slug: signedIn.slug,
-      })
-      setInstalling(undefined)
-      await readInstalled('connector')
-      // Only a failure is reported. A repair that worked says so by the row
-      // going healthy, and a dialog on top of that would be one more press
-      // between the user and the thing they came back to use.
-      if (result.ok && result.value.kind === 'mounted') return
-      setOutcome({
-        item: signedIn,
-        outcome: {
-          kind: 'refused',
-          reason: 'needs-authorization',
-          message: result.ok ? result.value.message : result.error.message,
-        },
-      })
-    })
-  }, [authorize, callHost, readInstalled])
+    mark(item.slug, true)
+    try {
+      await enqueue(() => authorize(item, async (signedIn) => {
+        const result = await callHost<RemountOutcome>('market.connectorRemount', {
+          slug: signedIn.slug,
+        })
+        await readInstalled('connector')
+        // Only a failure is reported. A repair that worked says so by the row
+        // going healthy, and a dialog on top of that would be one more press
+        // between the user and the thing they came back to use.
+        if (result.ok && result.value.kind === 'mounted') return
+        setOutcome({
+          item: signedIn,
+          outcome: {
+            kind: 'refused',
+            reason: 'needs-authorization',
+            message: result.ok ? result.value.message : result.error.message,
+          },
+        })
+      }))
+    } finally {
+      mark(item.slug, false)
+    }
+  }, [authorize, callHost, enqueue, mark, readInstalled])
 
   /**
    * Ask the host what this connector needs, then either connect or ask the user.
@@ -907,50 +984,70 @@ export function MarketSection(
    */
   const beginConnect = useCallback(async (item: CatalogItem): Promise<void> => {
     setDetail(undefined)
-    setInstalling(item.slug)
-    const reply = await callHost<ConnectorRequirement>('market.connectorRequirement', {
-      slug: item.slug,
-    })
-    if (!reply.ok) {
-      setInstalling(undefined)
-      setOutcome({
-        item,
-        outcome: { kind: 'refused', reason: 'bad-manifest', message: reply.error.message },
+    // Marked before the queue, not inside it: the press must answer on the
+    // card at once (WorkBuddy's optimistic `connectingIds`), even when another
+    // row's browser sign-in currently holds the one connect slot.
+    mark(item.slug, true)
+    try {
+      await enqueue(async () => {
+        const reply = await callHost<ConnectorRequirement>('market.connectorRequirement', {
+          slug: item.slug,
+        })
+        if (!reply.ok) {
+          setOutcome({
+            item,
+            outcome: { kind: 'refused', reason: 'bad-manifest', message: reply.error.message },
+          })
+          return
+        }
+        const requirement = reply.value
+        if (requirement.refusal !== undefined) {
+          setOutcome({
+            item,
+            outcome: {
+              kind: 'refused',
+              // The mode decides which refusal this is, because that is what the
+              // user can act on. `oauth` reaching here is the local-process case
+              // only — a sign-in that has nowhere to put its token — since a remote
+              // one is now started rather than refused.
+              reason: requirement.mode === 'oauth' ? 'unsupported-auth' : 'bad-manifest',
+              message: requirement.refusal,
+            },
+          })
+          return
+        }
+        // A connector already signed in to connects like any other: the token is
+        // in the credential seam and the host looks it up by slug.
+        if (requirement.mode === 'oauth' && requirement.authorized !== true) {
+          // The spinner spans the whole browser round trip; the finally below
+          // clears it whichever way the sign-in ends.
+          await authorize(item, connect)
+          return
+        }
+        if (requirement.mode === 'token') {
+          setToken({ item, requirement, value: '' })
+          return
+        }
+        await connect(item)
       })
-      return
+    } finally {
+      mark(item.slug, false)
     }
-    const requirement = reply.value
-    if (requirement.refusal !== undefined) {
-      setInstalling(undefined)
-      setOutcome({
-        item,
-        outcome: {
-          kind: 'refused',
-          // The mode decides which refusal this is, because that is what the
-          // user can act on. `oauth` reaching here is the local-process case
-          // only — a sign-in that has nowhere to put its token — since a remote
-          // one is now started rather than refused.
-          reason: requirement.mode === 'oauth' ? 'unsupported-auth' : 'bad-manifest',
-          message: requirement.refusal,
-        },
-      })
-      return
+  }, [authorize, callHost, connect, enqueue, mark])
+
+  /**
+   * Hand the token dialog's secret to the connect, holding the row's flag for
+   * the round trip — the dialog stays up with a busy confirm until the host
+   * answers, then either closes on success or yields to the refusal dialog.
+   */
+  const submitToken = useCallback(async (item: CatalogItem, secret: string): Promise<void> => {
+    mark(item.slug, true)
+    try {
+      await enqueue(() => connect(item, secret))
+    } finally {
+      mark(item.slug, false)
     }
-    // A connector already signed in to connects like any other: the token is in
-    // the credential seam and the host looks it up by slug.
-    if (requirement.mode === 'oauth' && requirement.authorized !== true) {
-      // Left spinning on purpose — the browser is about to take over, and the
-      // row has to keep saying something is in progress until it comes back.
-      await authorize(item, connect)
-      return
-    }
-    setInstalling(undefined)
-    if (requirement.mode === 'token') {
-      setToken({ item, requirement, value: '' })
-      return
-    }
-    await connect(item)
-  }, [authorize, callHost, connect])
+  }, [connect, enqueue, mark])
 
   /**
    * The card's primary action.
@@ -1067,9 +1164,9 @@ export function MarketSection(
       })
       return
     }
-    setInstalling('local')
+    mark('local', true)
     const result = await callHost<InstallOutcome>('market.skillImport', { path: pick.path })
-    setInstalling(undefined)
+    mark('local', false)
     await readInstalled('skill')
     const outcome: InstallOutcome = result.ok
       ? result.value
@@ -1080,7 +1177,7 @@ export function MarketSection(
       item: outcome.kind === 'installed' ? { ...placeholder, name: outcome.id } : placeholder,
       outcome,
     })
-  }, [callHost, readInstalled, t])
+  }, [callHost, mark, readInstalled, t])
 
   /**
    * «试一试» on a skill.
@@ -1253,15 +1350,25 @@ export function MarketSection(
           // yellow through the whole connect (including the browser sign-in
           // wait), green once up, red for a row that did not come up.
           ...((): { dot?: 'connected' | 'connecting' | 'offline' } => {
-            if (installing === item.slug) return { dot: 'connecting' }
+            if (installing.has(item.slug)) return { dot: 'connecting' }
             const connected = connectedBySlug.get(item.slug)
             if (connected === undefined) return {}
             return { dot: connected.live ? 'connected' : 'offline' }
           })(),
+          // A row waiting on its browser sign-in can be withdrawn from here:
+          // the spinner turns into a ✕ under the pointer (WorkBuddy's
+          // cancellable connecting state), and the press settles the attempt
+          // as cancelled — no dialog, the row just comes back to rest.
+          ...authWaiting.has(item.slug)
+            ? {
+              onCancel: () => { void cancelAuthorization(item) },
+              cancelLabel: t('connectorCancelAuth'),
+            }
+            : {},
         }
         : {}}
       {...tab === 'connector' && summon !== undefined
-        && connectedBySlug.get(item.slug)?.live === true && installing !== item.slug
+        && connectedBySlug.get(item.slug)?.live === true && !installing.has(item.slug)
         ? {
           // The connected card's act is 「去对话」, not a re-run: chat glyph
           // under the pointer, and the press lands in a fresh session.
@@ -1303,7 +1410,7 @@ export function MarketSection(
           },
         }
         : {}}
-      {...connectorRow(connectedBySlug.get(item.slug), installing === item.slug)?.repairable === true
+      {...connectorRow(connectedBySlug.get(item.slug), installing.has(item.slug))?.repairable === true
         ? { onRepair: () => { void repair(item) }, repairLabel: t('connectorReauthorize') }
         : {}}
       onOpen={() => openDetail(item)}
@@ -1411,7 +1518,7 @@ export function MarketSection(
                 id: 'local',
                 label: t('skillAddLocal'),
                 icon: <IconFolderOpenOutline16 />,
-                disabled: installing !== undefined,
+                disabled: installing.size > 0,
               },
             ]}
             onClose={() => setAdding(false)}
@@ -1677,7 +1784,7 @@ export function MarketSection(
       <MarketConfirm
         item={pending?.item}
         path={destination}
-        busy={installing !== undefined}
+        busy={pending !== undefined && installing.has(pending.item.slug)}
         summonable={summon !== undefined}
         t={t}
         onCancel={() => setPending(undefined)}
@@ -1688,11 +1795,11 @@ export function MarketSection(
         item={token?.item}
         {...token?.requirement.label === undefined ? {} : { label: token.requirement.label }}
         value={token?.value ?? ''}
-        busy={installing !== undefined}
+        busy={token !== undefined && installing.has(token.item.slug)}
         t={t}
         onChange={value => setToken(current => (current === undefined ? current : { ...current, value }))}
         onCancel={() => setToken(undefined)}
-        onConfirm={() => { if (token !== undefined) void connect(token.item, token.value) }}
+        onConfirm={() => { if (token !== undefined) void submitToken(token.item, token.value) }}
       />
 
       <CustomConnector
