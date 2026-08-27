@@ -47,11 +47,6 @@ import { ACCOUNT_TRIGGER_PRIORITY, AccountTrigger } from './AccountTrigger.tsx'
 import type { AccountTriggerInjected } from './AccountTrigger.tsx'
 import { ATTACH_FILE_ID, ATTACH_FILE_ORDER, AttachFileButton } from './AttachFileButton.tsx'
 import { CONNECTOR_CAPSULE_ID, CONNECTOR_CAPSULE_ORDER, ConnectorCapsule } from './ConnectorCapsule.tsx'
-import {
-  HOME_CASES_ID, HOME_CASES_ORDER, HOME_SCENES_ID, HOME_SCENES_ORDER,
-  HomeCasesDock, HomeScenesDock, type HomeContentInjected,
-} from './HomeContent.tsx'
-import { HomeContentStore } from './home-content-store.ts'
 import type { ConnectorCapsuleInjected } from './ConnectorCapsule.tsx'
 import type { AttachFileInjected } from './AttachFileButton.tsx'
 import {
@@ -778,30 +773,11 @@ export function apply(ctx: ClientContext): void {
     inject: (): ConnectorCapsuleInjected => ({ callHost }),
   }, ConnectorCapsule))
 
-  // The blank-composer home content: scene chips and starter prompts above the
-  // input, featured cases below it (CSS `order` in `HomeContent.tsx` does the
-  // split — the dock is one column). One store feeds both seats, same pattern
-  // as `PresetRoster`: a plain snapshot/subscribe pair passed through `hooks`,
-  // not a kernel store handle, so both seats can share it freely.
-  const homeContent = new HomeContentStore(callHost)
-  const homeFace = (): HomeContentInjected => ({
-    hooks: { homeContent },
-    load: () => { void homeContent.load() },
-    selectScene: slug => { homeContent.selectScene(slug) },
-    callHost,
-  })
-  ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
-    name: 'conversation.input.dock',
-    id: HOME_SCENES_ID,
-    order: HOME_SCENES_ORDER,
-    locale: MARKET_NS,
-    inject: homeFace,
-  }, HomeScenesDock))
-  ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
-    name: 'conversation.input.dock',
-    id: HOME_CASES_ID,
-    order: HOME_CASES_ORDER,
-    locale: MARKET_NS,
-    inject: homeFace,
-  }, HomeCasesDock))
+  // The blank-composer home content (`HomeContent.tsx`: scene chips and
+  // starter prompts above the input, featured cases below) is deliberately
+  // *not* registered: the home page's product design is not settled
+  // (2026-08-28 拍板,先摘下等设计), so the module and its host half stay
+  // shipped but parked. Wiring it back is one register per seat on
+  // `conversation.input.dock`, with a shared `HomeContentStore(callHost)`
+  // passed through `hooks` to both — the `PresetRoster` pattern.
 }

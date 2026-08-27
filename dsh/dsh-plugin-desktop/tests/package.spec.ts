@@ -227,12 +227,12 @@ describe('published package surface', () => {
     expect(home).toContain('/api/desktop-content/playbooks')
     expect(cache).toContain('openlux-content-cache.json')
     expect(cache).toContain("headers['If-None-Match']")
-    expect(client).toContain("ctx.slots.inject('conversation.input.dock'")
-    for (const runtime of [hostRuntime, clientRuntime]) {
-      expect(runtime).toContain('market.home')
-    }
-    expect(clientRuntime).toContain('openlux-home-scenes')
-    expect(clientRuntime).toContain('openlux-home-cases')
+    // The dock seats are shipped but deliberately parked (2026-08-28 拍板):
+    // the home page's product design is not settled, so the client must NOT
+    // register `conversation.input.dock` until it is. The host half stays
+    // wired — the market's featured strip reads the same content platform.
+    expect(client).not.toContain("ctx.slots.inject('conversation.input.dock'")
+    expect(hostRuntime).toContain('market.home')
   })
 
   it('ships the frameless shell as the product default, declared in both places', () => {
