@@ -1,0 +1,26 @@
+diff --git a/lib/client.js b/lib/client.js
+index 2f0be4ef86113c65657fcb7ce254f2e17701cf3d..4780b2bdd7223ab626bdb2cba0f0452b17956e5a 100644
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -712,7 +712,12 @@ window.__ModuleLoader__.load({
+ 					id: "archive",
+ 					label: t("menu.archiveSession"),
+ 					icon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconArchiveOutline20, { size: 16 })
+-				}
++				},
++				...typeof window !== "undefined" && window.__openluxSessionActions ? [{
++					id: "openlux-delete",
++					label: window.__openluxSessionActions.deleteLabel,
++					icon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconTrashOutline16, {})
++				}] : []
+ 			];
+ 			return (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.HoverCard, {
+ 				anchor: (0, react_jsx_runtime.jsxs)("div", {
+@@ -766,6 +771,7 @@ window.__ModuleLoader__.load({
+ 									if (id === "rename") onRename(node.id, row.title);
+ 									if (id === "fork") onFork(node.id);
+ 									if (id === "archive") onArchive(node.id);
++									if (id === "openlux-delete") window.__openluxSessionActions?.requestDelete(node.id, row.title);
+ 								},
+ 								portal: true,
+ 								closeOnPointerLeave: true,

@@ -1,0 +1,57 @@
+diff --git a/lib/index.js b/lib/index.js
+index 5398bcea360c1f459d02880d41b1af42eaf8e3a8..5a1553b5ddfc3700ff19155e3e444578ea158231 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -2095,11 +2095,13 @@ function createApiProxy(ctx, defaults) {
+ 						events: inspected.events
+ 					});
+ 					assertPresetUnchanged(sessionId, presetId, storedPreset);
+-					return (await ctx.agents.resume({
++					const resumedHandle = await ctx.agents.resume({
+ 						resumeSessionId: sessionId,
+ 						agentOptions: agentOptions(),
+ 						setup: (await composeAgent(storedPreset)).setup
+-					})).agent;
++					});
++					(globalThis.__openluxAgentHandles ??= new Map()).set(sessionId, resumedHandle);
++					return resumedHandle.agent;
+ 				}
+ 				try {
+ 					await mkdir(cwd, { recursive: true });
+@@ -2107,7 +2109,7 @@ function createApiProxy(ctx, defaults) {
+ 					throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error });
+ 				}
+ 				const composition = await composeAgent(presetId);
+-				return (await ctx.agents.create({
++				const createdHandle = await ctx.agents.create({
+ 					sessionId,
+ 					agentOptions: agentOptions(),
+ 					meta: {
+@@ -2115,7 +2117,9 @@ function createApiProxy(ctx, defaults) {
+ 						...composition.agentPreset === void 0 ? {} : { agentPreset: composition.agentPreset }
+ 					},
+ 					setup: composition.setup
+-				})).agent;
++				});
++				(globalThis.__openluxAgentHandles ??= new Map()).set(sessionId, createdHandle);
++				return createdHandle.agent;
+ 			})().catch((error) => {
+ 				const live = ctx.agents.get(sessionId);
+ 				if (live !== void 0) {
+@@ -2697,7 +2701,7 @@ function createApiProxy(ctx, defaults) {
+ 				const childId = `session-${randomUUID()}`;
+ 				const forkComposition = await composeAgent(resolveSessionPreset(source));
+ 				try {
+-					await ctx.agents.create({
++					const forkedHandle = await ctx.agents.create({
+ 						sessionId: childId,
+ 						seed: events.slice(0, cut),
+ 						meta: {
+@@ -2709,6 +2713,7 @@ function createApiProxy(ctx, defaults) {
+ 						agentOptions: agentOptions(),
+ 						setup: forkComposition.setup
+ 					});
++					(globalThis.__openluxAgentHandles ??= new Map()).set(childId, forkedHandle);
+ 				} catch (error) {
+ 					return err(request, {
+ 						code: "internal",

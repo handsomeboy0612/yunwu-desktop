@@ -450,19 +450,21 @@ export async function uninstallConnector(ctx: Context, slug: string): Promise<bo
 /**
  * Where a user's own MCP servers go.
  *
- * ## Why a file the user edits, and not a form
+ * ## A file the user edits, in an editor we draw
  *
- * WorkBuddy's «自定义连接器» is one button that opens the MCP config file in
- * the editor it is hosted inside (`adapter.openMcpConfig` → a VS Code command),
- * and its own panel shows no card for what is in there. So the shape being
- * matched is «编辑自己的配置文件», not «填一张表».
- *
- * It is also the only shape that keeps a property the shelf path has: the
- * renderer never names a command to spawn. A paste box would hand
- * `{ command, args }` from the browser half to the main process, which is the
- * same sink as a renderer naming a URL for the host to fetch — and this
- * renderer displays model output. Here the browser half can ask for exactly two
- * things, «open my file» and «re-read it», and the bytes come off disk.
+ * The desktop WorkBuddy being matched edits `~/.workbuddy/mcp.json` *inside
+ * the app*: its «MCP 服务管理» dialog loads the text through
+ * `adapter.getMcpConfigContent`, shows a Monaco editor, and writes through
+ * `adapter.saveMcpConfigContent` after parse → sanitize → validate
+ * (`mcp-config-editor.tsx`). An earlier revision of this module refused to
+ * take config bytes from the renderer at all — the reasoning was that a paste
+ * box hands `{ command, args }` from a surface that displays model output to
+ * the process that will spawn them — and only offered «打开文件» and
+ * «重新读取». That kept the property but lost the product: the user was sent
+ * to an external editor for a flow the reference does in place (decided
+ * 2026-08-28, aligning with WorkBuddy's dialog). The write path validates the
+ * same way the read path does, and what lands on disk is still the only
+ * source of what mounts.
  *
  * The format is the one MCP servers publish in their own READMEs, which is also
  * Claude Desktop's and Cursor's, so a config can be pasted in unchanged.
@@ -483,6 +485,15 @@ export function customPath(): string {
   return dshHomePath(CUSTOM_FILE)
 }
 
+/** One server from the user's file, as the dialog's list shows it. */
+export interface CustomRow {
+  /** Its key under `mcpServers`. */
+  readonly name: string
+  readonly live: boolean
+  /** Why it is not, in the words {@link explain} chose. */
+  readonly problem?: string
+}
+
 /** What one re-read of the user's file did. */
 export interface CustomSync {
   /** How many of the user's servers are live now. */
@@ -491,6 +502,13 @@ export interface CustomSync {
   readonly problems: readonly string[]
   /** The file, so the dialog can show it even when nothing parsed. */
   readonly path: string
+  /**
+   * Every server the file names, in file order, each with its verdict —
+   * WorkBuddy's dialog opens on a *list* of servers, not on the JSON, so the
+   * caller needs rows and not just the two counts. Empty when the file did
+   * not parse; `problems` then carries the reason.
+   */
+  readonly rows: readonly CustomRow[]
 }
 
 /**
@@ -505,7 +523,7 @@ export interface CustomSync {
 export async function syncCustomConnectors(ctx: Context): Promise<CustomSync> {
   const path = customPath()
   const parsed = await readCustomFile(path)
-  if (parsed.kind === 'unreadable') return { live: 0, problems: [parsed.message], path }
+  if (parsed.kind === 'unreadable') return { live: 0, problems: [parsed.message], path, rows: [] }
 
   const wanted = new Map(parsed.servers.map(row => [row.serverName, row] as const))
   // Gone from the file means gone from the process: the file is the whole truth
@@ -519,17 +537,20 @@ export async function syncCustomConnectors(ctx: Context): Promise<CustomSync> {
   }
 
   const problems: string[] = []
+  const rows: CustomRow[] = []
   let live = 0
   for (const row of parsed.servers) {
     const slug = `${CUSTOM_SLUG_PREFIX}${row.serverName}`
     const already = mounted.get(slug)
     if (already !== undefined && already.failure === undefined) {
       live += 1
+      rows.push({ name: row.serverName, live: true })
       continue
     }
     const built = buildConfig({ mcpName: row.serverName, server: row.server })
     if (built.kind === 'refused') {
       problems.push(`${row.serverName}：${built.message}`)
+      rows.push({ name: row.serverName, live: false, problem: built.message })
       continue
     }
     const mount = await mountEntry(ctx, built.serverName, built.config)
@@ -540,14 +561,17 @@ export async function syncCustomConnectors(ctx: Context): Promise<CustomSync> {
       // remote transport is spelled `streamable-http`, so the local one is what
       // gets matched on.
       const transport = built.config.transport === 'stdio' ? 'stdio' : 'http'
-      problems.push(`${row.serverName}：${explain(mount.message, transport)}`)
+      const explained = explain(mount.message, transport)
+      problems.push(`${row.serverName}：${explained}`)
+      rows.push({ name: row.serverName, live: false, problem: explained })
       continue
     }
     mounted.set(slug, { entryId: mount.entryId })
     live += 1
+    rows.push({ name: row.serverName, live: true })
   }
   ctx.logger.info(`openlux: custom connectors, ${live} live, ${problems.length} not`)
-  return { live, problems, path }
+  return { live, problems, path, rows }
 }
 
 /** Slug prefix for the user's own servers, keeping them out of the shelf's space. */
@@ -620,6 +644,119 @@ export async function openCustomFile(ctx: Context): Promise<CustomOpen> {
       error instanceof Error ? error.message : String(error)}`)
     return { path, did: 'nothing' }
   }
+}
+
+/** The user's file as text, for the in-app editor. */
+export interface CustomFileContent {
+  /** Where it lives, shown above the editor like WorkBuddy's 「配置文件路径」. */
+  readonly path: string
+  /** The bytes, template included when this read created the file. */
+  readonly content: string
+}
+
+/**
+ * Hand the file's text to the editor, creating it from the template first.
+ *
+ * Creation happens here and not only in {@link openCustomFile} because the
+ * editor is now the primary way in: the first open should show the template's
+ * shape, not an empty box the user has to guess the schema into.
+ * @returns the path and the text.
+ */
+export async function readCustomFileContent(): Promise<CustomFileContent> {
+  const path = customPath()
+  try {
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, CUSTOM_TEMPLATE, { encoding: 'utf8', flag: 'wx' })
+  } catch {
+    // Already there; a real problem shows up in the read below.
+  }
+  try {
+    return { path, content: await readFile(path, 'utf8') }
+  } catch {
+    // Unreadable but present (permissions, a directory in the way). The editor
+    // still needs something to show; saving will surface the real fault.
+    return { path, content: CUSTOM_TEMPLATE }
+  }
+}
+
+/** What saving the editor's text did. */
+export type CustomSave =
+  | { readonly kind: 'refused'; readonly message: string }
+  | {
+    readonly kind: 'saved'
+    /** What actually landed on disk — normalized when the sanitizer had to move things. */
+    readonly content: string
+    /** The re-read that followed, same shape the «重新读取» button answered with. */
+    readonly sync: CustomSync
+  }
+
+/**
+ * Validate, write, and mount what the editor sent.
+ *
+ * The gate mirrors WorkBuddy's save (`mcp-config-editor.tsx`): parse, hoist a
+ * nested `mcpServers.mcpServers` (outer wins, their sanitizer's rule), refuse
+ * shapes the mount loop would silently skip. Refusals return as values rather
+ * than throw, because every one of them is a sentence for the dialog, not a
+ * fault. Nothing touches disk until the text has passed the same checks the
+ * read path applies, so a refused save leaves the last good file in place.
+ * @param ctx - host context.
+ * @param content - the editor's text, verbatim.
+ * @returns what was written and what came up, or why nothing was.
+ */
+export async function saveCustomFileContent(ctx: Context, content: string): Promise<CustomSave> {
+  // A malformed payload must not quietly become «reset my file to the template».
+  if (content.length > 256 * 1024) {
+    return { kind: 'refused', message: '这个文件太大了，先精简到 256KB 以内。' }
+  }
+  const body = content.trim() === '' ? CUSTOM_TEMPLATE : content
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body)
+  } catch (error: unknown) {
+    return {
+      kind: 'refused',
+      message: `配置文件不是合法的 JSON：${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { kind: 'refused', message: '配置文件的最外层要是一个对象。' }
+  }
+  const outer = parsed as Record<string, unknown>
+  const wrapper = outer.mcpServers ?? outer.servers
+  if (typeof wrapper !== 'object' || wrapper === null || Array.isArray(wrapper)) {
+    return { kind: 'refused', message: '配置文件里要有一个 mcpServers 对象。' }
+  }
+  // WorkBuddy's sanitizer: `mcpServers.mcpServers` is the classic paste slip
+  // (copying a whole file into an entry seat); hoist the inner rows up, keep
+  // the outer one on a name collision.
+  const servers = wrapper as Record<string, unknown>
+  const nested = servers.mcpServers
+  let hoisted = false
+  if (typeof nested === 'object' && nested !== null && !Array.isArray(nested)) {
+    for (const [name, entry] of Object.entries(nested as Record<string, unknown>)) {
+      if (!(name in servers)) servers[name] = entry
+    }
+    delete servers.mcpServers
+    hoisted = true
+  }
+  // The read path skips a non-object entry without a word; at save time silence
+  // would read as «my server vanished», so it is refused with the name.
+  for (const [serverName, server] of Object.entries(servers)) {
+    if (typeof server !== 'object' || server === null || Array.isArray(server)) {
+      return { kind: 'refused', message: `「${serverName}」的配置要是一个对象。` }
+    }
+  }
+  const toSave = hoisted || body !== content ? `${JSON.stringify(parsed, null, 2)}\n` : content
+  const path = customPath()
+  try {
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, toSave, 'utf8')
+  } catch (error: unknown) {
+    const reason = error instanceof Error ? error.message : String(error)
+    ctx.logger.warn(`openlux: could not save ${path}: ${reason}`)
+    return { kind: 'refused', message: `写不进 ${path}：${reason}` }
+  }
+  return { kind: 'saved', content: toSave, sync: await syncCustomConnectors(ctx) }
 }
 
 /** What reading the user's file produced. */

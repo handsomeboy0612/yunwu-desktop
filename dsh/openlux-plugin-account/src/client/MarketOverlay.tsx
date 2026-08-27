@@ -16,6 +16,7 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import { MarketSection, type MarketSectionInjected } from './MarketSection.tsx'
+import { watchMarketOpen } from './market-open-request.ts'
 import type { MarketViewStore } from './market-view-store.ts'
 
 /** Overlay slot id; shares the launcher's product name on purpose. */
@@ -120,6 +121,11 @@ export function MarketOverlay(
   const open = useStore(state => state.open)
   const summonable = useSummonReady(ready => ready)
   const panel = useRef<HTMLElement>(null)
+
+  // Session-scoped seats (the composer's connector capsule) cannot hold this
+  // store's handle — the kernel allows one scope per handle — so they ask
+  // through the request module and the store's owner opens on their behalf.
+  useEffect(() => watchMarketOpen(() => actions.open()), [actions])
 
   useEffect(() => {
     if (!open) return

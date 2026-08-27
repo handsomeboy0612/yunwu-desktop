@@ -34,11 +34,29 @@
  * kernel-declared value (`ReferenceInsert.appearance` is
  * `'session' | 'file' | 'folder'`), which is where the glyph comes from.
  *
- * ## What the model sees does not change
+ * ## The model's form is the kernel's own mention grammar
  *
- * `fileReferenceText` is the exact string the old draft carried — the path in
- * backticks — so the prompt is byte-identical to before for every file. Only
- * the on-screen form moved.
+ * `fileReferenceText` serializes a chip to `@"<absolute path>"` — the quoted
+ * file-mention shape of `dsh-client-ui-reference` (`formatFileMention`). Two
+ * things hang off that shape and off no other:
+ *
+ * - **The sent bubble re-decorates it.** `ui-conversation`'s `projectUserText`
+ *   scans sent text by shape alone — `(^|\s)` then `/name`, `@token` or
+ *   `@"quoted path"` — and draws icon + basename in business colour. The
+ *   backticked path this codec produced before 2026-08-28 was invisible to
+ *   that scan, so every attachment degraded to a raw path the moment the
+ *   message was sent.
+ * - **The host attaches nothing to it.** File mentions are a plain text suffix
+ *   on the user message (the reference README's KV-cache note; only *session*
+ *   mentions are validated at `agent/pre-step`), so the swap is notation-only
+ *   for the model — and it is the notation stock DSH already ships when a
+ *   file is picked from the `@` menu.
+ *
+ * Upstream quotes only paths containing whitespace; this codec quotes always.
+ * The bubble's bare-token scan strips trailing punctuation (`.,;:!?，。；：！？`)
+ * off an unquoted token, which can eat the tail of a filename, and Windows
+ * filenames cannot contain `"` (`formatFileMention` refuses such paths for the
+ * same reason) — so the quoted form is one shape that is safe for every path.
  *
  * ## The chip does not outlive the view, and that is what decides `clipboardText`
  *
@@ -48,14 +66,14 @@
  * clipboard and the chat store). So a restart — measured 2026-08-24, and the
  * same on any remount — brings the draft back as flat text.
  *
- * That is why `clipboardText` is the *backticked* path rather than the bare one.
- * The restored text has to be the exact string the send would have produced,
- * because it is now what the send *will* produce, and bare paths joined by
- * spaces stop being parseable the moment one of them has a space in it —
- * `C:\Users\me\My Documents\a.xlsx C:\b.pptx` is unreadable to the model and
- * common on Windows. The cost is that copying a chip yields the path in
- * backticks, which a shell paste would have to strip; that is a human noticing
- * and fixing a visible thing, against an agent silently opening the wrong path.
+ * That is why `clipboardText` is the *quoted mention* rather than the bare
+ * path. The restored text has to be the exact string the send would have
+ * produced, because it is now what the send *will* produce, and bare paths
+ * joined by spaces stop being parseable the moment one of them has a space in
+ * it — `C:\Users\me\My Documents\a.xlsx C:\b.pptx` is unreadable to the model
+ * and common on Windows. The cost is that copying a chip yields `@"path"`,
+ * which a shell paste would have to strip; that is a human noticing and fixing
+ * a visible thing, against an agent silently opening the wrong path.
  *
  * ## What is given up, and why that is the right trade
  *
@@ -82,16 +100,18 @@ import type { SessionComposer } from './summon.ts'
 export const FILE_REFERENCE_SOURCE = 'openlux-file'
 
 /**
- * The model's form of one attached file: its absolute path, in backticks.
+ * The model's form of one attached file: a quoted kernel file mention.
  *
- * Backticks because a path reads as a path in prose and because that is what
- * this plugin's draft carried before chips existed — the persona guidance and
- * the file-reading tools were written against exactly this shape.
+ * See the module note on the mention grammar for why this shape and why the
+ * quotes are unconditional. The persona guidance is shape-agnostic — "文件路径
+ * 是本机真实存在的文件" keys on the path appearing in the message, not on any
+ * delimiter (`persona/tool-reality.ts`) — so nothing model-side kept the old
+ * backticks alive.
  * @param path - the file's absolute path.
  * @returns the text that replaces the chip's range at submit time.
  */
 export function fileReferenceText(path: string): string {
-  return `\`${path}\``
+  return `@"${path}"`
 }
 
 /**

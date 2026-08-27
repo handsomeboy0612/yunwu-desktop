@@ -45,11 +45,13 @@ import {
   readFeaturedScenes, readHomeContent, readPlaybookArtifact, readRelatedPlaybooks,
 } from './market/home-content.ts'
 import { installPreset, readInstallTarget, type InstallOutcome, type InstallRequest, type InstallTarget } from './market/install.ts'
-import { importLocalSkill, installSkill, readSkillTarget, removeSkill } from './market/skill-install.ts'
+import {
+  importLocalSkill, installSkill, readSkillTarget, removeSkill, setSkillEnabled,
+} from './market/skill-install.ts'
 import {
   authorizeConnector, connectorAuthorizationState, installConnector, openCustomFile,
-  readConnectorRequirement, readConnectorTarget, remountConnector, restoreConnectors,
-  syncCustomConnectors, uninstallConnector,
+  readConnectorRequirement, readConnectorTarget, readCustomFileContent, remountConnector,
+  restoreConnectors, saveCustomFileContent, syncCustomConnectors, uninstallConnector,
 } from './market/connector-install.ts'
 import { registerConnectorOfferTool } from './market/connector-offer.ts'
 import type { ConnectorRequest } from './market/wire.ts'
@@ -451,6 +453,12 @@ async function route(
     case 'market.skillRemove':
       return { ok: true, value: { removed: await removeSkill(slugOf(payload)) } }
 
+    case 'market.skillSetEnabled': {
+      const enabled = enabledFlagOf(payload)
+      if (enabled === undefined) return { ok: true, value: { updated: false } }
+      return { ok: true, value: { updated: await setSkillEnabled(slugOf(payload), enabled) } }
+    }
+
     // The connector partition's own "what is already there", plus whether this
     // deployment can mount anything at all.
     case 'market.connectors':
@@ -506,14 +514,28 @@ async function route(
         value: await serialize(() => remountConnector(ctx, slugOf(payload))),
       }
 
-    // The user's own servers, which live in a file they edit — WorkBuddy's shape
-    // for the same button. Two calls, and neither takes a command from the
-    // renderer: open the file, and re-read it.
+    // The user's own servers, edited in the dialog itself — WorkBuddy's
+    // «MCP 服务管理» shape (see the decision note on `connector-install.ts`).
+    // Read hands the text over, write validates before anything touches disk,
+    // and the external-editor pair stays for whoever still prefers it.
     case 'market.connectorCustomOpen':
       return { ok: true, value: await openCustomFile(ctx) }
 
     case 'market.connectorCustomSync':
       return { ok: true, value: await serialize(() => syncCustomConnectors(ctx)) }
+
+    case 'market.connectorCustomRead':
+      return { ok: true, value: await readCustomFileContent() }
+
+    case 'market.connectorCustomWrite': {
+      const text = (payload as { content?: unknown } | null)?.content
+      // Not a string means a caller bug, and falling through would quietly
+      // reset the user's file to the template — refuse instead.
+      if (typeof text !== 'string') {
+        return { ok: true, value: { kind: 'refused', message: '没有收到要保存的内容。' } }
+      }
+      return { ok: true, value: await serialize(() => saveCustomFileContent(ctx, text)) }
+    }
 
     // The opening questions one expert publishes. Separate from the catalog
     // because the manifest is a longtext column the snapshot withholds, and
@@ -764,6 +786,12 @@ function connectorRequestOf(payload: unknown): ConnectorRequest {
 function slugOf(payload: unknown): string {
   const value = (payload as { slug?: unknown } | null)?.slug
   return typeof value === 'string' ? value.trim() : ''
+}
+
+/** Read a boolean `enabled` flag, undefined when the payload did not send one. */
+function enabledFlagOf(payload: unknown): boolean | undefined {
+  const value = (payload as { enabled?: unknown } | null)?.enabled
+  return typeof value === 'boolean' ? value : undefined
 }
 
 /**

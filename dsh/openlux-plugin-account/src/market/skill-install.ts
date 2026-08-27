@@ -138,6 +138,7 @@ export async function readSkillTarget(): Promise<SkillTarget> {
       slug,
       name: frontMatterName(head) ?? slug,
       managed: provenance !== undefined,
+      enabled: invocationEnabled(head),
       ...provenance?.version === undefined ? {} : { version: provenance.version },
     })
   }
@@ -294,6 +295,36 @@ export async function removeSkill(slug: string): Promise<boolean> {
 }
 
 /**
+ * Close or reopen one installed skill without deleting it.
+ *
+ * WorkBuddy's card menu「关闭 / 启用」is this result: the directory stays, the
+ * model stops seeing it. DSH has no `skills.entries.*.enabled` — the filesystem
+ * provider's invocation keys are the knob (`dsh-skill-filesystem` README, the
+ * `disable-model-invocation` / `user-invocable` pair). Closing writes both so
+ * the catalog line and the slash menu disappear together; opening restores the
+ * permissive defaults. The root is watched, so the next turn picks this up
+ * without a restart.
+ *
+ * @param slug - the directory name, from the installed list.
+ * @param enabled - true to reopen, false to close.
+ * @returns whether the file was there to patch.
+ */
+export async function setSkillEnabled(slug: string, enabled: boolean): Promise<boolean> {
+  if (!PRESET_ID.test(slug)) return false
+  const path = join(skillRoot(), slug, SKILL_FILE)
+  let text: string
+  try {
+    text = await readFile(path, 'utf8')
+  } catch {
+    return false
+  }
+  const next = patchInvocation(text, enabled)
+  if (next === undefined) return false
+  if (next !== text) await writeFile(path, next)
+  return true
+}
+
+/**
  * Write one skill into its final directory, last file first.
  *
  * Staged-then-renamed is the usual way to make a directory appear whole, and it
@@ -432,6 +463,67 @@ function frontMatterName(head: string): string | undefined {
   const line = /^name:[ \t]*(.+)$/mu.exec(block)?.[1]?.trim()
   if (line === undefined || line === '' || line.startsWith('>') || line.startsWith('|')) return undefined
   return line.replace(/^["']|["']$/gu, '')
+}
+
+/**
+ * Whether this skill is still on for the model and the slash menu.
+ *
+ * Mirrors `dsh-skill-filesystem`'s `parseInvocationPolicy`: omitted keys default
+ * to allowing both surfaces; `user-invocable: false` or
+ * `disable-model-invocation: true` closes one. A skill we closed writes both.
+ */
+function invocationEnabled(head: string): boolean {
+  return frontMatterBoolean(head, 'user-invocable') !== false
+    && frontMatterBoolean(head, 'disable-model-invocation') !== true
+}
+
+/**
+ * Read one invocation flag the way the filesystem provider does.
+ *
+ * Invalid values are treated as absent rather than throwing: this is a roster
+ * scan, and one malformed skill must not blank the whole list.
+ */
+function frontMatterBoolean(head: string, key: string): boolean | undefined {
+  if (!head.startsWith('---')) return undefined
+  const end = head.indexOf('\n---', 3)
+  const block = end === -1 ? head : head.slice(0, end)
+  const line = new RegExp(`^${key}:[ \\t]*(.+)$`, 'mu').exec(block)?.[1]?.trim()
+  if (line === undefined) return undefined
+  const value = line.replace(/^["']|["']$/gu, '').toLowerCase()
+  if (value === 'true' || value === 'yes' || value === 'on' || value === '1') return true
+  if (value === 'false' || value === 'no' || value === 'off' || value === '0') return false
+  return undefined
+}
+
+/**
+ * Write the two invocation keys that closing/opening a skill means.
+ *
+ * @returns the patched file, or undefined when the existing front matter cannot
+ *   be found as a closed `---` pair (we refuse to invent a second parser).
+ */
+function patchInvocation(text: string, enabled: boolean): string | undefined {
+  const userInvocable = enabled
+  const disableModel = !enabled
+  if (!text.startsWith('---')) {
+    return `---\nuser-invocable: ${userInvocable}\ndisable-model-invocation: ${disableModel}\n---\n${text}`
+  }
+  const end = text.indexOf('\n---', 3)
+  if (end === -1) return undefined
+  let matter = text.slice(4, end)
+  matter = upsertYamlBoolean(matter, 'user-invocable', userInvocable)
+  matter = upsertYamlBoolean(matter, 'disable-model-invocation', disableModel)
+  const prefix = matter.startsWith('\n') ? '---' : '---\n'
+  const suffix = matter.endsWith('\n') ? '' : '\n'
+  return `${prefix}${matter}${suffix}---${text.slice(end + 4)}`
+}
+
+/** Set or replace a simple `key: bool` line in a YAML front-matter body. */
+function upsertYamlBoolean(matter: string, key: string, value: boolean): string {
+  const line = `${key}: ${value}`
+  const pattern = new RegExp(`^${key}:[ \\t]*.*$`, 'mu')
+  if (pattern.test(matter)) return matter.replace(pattern, line)
+  const trimmed = matter.replace(/[ \t\r\n]+$/u, '')
+  return `${trimmed}\n${line}\n`
 }
 
 /** Turn a declared name into a directory-safe slug, or undefined when it cannot be one. */

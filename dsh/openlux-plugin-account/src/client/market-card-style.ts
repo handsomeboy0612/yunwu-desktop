@@ -41,6 +41,26 @@ const TAG_ID = 'openlux-plugin-account/market-card'
 export const SEAT_ATTR = 'data-openlux-market-seat'
 
 /**
+ * Marker on the install-in-progress ring.
+ *
+ * WorkBuddy's `.skill-install-loading` is a 14px CSS ring (`0.6s linear
+ * infinite`), not a glyph. The kernel's `IconLoadingOutline16` is a static
+ * 3/4-arc with no animation of its own — putting it in the seat is why a
+ * click looked frozen, then jumped to the tick.
+ */
+export const SPIN_ATTR = 'data-openlux-market-spin'
+
+/**
+ * Marker on a connector card's status dot; the value names the state.
+ *
+ * WorkBuddy's connector card carries a small dot beside the name — green when
+ * connected, a *breathing* yellow while connecting, red when the row did not
+ * come up. The breathing is a CSS animation, which is why the dot lives in
+ * this sheet rather than in a `style` object.
+ */
+export const DOT_ATTR = 'data-openlux-market-dot'
+
+/**
  * The rule set.
  *
  * The card is selected through its own test id, the convention this plugin's
@@ -68,6 +88,44 @@ const CSS = `
 [${SEAT_ATTR}="always"] {
   opacity: 1;
   pointer-events: auto;
+}
+[${SPIN_ATTR}] {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  box-sizing: border-box;
+  display: inline-block;
+  border: 2px solid var(--dsw-alias-label-tertiary);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: openlux-market-spin 0.6s linear infinite;
+}
+@keyframes openlux-market-spin {
+  to { transform: rotate(360deg); }
+}
+[${DOT_ATTR}] {
+  /* Inline inside the name span, WorkBuddy's 「金山文档 ●」 seat. */
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
+  border-radius: 50%;
+  vertical-align: 1px;
+}
+[${DOT_ATTR}="connected"] {
+  background: var(--dsw-alias-state-success-primary);
+}
+[${DOT_ATTR}="connecting"] {
+  /* The theme ships no warning-state token; this is WorkBuddy's amber. */
+  background: #e6a23c;
+  animation: openlux-market-breathe 1.2s ease-in-out infinite;
+}
+[${DOT_ATTR}="offline"] {
+  background: var(--dsw-alias-state-error-primary);
+}
+@keyframes openlux-market-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.75); }
 }
 `
 

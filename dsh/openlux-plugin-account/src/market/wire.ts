@@ -308,6 +308,15 @@ export interface InstalledSkill {
   /** Whether this one arrived through the gallery rather than by hand. */
   readonly managed: boolean
   readonly version?: string
+  /**
+   * Whether the kernel will still surface this skill.
+   *
+   * False when the front matter has `user-invocable: false` or
+   * `disable-model-invocation: true` — the two invocation keys
+   * `dsh-skill-filesystem` actually honours. Closing a skill writes both so it
+   * leaves the model catalog and the slash menu without deleting the directory.
+   */
+  readonly enabled: boolean
 }
 
 /**
@@ -402,6 +411,13 @@ export interface CustomOpen {
   readonly did: 'opened' | 'revealed' | 'nothing'
 }
 
+/** One server from the user's file, with its verdict. */
+export interface CustomConnectorRow {
+  readonly name: string
+  readonly live: boolean
+  readonly problem?: string
+}
+
 /** What one re-read of the user's own connector file did. */
 export interface CustomConnectorSync {
   readonly live: number
@@ -409,7 +425,27 @@ export interface CustomConnectorSync {
   readonly problems: readonly string[]
   /** The file itself, shown so it can be found without the opener. */
   readonly path: string
+  /** Every named server in file order; empty when the file did not parse. */
+  readonly rows: readonly CustomConnectorRow[]
 }
+
+/** The user's connector file as text, for the dialog's in-app editor. */
+export interface CustomConnectorFile {
+  readonly path: string
+  readonly content: string
+}
+
+/**
+ * What saving the editor's text did.
+ *
+ * A refusal is a value, not an error: every message is a sentence the dialog
+ * shows next to the editor, and the file on disk is untouched when one comes
+ * back. A save carries the text as written — normalized when the host had to
+ * hoist a nested `mcpServers` — plus the re-read that followed.
+ */
+export type CustomConnectorSave =
+  | { readonly kind: 'refused'; readonly message: string }
+  | { readonly kind: 'saved'; readonly content: string; readonly sync: CustomConnectorSync }
 
 /** One connect, as asked for by the gallery. */
 export interface ConnectorRequest {

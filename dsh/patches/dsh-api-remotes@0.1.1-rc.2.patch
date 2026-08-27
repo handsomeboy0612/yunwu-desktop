@@ -1,0 +1,20 @@
+diff --git a/lib/index.js b/lib/index.js
+index d7596a190c6f5afd79cba01b09478c66f6ce0615..bc6e33f51caf371211fe01321f2b01fc5448aeda 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -121,11 +121,13 @@ function createApiRemoteAgentResolver(ctx, options) {
+ 					const publishedSession = ctx.sessions.get(sessionId);
+ 					const publishedAgent = ctx.agents.get(sessionId);
+ 					if (publishedSession !== void 0 && hasApiRemoteSubagentOwner(ctx, publishedSession, publishedAgent)) throw new ApiRemoteSubagentSessionOwnership(sessionId);
+-					return (await ctx.agents.resume({
++					const resumedHandle = await ctx.agents.resume({
+ 						resumeSessionId: sessionId,
+ 						...options.agentOptions === void 0 ? {} : { agentOptions: options.agentOptions() },
+ 						...setup === void 0 ? {} : { setup }
+-					})).agent;
++					});
++					(globalThis.__openluxAgentHandles ??= new Map()).set(sessionId, resumedHandle);
++					return resumedHandle.agent;
+ 				} finally {
+ 					resumes.delete(sessionId);
+ 				}

@@ -1,0 +1,23 @@
+diff --git a/lib/client.js b/lib/client.js
+index ba3cb21f72709cc91a733d4080266e452d6435d5..3eaf1d6869c21d7c7e6b0a63a4a46f51eb022f7c 100644
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -10432,10 +10432,14 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
+ 					role: "inject",
+ 					label: joined(collect(record, "changes", "path")) ?? kind
+ 				};
+-				case "plugin": return {
+-					role: "inject",
+-					label: readString(record, "plugin") ?? kind
+-				};
++				case "plugin": {
++					const producer = readString(record, "plugin") ?? kind;
++					const mapped = globalThis.__openluxProducerLabels?.[producer];
++					return {
++						role: "inject",
++						label: typeof mapped === "string" ? mapped : producer
++					};
++				}
+ 				case "skill-invocation": return {
+ 					role: "inject",
+ 					label: readString(record, "name") ?? kind

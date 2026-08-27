@@ -32,6 +32,16 @@ const CSS = `
   width: min(1120px, 100%);
   height: calc(100vh - 48px);
 }
+.openlux-market-custom-dialog {
+  /* WorkBuddy's «MCP 服务管理» frame: a wide card whose height holds still,
+     so the list ↔ editor swap does not resize the dialog under the pointer. */
+  width: min(720px, 100%);
+  height: min(600px, calc(100vh - 48px));
+  min-height: 420px;
+  padding: 0;
+  gap: 0;
+  border-radius: 14px;
+}
 .openlux-market-preview-toggle {
   -webkit-app-region: no-drag;
   display: inline-flex;
@@ -317,7 +327,8 @@ const CSS = `
 }
 @media (max-width: 640px) {
   .openlux-market-expert-detail-dialog,
-  .openlux-market-preview-dialog {
+  .openlux-market-preview-dialog,
+  .openlux-market-custom-dialog {
     height: calc(100vh - 32px);
     min-height: 0;
     border-radius: 16px;

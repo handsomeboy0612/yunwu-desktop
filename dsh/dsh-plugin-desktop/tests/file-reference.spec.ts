@@ -52,21 +52,26 @@ function fakeComposer(draft: string, refusals = 0): {
  * a chip instead of the path itself.
  */
 describe('file reference chips', () => {
-  it('serializes to the same text the draft used to carry', async () => {
+  it('serializes to the kernel quoted file mention', async () => {
     // The one string the model sees. It is asserted here rather than trusted
-    // because the tools and the persona were written against this exact shape
-    // (`persona/tool-reality.ts`), and the chip hides any change to it: the
-    // composer would look perfectly right while the agent stopped finding files.
-    expect(fileReferenceText('D:\\work\\deck_342.pptx')).toBe('`D:\\work\\deck_342.pptx`')
+    // because the chip hides any change to it: the composer would look
+    // perfectly right while the sent bubble stopped re-decorating. Only the
+    // `@"path"` shape survives the send — `ui-conversation`'s
+    // `projectUserText` re-chips sent text by shape alone, and the backticked
+    // path this codec produced before 2026-08-28 degraded to raw text in
+    // every sent bubble. Always quoted: the bare-token scan strips trailing
+    // punctuation off unquoted tokens, and Windows filenames cannot contain
+    // `"`, so one shape covers every path (see `file-reference.ts`).
+    expect(fileReferenceText('D:\\work\\deck_342.pptx')).toBe('@"D:\\work\\deck_342.pptx"')
     expect(await fileReferenceSource.codec?.serialize?.('D:\\a\\b.pptx', {} as never))
-      .toBe('`D:\\a\\b.pptx`')
+      .toBe('@"D:\\a\\b.pptx"')
     // The clipboard projection is the *same* string, because it is also the
     // persisted one: the kernel stores a draft with its reference ranges
     // expanded to `clipboardText` (`projectClipboard`), so a restart turns the
     // chips back into this text and the send then ships it verbatim. Bare paths
     // would lose their delimiters here, and two space-separated Windows paths
     // with a space inside one of them cannot be told apart.
-    expect(fileReferenceSource.codec?.clipboardText?.('D:\\a\\b.pptx')).toBe('`D:\\a\\b.pptx`')
+    expect(fileReferenceSource.codec?.clipboardText?.('D:\\a\\b.pptx')).toBe('@"D:\\a\\b.pptx"')
   })
 
   it('contributes no candidates, so the @ menu is upstream\'s alone', async () => {
@@ -97,7 +102,7 @@ describe('file reference chips', () => {
       label: 'deck.pptx',
       appearance: 'file',
       // The occurrence's own projection, which is what a restart restores from.
-      clipboardText: '`D:\\a\\deck.pptx`',
+      clipboardText: '@"D:\\a\\deck.pptx"',
       start: 5,
       rev: 8,
     }])
@@ -123,7 +128,7 @@ describe('file reference chips', () => {
     expect(appendFileReference(composer, 'D:\\a\\deck.pptx')).toBe(true)
     expect(inserts).toHaveLength(2)
     // Including the separator that was added for the chip that did not happen.
-    expect(draftNow()).toBe('已经写了一半\n`D:\\a\\deck.pptx`')
+    expect(draftNow()).toBe('已经写了一半\n@"D:\\a\\deck.pptx"')
   })
 
   it('answers false when no composer is mounted, so the caller can write text instead', () => {

@@ -21,19 +21,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import {
-  Button, IconFolderOpenOutline16, IconPlusOutline16, IconRefreshOutline14, IconSearchOutline16,
-  IconSkillOutline16, Input, Menu, Pill,
+  Button, IconEditOutline16, IconFolderOpenOutline16, IconNewChatOutline16, IconPlusOutline16,
+  IconSearchOutline16, IconSkillOutline16, IconTrashOutline16, Input, Menu, Pill,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
   Catalog, CatalogFailure, CatalogItem, CatalogType, ConnectorAuthorizationStart,
-  ConnectorAuthorizationState, ConnectorRequirement, ConnectorTarget, CustomConnectorSync,
+  ConnectorAuthorizationState, ConnectorRequirement, ConnectorTarget, CustomConnectorFile,
+  CustomConnectorSave, CustomConnectorSync,
   CustomOpen, HomePlaybook, HomeShowcase, InstallOutcome, InstallTarget, InstalledConnector,
-  InstalledPreset, PlaybookArtifact, RemountOutcome, SkillTarget,
+  InstalledPreset, InstalledSkill, PlaybookArtifact, RemountOutcome, SkillTarget,
 } from '../market/wire.ts'
 import type { MarketKey } from './market-locales.ts'
 import { pickSkillDirectory } from './skill-pick.ts'
 import { skillCreationDraft } from './skill-create.ts'
 import { connectorRow } from './connector-rows.ts'
+import { publishConnectorsLive } from './connector-live.ts'
+import { takeMarketTab } from './market-open-request.ts'
 import { FeaturedScenes } from './FeaturedScenes.tsx'
 import { useHorizontalDrag, useHorizontalWheel } from './horizontal-scroll.ts'
 import { MarketCard, describe, type CardState } from './MarketCard.tsx'
@@ -41,6 +44,7 @@ import {
   ConnectorToken, CustomConnector, MarketConfirm, MarketDetail, MarketOutcome,
 } from './MarketDialogs.tsx'
 import { MyExperts } from './MyExperts.tsx'
+import { publishSkillLexicon } from './skill-lexicon.ts'
 import type { SummonRequest } from './summon.ts'
 import type { AccountHostCaller } from './types.ts'
 
@@ -103,14 +107,6 @@ const AUTHORIZE_TIMEOUT_MS = 5 * 60 * 1000
 type Kind = 'all' | 'agent' | 'team'
 
 /**
- * How many rows the featured strip holds.
- *
- * Three, which is one grid row at the overlay's width — the same count
- * WorkBuddy's «精选技能» shows above its own «换一换».
- */
-const SPOTLIGHT = 3
-
-/**
  * Which partition the gallery is showing.
  *
  * The same three the console partitions its catalog into, and the same three
@@ -148,16 +144,9 @@ const marketProcessSnapshot: MarketProcessSnapshot = {
 
 /** Which tab's copy a key belongs to. */
 const TAB_COPY = {
-  expert: {
-    name: 'tabExperts', intro: 'intro', search: 'searchPlaceholder', featured: 'featuredExperts',
-  },
-  skill: {
-    name: 'tabSkills', intro: 'introSkill', search: 'searchSkillPlaceholder', featured: 'featuredSkills',
-  },
-  connector: {
-    name: 'tabConnectors', intro: 'introConnector', search: 'searchConnectorPlaceholder',
-    featured: 'featuredConnectors',
-  },
+  expert: { name: 'tabExperts', intro: 'intro', search: 'searchPlaceholder' },
+  skill: { name: 'tabSkills', intro: 'introSkill', search: 'searchSkillPlaceholder' },
+  connector: { name: 'tabConnectors', intro: 'introConnector', search: 'searchConnectorPlaceholder' },
 } as const
 
 /** A connect waiting on the secret its manifest asks for. */
@@ -167,12 +156,16 @@ interface PendingToken {
   readonly value: string
 }
 
-/** The custom-connector panel, open with whatever the last re-read said. */
+/** The custom-connector panel, open with whatever the last read said. */
 interface CustomState {
   readonly busy: boolean
   /** What the OS did with the file, absent until the opener was pressed. */
   readonly handoff?: CustomOpen['did']
+  /** The file's text for the in-app editor, read as the panel opened. */
+  readonly file?: CustomConnectorFile
   readonly sync?: CustomConnectorSync
+  /** Why the last save was refused, cleared by the next save or reopen. */
+  readonly saveError?: string
 }
 
 /** A summon waiting on the install confirmation. */
@@ -233,8 +226,6 @@ const styles = {
     color: 'var(--dsw-alias-label-primary)', boxShadow: 'var(--dsw-shadow-lv1)',
     cursor: 'pointer', fontSize: '20px', lineHeight: 1,
   },
-  strip: { display: 'flex', alignItems: 'center', gap: '8px' },
-  stripTitle: { flex: 1, color: 'var(--dsw-alias-label-primary)', fontSize: '13px', fontWeight: 600 },
   grid: {
     display: 'grid',
     // Three columns in the 800px overlay panel, without hardcoding that width.
@@ -285,7 +276,9 @@ export function MarketSection(
   const { callHost, language, summon, onDismiss, showChrome = true, t } = props
   const active = language()
 
-  const [tab, setTab] = useState<Tab>('expert')
+  // The composer's connector capsule opens this overlay aimed at its own tab;
+  // the request is take-once, so a plain open still lands on the experts.
+  const [tab, setTab] = useState<Tab>(() => takeMarketTab() ?? 'expert')
   // The «我的专家» subpage takes the whole body when it is open, which is what
   // it does in WorkBuddy (`ec-topbar--subpage`).
   const [mine, setMine] = useState(false)
@@ -316,8 +309,6 @@ export function MarketSection(
   // «我安装的»: a filter over the grid that is already on screen rather than a
   // page of its own. See the copy note on `mineInstalled`.
   const [onlyMine, setOnlyMine] = useState(false)
-  // Where the featured strip's window starts; «换一换» advances it.
-  const [spotlightAt, setSpotlightAt] = useState(0)
   const [adding, setAdding] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
   const categoryRef = useRef<HTMLDivElement>(null)
@@ -392,6 +383,13 @@ export function MarketSection(
       if (held.ok) {
         marketProcessSnapshot.skills = held.value
         setSkills(held.value)
+        // The decoration lexicon's supplementary roll: the kernel's own skill
+        // catalog is cached per session and never invalidated by an install,
+        // so a skill installed this run would stay an undecorated `/name`
+        // without this (`skill-lexicon.ts` traces the cache's two wires).
+        publishSkillLexicon(held.value.installed
+          .filter((s: InstalledSkill) => s.enabled)
+          .map((s: InstalledSkill) => s.name))
       }
       return
     }
@@ -400,6 +398,9 @@ export function MarketSection(
       if (live.ok) {
         marketProcessSnapshot.connectors = live.value
         setConnectors(live.value)
+        // The composer capsule draws from the same read (`connector-live.ts`),
+        // so a connect done here updates it without waiting for a remount.
+        publishConnectorsLive(live.value)
       }
       return
     }
@@ -461,10 +462,11 @@ export function MarketSection(
     return map
   }, [target])
 
-  const installedSkills = useMemo(
-    () => new Set((skills?.installed ?? []).map(skill => skill.slug)),
-    [skills],
-  )
+  const installedSkillBySlug = useMemo(() => {
+    const map = new Map<string, InstalledSkill>()
+    for (const skill of skills?.installed ?? []) map.set(skill.slug, skill)
+    return map
+  }, [skills])
 
   const connectedBySlug = useMemo(() => {
     const map = new Map<string, InstalledConnector>()
@@ -504,9 +506,9 @@ export function MarketSection(
 
   /** Whether one row of the partition on screen is already in place. */
   const isInstalled = useCallback((slug: string): boolean => {
-    if (tab === 'skill') return installedSkills.has(slug)
+    if (tab === 'skill') return installedSkillBySlug.has(slug)
     return tab === 'connector' ? connectedBySlug.has(slug) : installedById.has(slug)
-  }, [tab, installedSkills, connectedBySlug, installedById])
+  }, [tab, installedSkillBySlug, connectedBySlug, installedById])
 
   const shown = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -522,42 +524,6 @@ export function MarketSection(
       return haystack.includes(needle)
     })
   }, [catalog, query, kind, category, active, tab, onlyMine, isInstalled])
-
-  /**
-   * The strip above the grid: what the console marked as featured.
-   *
-   * Only while nothing is filtered — the strip answers «有什么值得看的», and a
-   * user who has typed a query or picked a category has already answered it.
-   * An installed row is dropped rather than shown with a check, because the
-   * strip exists to introduce rows and that one is introduced.
-   */
-  const spotlight = useMemo(() => {
-    // Experts are curated by scene, not by a second copy of expert cards.
-    if (tab === 'expert') return []
-    if (query.trim() !== '' || category !== 0 || onlyMine || kind !== 'all') return []
-    const rows = (catalog?.items ?? []).filter(
-      item => item.featured && item.unavailable === undefined && !isInstalled(item.slug),
-    )
-    if (rows.length < SPOTLIGHT) return rows
-    return Array.from(
-      { length: SPOTLIGHT },
-      (_, index) => rows[(spotlightAt + index) % rows.length] as CatalogItem,
-    )
-  }, [catalog, query, category, onlyMine, kind, isInstalled, spotlightAt, tab])
-
-  /**
-   * The grid, minus whatever the strip is already showing.
-   *
-   * The catalog arrives featured-first, so the three rows in the strip were also
-   * the first three of the grid: the same cards appeared twice, adjacent, which
-   * reads as a rendering fault rather than as a recommendation. «换一换» moves
-   * the strip's window, and a row it drops reappears in the grid on the spot.
-   */
-  const grid = useMemo(() => {
-    if (spotlight.length === 0) return shown
-    const above = new Set(spotlight.map(row => row.slug))
-    return shown.filter(row => !above.has(row.slug))
-  }, [shown, spotlight])
 
   /** Why one row cannot be installed, or undefined when it can. */
   const blockedReason = useCallback((item: CatalogItem): string | undefined => {
@@ -597,7 +563,8 @@ export function MarketSection(
       return blocked === undefined ? { kind: 'ready' } : { kind: 'blocked', reason: blocked }
     }
     if (tab === 'skill') {
-      if (installedSkills.has(item.slug)) return { kind: 'installed' }
+      const held = installedSkillBySlug.get(item.slug)
+      if (held !== undefined) return { kind: 'installed', closed: !held.enabled }
       if (installing === item.slug) return { kind: 'installing' }
       const blocked = blockedReason(item)
       return blocked === undefined ? { kind: 'ready' } : { kind: 'blocked', reason: blocked }
@@ -611,7 +578,7 @@ export function MarketSection(
     if (installing === item.slug) return { kind: 'installing' }
     const reason = blockedReason(item)
     return reason === undefined ? { kind: 'ready' } : { kind: 'blocked', reason }
-  }, [tab, installedById, installedSkills, connectedBySlug, installing, blockedReason, t])
+  }, [tab, installedById, installedSkillBySlug, connectedBySlug, installing, blockedReason, t])
 
   const install = useCallback(async (item: CatalogItem): Promise<InstallOutcome | undefined> => {
     if (item.artifact === undefined) return undefined
@@ -706,6 +673,27 @@ export function MarketSection(
   }, [summon, installedById, readPrompts, onDismiss])
 
   /**
+   * Leave for a new session with one of this connector's example asks prefilled.
+   *
+   * WorkBuddy's connected card swaps its action for 「去对话」, which navigates
+   * home and prefills a random row from the connector's examples
+   * (`connector-panel.tsx`'s `handleTryConnector`: `examples[Math.floor(
+   * Math.random() * examples.length)]`, then `useConnectorPrompt(prompt)`).
+   * Our composer write path is the summon controller's, so this rides it with
+   * no preset — the same shape the skill 「试一试」 uses. A row with no
+   * published examples still travels: landing on a blank composer beside the
+   * capsule beats a button that silently does nothing.
+   */
+  const tryConnector = useCallback((item: CatalogItem): void => {
+    if (summon === undefined) return
+    const examples = item.openingPrompts ?? []
+    const prompt = examples[Math.floor(Math.random() * examples.length)] ?? ''
+    setDetail(undefined)
+    summon({ prompt })
+    onDismiss?.()
+  }, [summon, onDismiss])
+
+  /**
    * Connect one connector, with the secret when it asked for one.
    *
    * The gallery never sends a command: it names the catalog row, and the host
@@ -733,25 +721,60 @@ export function MarketSection(
   }, [callHost, readInstalled])
 
   /**
-   * Open the custom-connector panel, re-reading the file as it opens.
+   * Open the custom-connector panel: the file's text for the editor, and a
+   * re-read of what is mounted.
    *
-   * The read happens on open rather than on a press, so the panel can answer
-   * the question that brought the user here — «我上次写的那台起来了吗» — without
-   * them having to ask for it.
+   * Both happen on open rather than on a press, so the panel can answer the
+   * question that brought the user here — «我上次写的那台起来了吗» — with the
+   * text already in front of them to fix.
    */
   const openCustom = useCallback(async (): Promise<void> => {
     setCustom({ busy: true })
-    const result = await callHost<CustomConnectorSync>('market.connectorCustomSync', {})
-    setCustom({ busy: false, ...result.ok ? { sync: result.value } : {} })
+    const [text, sync] = await Promise.all([
+      callHost<CustomConnectorFile>('market.connectorCustomRead', {}),
+      callHost<CustomConnectorSync>('market.connectorCustomSync', {}),
+    ])
+    setCustom({
+      busy: false,
+      ...text.ok ? { file: text.value } : {},
+      ...sync.ok ? { sync: sync.value } : {},
+    })
     await readInstalled('connector')
   }, [callHost, readInstalled])
 
-  /** Re-read the file after the user edited it, and remount what changed. */
-  const reloadCustom = useCallback(async (): Promise<void> => {
-    setCustom(current => ({ ...current, busy: true }))
-    const result = await callHost<CustomConnectorSync>('market.connectorCustomSync', {})
-    setCustom({ busy: false, ...result.ok ? { sync: result.value } : {} })
-    await readInstalled('connector')
+  /**
+   * Save the editor's text; the host validates, writes, and remounts in one
+   * move (WorkBuddy's save button, `mcp-config-editor.tsx`). A refusal keeps
+   * the draft on screen with the reason under it and the file untouched; a
+   * save becomes the editor's new baseline — normalized, when the host had to
+   * hoist a nested `mcpServers` out of a paste.
+   */
+  const saveCustom = useCallback(async (content: string): Promise<void> => {
+    setCustom(current => ({
+      busy: true,
+      ...current?.handoff === undefined ? {} : { handoff: current.handoff },
+      ...current?.file === undefined ? {} : { file: current.file },
+      ...current?.sync === undefined ? {} : { sync: current.sync },
+    }))
+    const result = await callHost<CustomConnectorSave>('market.connectorCustomWrite', { content })
+    const refusal = !result.ok
+      ? result.error.message
+      : result.value.kind === 'refused' ? result.value.message : undefined
+    setCustom(current => ({
+      busy: false,
+      ...current?.handoff === undefined ? {} : { handoff: current.handoff },
+      ...result.ok && result.value.kind === 'saved'
+        ? {
+          file: { path: result.value.sync.path, content: result.value.content },
+          sync: result.value.sync,
+        }
+        : {
+          ...current?.file === undefined ? {} : { file: current.file },
+          ...current?.sync === undefined ? {} : { sync: current.sync },
+          ...refusal === undefined ? {} : { saveError: refusal },
+        },
+    }))
+    if (result.ok && result.value.kind === 'saved') await readInstalled('connector')
   }, [callHost, readInstalled])
 
   /**
@@ -763,12 +786,12 @@ export function MarketSection(
    */
   const openCustomFile = useCallback(async (): Promise<void> => {
     const result = await callHost<CustomOpen>('market.connectorCustomOpen', {})
+    // The dialog's path display reads from `file` (whose read also creates the
+    // file), so the answer here is only which of the three sentences to show.
     setCustom(current => ({
       ...current,
       busy: false,
       handoff: result.ok ? result.value.did : 'nothing',
-      // The open call creates the file, so its path is the freshest one there is.
-      ...result.ok ? { sync: { live: current?.sync?.live ?? 0, problems: current?.sync?.problems ?? [], path: result.value.path } } : {},
     }))
   }, [callHost])
 
@@ -952,7 +975,11 @@ export function MarketSection(
     if (tab === 'skill') {
       setDetail(undefined)
       const result = await install(item)
-      if (result !== undefined) setOutcome({ item, outcome: result })
+      // WorkBuddy's card stays put: + becomes ⋯/✓. A success sheet would cover
+      // that change. Failures still need a sentence; they have nowhere else to go.
+      if (result !== undefined && result.kind !== 'installed') {
+        setOutcome({ item, outcome: result })
+      }
       return
     }
     // A connector asks the host what it needs before anything is written; the
@@ -996,6 +1023,30 @@ export function MarketSection(
   }, [callHost, readInstalled])
 
   /**
+   * Close or reopen one installed skill.
+   *
+   * The directory stays; the kernel's invocation keys are what change, so the
+   * next turn no longer lists it. Same result as WorkBuddy's card-menu 关闭.
+   */
+  const toggleSkill = useCallback(async (slug: string, enabled: boolean): Promise<void> => {
+    await callHost<{ updated: boolean }>('market.skillSetEnabled', { slug, enabled })
+    await readInstalled('skill')
+  }, [callHost, readInstalled])
+
+  /**
+   * 「编辑」: land in a session holding WorkBuddy's edit prompt.
+   *
+   * `skill-creator` is invoked when it is installed, same as 「创建技能」.
+   */
+  const editSkill = useCallback((item: CatalogItem): void => {
+    if (summon === undefined || skills === null) return
+    const held = installedSkillBySlug.get(item.slug)
+    const prompt = t('skillEditPrompt', { name: held?.name ?? item.name })
+    summon(skillCreationDraft(skills, prompt))
+    onDismiss?.()
+  }, [summon, onDismiss, skills, installedSkillBySlug, t])
+
+  /**
    * Import a skill directory from disk («从本地添加技能»).
    *
    * The refusals are the picker's own, which is why they are shaped here rather
@@ -1032,20 +1083,37 @@ export function MarketSection(
   }, [callHost, readInstalled, t])
 
   /**
-   * «试一试» on a skill that is already installed.
+   * «试一试» on a skill.
    *
-   * A session with the skill named in the composer, and no preset switch: a
-   * skill is not a composition, it is a document whichever agent is running may
-   * open, so the useful landing is the ordinary agent holding a sentence that
-   * mentions it. WorkBuddy's own installed card does the same thing under the
-   * same tooltip (`skills.tryNow` -> `onTryNow`).
+   * No preset switch either way: a skill is not a composition, it is a
+   * document whichever agent is running may open.
+   *
+   * WorkBuddy lands a *chip* in the composer, not a sentence — its
+   * `handleTrySkill` opens a new task and publishes `newSkillCreated$`, which
+   * the composer turns into a `createPhraseBlock('skill://…')` block plus the
+   * skill's first localized example sentence (`skills-<hash>.js` /
+   * `main-content-core-<hash>.js`; 2026-08-27 unpack). Our equivalent of that
+   * chip is DSH's native invocation contract: a literal leading `/name` token,
+   * which the host expands into the skill body before the model acts
+   * (`dsh-client-ui-skill/README.zh.md:5-7`) and the client decorates once the
+   * lexicon is warm — the same route «创建技能» already takes. Our catalog
+   * carries no example prompts, so the chip stands alone and the cursor waits
+   * for the user's task.
+   *
+   * The detail page offers «试一试» before installing too, and a token for a
+   * skill that is not on disk (or is closed) would be a dead slash command —
+   * those land the descriptive sentence instead, the same guard
+   * `skillCreationDraft` applies.
    */
   const trySkill = useCallback((item: CatalogItem): void => {
     if (summon === undefined) return
     setDetail(undefined)
-    summon({ prompt: t('skillTryPrompt', { name: item.name }) })
+    const held = installedSkillBySlug.get(item.slug)
+    summon(held !== undefined && held.enabled
+      ? { prompt: `/${held.name} `, skillToken: held.name }
+      : { prompt: t('skillTryPrompt', { name: item.name }) })
     onDismiss?.()
-  }, [summon, onDismiss, t])
+  }, [summon, onDismiss, installedSkillBySlug, t])
 
   /**
    * «创建技能»: start writing one in a session.
@@ -1154,7 +1222,9 @@ export function MarketSection(
    * @param item - the catalog row.
    * @returns its card.
    */
-  const card = (item: CatalogItem, index: number): ReactNode => (
+  const card = (item: CatalogItem, index: number): ReactNode => {
+    const held = installedSkillBySlug.get(item.slug)
+    return (
     <MarketCard
       key={item.slug}
       item={item}
@@ -1179,19 +1249,59 @@ export function MarketSection(
             done: t('connected'),
             unhealthy: t('connectorOfflineBadge'),
           },
+          // WorkBuddy's card carries a live dot beside the name: breathing
+          // yellow through the whole connect (including the browser sign-in
+          // wait), green once up, red for a row that did not come up.
+          ...((): { dot?: 'connected' | 'connecting' | 'offline' } => {
+            if (installing === item.slug) return { dot: 'connecting' }
+            const connected = connectedBySlug.get(item.slug)
+            if (connected === undefined) return {}
+            return { dot: connected.live ? 'connected' : 'offline' }
+          })(),
+        }
+        : {}}
+      {...tab === 'connector' && summon !== undefined
+        && connectedBySlug.get(item.slug)?.live === true && installing !== item.slug
+        ? {
+          // The connected card's act is 「去对话」, not a re-run: chat glyph
+          // under the pointer, and the press lands in a fresh session.
+          onTry: () => { tryConnector(item) },
+          tryLabel: t('connectorChat'),
+          tryGlyph: <IconNewChatOutline16 />,
         }
         : {}}
       {...tab === 'expert' && summon !== undefined && installedById.has(item.slug)
         ? { onTry: () => { void primary(item) }, tryLabel: t('summon') }
         : {}}
-      {...tab === 'skill' && summon !== undefined && installedSkills.has(item.slug)
+      {...tab === 'skill' && summon !== undefined && held !== undefined && held.enabled
         ? { onTry: () => trySkill(item), tryLabel: t('tryNow') }
         : {}}
-      {...tab === 'skill' && installedSkills.has(item.slug)
-        ? { onRemove: () => { void removeSkill(item.slug) }, removeLabel: t('skillRemove') }
-        : {}}
-      {...tab === 'connector' && connectedBySlug.has(item.slug)
-        ? { onRemove: () => { void disconnect(item.slug) }, removeLabel: t('disconnect') }
+      {...tab === 'skill' && held !== undefined
+        ? {
+          menu: {
+            items: [
+              {
+                id: 'toggle',
+                label: held.enabled ? t('skillDisable') : t('skillEnable'),
+                icon: <SkillPowerIcon />,
+              },
+              ...summon === undefined
+                ? []
+                : [{ id: 'edit', label: t('skillEdit'), icon: <IconEditOutline16 /> }],
+              {
+                id: 'uninstall',
+                label: t('skillUninstall'),
+                icon: <IconTrashOutline16 />,
+                danger: true,
+              },
+            ],
+            onSelect: (id: string): void => {
+              if (id === 'toggle') void toggleSkill(item.slug, !held.enabled)
+              else if (id === 'edit') editSkill(item)
+              else if (id === 'uninstall') void removeSkill(item.slug)
+            },
+          },
+        }
         : {}}
       {...connectorRow(connectedBySlug.get(item.slug), installing === item.slug)?.repairable === true
         ? { onRepair: () => { void repair(item) }, repairLabel: t('connectorReauthorize') }
@@ -1199,7 +1309,8 @@ export function MarketSection(
       onOpen={() => openDetail(item)}
       onPrimary={() => { void primary(item) }}
     />
-  )
+    )
+  }
 
   // A whole-body swap rather than a tab: the page has its own bar, and the
   // catalog's filters would say nothing about a roster read from disk. This is
@@ -1246,7 +1357,6 @@ export function MarketSection(
               setCategory(0)
               setQuery('')
               setOnlyMine(false)
-              setSpotlightAt(0)
               // The sheet belongs to the row that opened it, and that row
               // belongs to the tab being left: an open sheet would keep the
               // skill on screen while the sheet reads it as a connector, since
@@ -1501,25 +1611,16 @@ export function MarketSection(
         <span style={styles.status}>{t('emptyCatalog')}</span>
       )}
 
-      {spotlight.length > 0 && (
-        <>
-          <div style={styles.strip}>
-            <span style={styles.stripTitle}>{t(TAB_COPY[tab].featured)}</span>
-            <Button
-              variant="ghost"
-              size="sm"
-              icon={<IconRefreshOutline14 />}
-              data-testid="openlux-market-shuffle"
-              onClick={() => setSpotlightAt(at => at + SPOTLIGHT)}
-            >
-              {t('shuffle')}
-            </Button>
-          </div>
-          <div style={styles.grid}>{spotlight.map(card)}</div>
-        </>
-      )}
-
-      {grid.length > 0 && <div style={styles.grid}>{grid.map(card)}</div>}
+      {/*
+        One flat grid, no featured strip. WorkBuddy's connector panel has no
+        such strip (`connector-panel.tsx`: no featured/精选 section at all),
+        and ours also made cards jump: the strip excluded connected rows, so
+        the moment a connect landed the card fell out of the strip and
+        reappeared down in the grid. The console's featured marks still order
+        the catalog (featured rows arrive first), which keeps the curation
+        without a second shelf.
+      */}
+      {shown.length > 0 && <div style={styles.grid}>{shown.map(card)}</div>}
 
       <MarketDetail
         item={detail}
@@ -1556,6 +1657,12 @@ export function MarketSection(
         {...tab === 'skill' && summon !== undefined && detail !== undefined
           ? { onTry: () => trySkill(detail), tryLabel: t('tryNow') }
           : {}}
+        {...tab === 'connector' && detail !== undefined && connectedBySlug.has(detail.slug)
+          // 「断开」 lives in the sheet, not on the card: the card's own act is
+          // 「去对话」, and the sheet stays open so the row is seen flipping back
+          // to connectable.
+          ? { onRemove: () => { void disconnect(detail.slug) }, removeLabel: t('disconnect') }
+          : {}}
         {...detailBlocked === undefined ? {} : { blocked: detailBlocked }}
         {...detail === undefined || detailBlocked !== undefined
           ? {}
@@ -1590,12 +1697,14 @@ export function MarketSection(
 
       <CustomConnector
         open={custom !== undefined}
+        {...custom?.file === undefined ? {} : { file: custom.file }}
         {...custom?.sync === undefined ? {} : { sync: custom.sync }}
         busy={custom?.busy === true}
+        {...custom?.saveError === undefined ? {} : { saveError: custom.saveError }}
         {...custom?.handoff === undefined ? {} : { handoff: custom.handoff }}
         t={t}
         onOpenFile={() => { void openCustomFile() }}
-        onReload={() => { void reloadCustom() }}
+        onSave={content => { void saveCustom(content) }}
         onClose={() => setCustom(undefined)}
       />
 
@@ -1607,5 +1716,29 @@ export function MarketSection(
         onClose={() => setOutcome(undefined)}
       />
     </div>
+  )
+}
+
+/**
+ * WorkBuddy's card-menu power glyph (关闭 / 启用). The primitive set has no
+ * power icon; this is the same 13×13 stroke they draw inline.
+ */
+function SkillPowerIcon(): ReactNode {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M18.36 6.64A9 9 0 0 1 20.77 15" />
+      <path d="M6.16 6.16a9 9 0 1 0 12.68 12.68" />
+      <line x1="2" y1="2" x2="22" y2="22" />
+    </svg>
   )
 }

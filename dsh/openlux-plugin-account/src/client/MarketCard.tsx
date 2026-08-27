@@ -26,10 +26,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import {
-  Button, IconCheckOutline14, IconLoadingOutline16, IconPlayOutline16, IconPlusOutline16, Tooltip,
+  Button, IconCheckOutline14, IconEllipsisOutline16,
+  IconPlayOutline16, IconPlusOutline16, Menu, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { CatalogItem } from '../market/wire.ts'
-import { SEAT_ATTR } from './market-card-style.ts'
+import { DOT_ATTR, SEAT_ATTR, SPIN_ATTR } from './market-card-style.ts'
 import type { MarketKey } from './market-locales.ts'
 
 /** How the card presents this row's install state. */
@@ -38,8 +40,8 @@ export type CardState =
   | { readonly kind: 'ready' }
   /** Being installed right now. */
   | { readonly kind: 'installing' }
-  /** Already in the roster. */
-  | { readonly kind: 'installed'; readonly broken?: string }
+  /** Already in the roster. `closed` is a skill that is installed but switched off. */
+  | { readonly kind: 'installed'; readonly broken?: string; readonly closed?: boolean }
   /** Cannot be installed; the reason is already localized. */
   | { readonly kind: 'blocked'; readonly reason: string }
 
@@ -95,6 +97,33 @@ export interface MarketCardProps {
    */
   readonly onTry?: () => void
   readonly tryLabel?: string
+  /**
+   * The glyph the try seat shows under the pointer, when it is not a play.
+   *
+   * WorkBuddy's connected connector card swaps its tick for a chat bubble whose
+   * tooltip reads 「去对话」 — the act is opening a conversation, not running the
+   * row — so the connector tab passes the new-chat glyph here.
+   */
+  readonly tryGlyph?: ReactNode
+  /**
+   * A live status dot beside the name, for the partitions that have one.
+   *
+   * WorkBuddy's connector card breathes yellow while connecting, holds green
+   * once connected, and goes red for a row that did not come up. The card only
+   * draws what it is told; deciding the state stays with the section.
+   */
+  readonly dot?: 'connected' | 'connecting' | 'offline'
+  /**
+   * Installed-skill overflow, WorkBuddy's ⋯ on a done row.
+   *
+   * The three acts live here rather than as a footer 「移除」: 启用/关闭, 编辑,
+   * 卸载. Passing this also suppresses the footer undo, because the same act
+   * would then appear twice.
+   */
+  readonly menu?: {
+    readonly items: readonly MenuEntry[]
+    readonly onSelect: (id: string) => void
+  }
   /**
    * What the four states are called, when this partition does not call them
    * install / installing / installed / broken.
@@ -189,6 +218,16 @@ const styles = {
     marginTop: '2px', padding: 0, border: 'none', borderRadius: '6px',
     background: 'transparent', color: 'var(--dsw-alias-label-tertiary)',
     cursor: 'default',
+  },
+  cornerQuietPress: {
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    width: '26px', height: '26px', flex: '0 0 26px',
+    marginTop: '2px', padding: 0, border: 'none', borderRadius: '6px',
+    background: 'transparent', color: 'var(--dsw-alias-label-tertiary)',
+    cursor: 'pointer',
+  },
+  actions: {
+    display: 'flex', alignItems: 'center', gap: '2px', flex: '0 0 auto',
   },
   // Only a wrapper: a disabled button gets `pointer-events: none`, so the
   // tooltip carrying the reason has to sit on something that still gets them.
@@ -288,26 +327,31 @@ export function describe(item: CatalogItem, language: 'zh' | 'en'): string {
 export function MarketCard(
   {
     item, state, language, t, onOpen, onPrimary, summonable,
-    onRemove, removeLabel, onRepair, repairLabel, onTry, tryLabel, words,
-    primaryLook = 'glyph', priorityAvatarLoad = false,
+    onRemove, removeLabel, onRepair, repairLabel, onTry, tryLabel, tryGlyph, menu, words,
+    dot, primaryLook = 'glyph', priorityAvatarLoad = false,
   }: MarketCardProps,
 ): ReactNode {
   const [imageFailed, setImageFailed] = useState(false)
   const [hovering, setHovering] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
   const remote = item.icon.startsWith('http://') || item.icon.startsWith('https://')
   const { imageContainerRef, shouldLoadImage } = useDeferredImageLoad(priorityAvatarLoad)
   // One label for both halves of the flow: with a conversation to land in, an
   // uninstalled row installs on the way to the session, so saying "install"
   // would name the step instead of the outcome.
   const label = words?.primary ?? (summonable ? t('summon') : t('install'))
+  const closed = state.kind === 'installed' && state.closed === true
   const healthy = state.kind === 'installed' && state.broken === undefined
   const busy = state.kind === 'installing'
-  // A healthy row says «已装» once, in the corner. Repeating it on the footer line
+  // A healthy row says 「已装」once, in the corner. Repeating it on the footer line
   // next to the tick is the kind of duplication that makes a dense grid look noisy,
   // so the footer only earns its line when it carries something else: an install
-  // count, an undo, or a failure to repair.
+  // count, an undo that is not already in the ⋯ menu, or a failure to repair.
   const footer = item.downloads > 0
-    || (state.kind === 'installed' && (state.broken !== undefined || onRemove !== undefined))
+    || (state.kind === 'installed' && (
+      state.broken !== undefined
+      || (onRemove !== undefined && menu === undefined)
+    ))
 
   /** The corner seat: one control, whichever state the row is in. */
   const corner = ((): ReactNode => {
@@ -362,44 +406,85 @@ export function MarketCard(
       )
     }
     if (busy) {
+      // WorkBuddy swaps the plus for `.skill-install-loading` (a 14px ring that
+      // actually rotates). The kernel loading glyph is a still picture.
       return (
         <Tooltip label={words?.busy ?? t('preparing')} side="top">
           <span style={styles.cornerQuiet} aria-label={words?.busy ?? t('preparing')}>
-            <IconLoadingOutline16 />
+            <span {...{ [SPIN_ATTR]: '' }} />
           </span>
         </Tooltip>
       )
     }
     if (healthy) {
-      // Pressable only where being installed leaves something to do; a
-      // connector's tools are already in the model's list.
-      if (onTry === undefined) {
-        return (
+      // WorkBuddy's installed market card: ⋯ then ✓. Hover on the tick swaps
+      // it for a play glyph and the tooltip 「试一试」; the menu holds 启用/关闭,
+      // 编辑, 卸载. A closed skill keeps the tick as a statement — trying a
+      // skill the model cannot see would send the user into a dead end.
+      const check = onTry === undefined || closed
+        ? (
           <Tooltip label={words?.done ?? t('installed')} side="top">
-            <span style={styles.cornerQuiet} aria-label={words?.done ?? t('installed')}>
+            <span
+              style={styles.cornerQuiet}
+              aria-label={words?.done ?? t('installed')}
+              data-testid={`openlux-market-installed-${item.slug}`}
+            >
               <IconCheckOutline14 />
             </span>
           </Tooltip>
         )
-      }
-      const use = tryLabel ?? t('tryNow')
+        : (
+          <Tooltip label={tryLabel ?? t('tryNow')} side="top">
+            <button
+              type="button"
+              style={styles.cornerQuietPress}
+              aria-label={tryLabel ?? t('tryNow')}
+              data-testid={`openlux-market-try-${item.slug}`}
+              onPointerEnter={() => setHovering(true)}
+              onPointerLeave={() => setHovering(false)}
+              onClick={event => {
+                event.stopPropagation()
+                onTry()
+              }}
+            >
+              {hovering ? (tryGlyph ?? <IconPlayOutline16 />) : <IconCheckOutline14 />}
+            </button>
+          </Tooltip>
+        )
+      if (menu === undefined) return check
       return (
-        <Tooltip label={use} side="top">
-          <button
-            type="button"
-            style={styles.corner}
-            aria-label={use}
-            data-testid={`openlux-market-try-${item.slug}`}
-            onPointerEnter={() => setHovering(true)}
-            onPointerLeave={() => setHovering(false)}
-            onClick={event => {
-              event.stopPropagation()
-              onTry()
+        <span
+          style={styles.actions}
+          onClick={event => event.stopPropagation()}
+        >
+          <Menu
+            open={menuOpen}
+            align="end"
+            portal
+            items={menu.items}
+            onClose={() => setMenuOpen(false)}
+            onSelect={id => {
+              setMenuOpen(false)
+              menu.onSelect(id)
             }}
-          >
-            {hovering ? <IconPlayOutline16 /> : <IconCheckOutline14 />}
-          </button>
-        </Tooltip>
+            anchor={(
+              <button
+                type="button"
+                style={styles.cornerQuietPress}
+                aria-label={t('skillMore')}
+                aria-expanded={menuOpen}
+                data-testid={`openlux-market-skill-menu-${item.slug}`}
+                onClick={event => {
+                  event.stopPropagation()
+                  setMenuOpen(open => !open)
+                }}
+              >
+                <IconEllipsisOutline16 />
+              </button>
+            )}
+          />
+          {check}
+        </span>
       )
     }
     const blocked = state.kind === 'blocked' ? state.reason : undefined
@@ -426,7 +511,7 @@ export function MarketCard(
 
   return (
     <div
-      style={styles.card}
+      style={{ ...styles.card, ...(closed ? { opacity: 0.55 } : {}) }}
       role="button"
       tabIndex={0}
       data-testid={`openlux-market-card-${item.slug}`}
@@ -460,7 +545,16 @@ export function MarketCard(
             />
           )}
         </span>
-        <span style={styles.name} title={item.name}>{item.name}</span>
+        <span style={styles.name} title={item.name}>
+          {item.name}
+          {dot !== undefined && (
+            <span
+              {...{ [DOT_ATTR]: dot }}
+              aria-hidden="true"
+              data-testid={`openlux-market-dot-${item.slug}`}
+            />
+          )}
+        </span>
         {item.team && <span style={styles.teamBadge}>{t('teamBadge')}</span>}
         {primaryLook === 'glyph' && corner}
       </div>
@@ -490,7 +584,8 @@ export function MarketCard(
             most: a connector whose command is gone did not connect this launch,
             and the only way out of the list must not be editing a file.
           */}
-          {state.kind === 'installed' && onRemove !== undefined && removeLabel !== undefined && (
+          {state.kind === 'installed' && menu === undefined
+            && onRemove !== undefined && removeLabel !== undefined && (
             <Button
               variant="ghost"
               size="sm"

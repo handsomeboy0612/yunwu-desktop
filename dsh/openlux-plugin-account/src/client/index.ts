@@ -46,6 +46,13 @@ import type { AccountSectionInjected } from './AccountSection.tsx'
 import { ACCOUNT_TRIGGER_PRIORITY, AccountTrigger } from './AccountTrigger.tsx'
 import type { AccountTriggerInjected } from './AccountTrigger.tsx'
 import { ATTACH_FILE_ID, ATTACH_FILE_ORDER, AttachFileButton } from './AttachFileButton.tsx'
+import { CONNECTOR_CAPSULE_ID, CONNECTOR_CAPSULE_ORDER, ConnectorCapsule } from './ConnectorCapsule.tsx'
+import {
+  HOME_CASES_ID, HOME_CASES_ORDER, HOME_SCENES_ID, HOME_SCENES_ORDER,
+  HomeCasesDock, HomeScenesDock, type HomeContentInjected,
+} from './HomeContent.tsx'
+import { HomeContentStore } from './home-content-store.ts'
+import type { ConnectorCapsuleInjected } from './ConnectorCapsule.tsx'
 import type { AttachFileInjected } from './AttachFileButton.tsx'
 import {
   AUTOMATION_LAUNCHER_ID, AUTOMATION_LAUNCHER_ORDER, AutomationLauncher,
@@ -78,6 +85,13 @@ import {
 import { PRESET_CHIP_PRIORITY, PresetChip } from './PresetChip.tsx'
 import type { PresetChipInjected } from './PresetChip.tsx'
 import { PRESET_SETTINGS_NS, PresetRoster } from './preset-roster.ts'
+import {
+  SESSION_DELETE_CONFIRM_ID, SESSION_DELETE_CONFIRM_ORDER, SessionDeleteConfirm,
+  type SessionDeleteConfirmInjected, type SessionDeleteRequest,
+} from './SessionDeleteConfirm.tsx'
+import {
+  en as sessionsEn, zh as sessionsZh, type SessionDeleteKey,
+} from './session-delete-locales.ts'
 import { modelChoice, watchModelChoice } from './selection.ts'
 import { SIGN_IN_ORDER, SIGN_IN_STEP_ID, SignInStep } from './SignInStep.tsx'
 import type { SignInStepInjected } from './SignInStep.tsx'
@@ -85,7 +99,9 @@ import { AccountStore } from './store.ts'
 import { composerFor, SummonController, type SummonRequest } from './summon.ts'
 import { TOKEN_SECTION_ID, TOKEN_SECTION_ORDER, TokenSection } from './TokenSection.tsx'
 import { appendFileReference, fileReferenceSource } from './file-reference.ts'
+import { skillLexiconSource } from './skill-lexicon.ts'
 import { installFileChipStyle } from './file-chip-style.ts'
+import { installBubbleRefStyle } from './bubble-ref-style.ts'
 import { installFooterRowStyle } from './footer-row-style.ts'
 import { installMarketCardStyle } from './market-card-style.ts'
 import { installMarketDialogStyle } from './market-dialog-style.ts'
@@ -102,6 +118,32 @@ export type { AccountView, Balance, BalanceStatus } from './store.ts'
 export type { AccountKey } from './locales.ts'
 export type { AccountHostCaller } from './types.ts'
 
+declare global {
+  interface Window {
+    /**
+     * Consumed by the two-line `dsh-client-ui-workspace` patch that appends a
+     * 删除 item to the sidebar session row menu. The item only renders while
+     * this hook is installed, so an unpatched or plugin-less build degrades to
+     * the stock three-item menu.
+     */
+    __openluxSessionActions?: {
+      readonly deleteLabel: string
+      requestDelete(sessionId: string, title: string): void
+    }
+    /**
+     * Consumed by the `dsh-client-runtime` patch inside `contextProvenance`:
+     * the transcript's context-injection rows show the producer name recorded
+     * in the durable log (`@deepseek-ai/dsh-system-prompt` for runtime-context
+     * snapshots), and this map rewrites those names at display time only. The
+     * log itself is never touched — the recorded name doubles as the snapshot
+     * ownership key (`isOwned` in `dsh-agent-loop/lib/index.js:16-19`), so
+     * renaming at the write side would orphan every existing snapshot. Without
+     * the plugin (or the patch) the stock package names show through.
+     */
+    __openluxProducerLabels?: Readonly<Record<string, string>>
+  }
+}
+
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     /** Sign-in, challenge, and account-row copy. */
@@ -110,6 +152,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'openlux.market': MarketKey
     /** Local scheduled-task page copy. */
     'openlux.automation': AutomationKey
+    /** Row-menu session delete copy (menu label and confirm card). */
+    'openlux.sessions': SessionDeleteKey
     /** Image tool card copy, including the attachment atoms' labels. */
     'openlux.media': MediaKey
     /** The composer file button's copy. */
@@ -125,6 +169,9 @@ const MARKET_NS = 'openlux.market'
 
 /** The automation page and its sidebar trigger. */
 const AUTOMATION_NS = 'openlux.automation'
+
+/** The row-menu delete item's label and its confirm card. */
+const SESSIONS_NS = 'openlux.sessions'
 
 /** The image card's own namespace. */
 const MEDIA_NS = 'openlux.media'
@@ -213,8 +260,13 @@ export function apply(ctx: ClientContext): void {
   )
   ctx.effect(() => locale.register(MEDIA_NS, { zh: mediaZh, en: mediaEn }), 'openlux-media: copy dictionaries')
   ctx.effect(() => locale.register(FILES_NS, { zh: filesZh, en: filesEn }), 'openlux-files: copy dictionaries')
+  ctx.effect(
+    () => locale.register(SESSIONS_NS, { zh: sessionsZh, en: sessionsEn }),
+    'openlux-sessions: copy dictionaries',
+  )
   const marketText = locale.bind(MARKET_NS)
   const automationText = locale.bind(AUTOMATION_NS)
+  const sessionsText = locale.bind(SESSIONS_NS)
 
   const connection = ctx.get('connection') as ConnectionHandle
   const callHost: AccountSectionInjected['callHost'] =
@@ -407,15 +459,24 @@ export function apply(ctx: ClientContext): void {
   // is replaced by *its own source's* model form, and an occurrence whose source
   // is not registered blocks the send instead of degrading
   // (`ui-input-trigger`'s `serializeReference`). So this registration is not
-  // decoration — it is what turns `@deck_342.pptx` back into the absolute path
-  // the model can open.
+  // decoration — it is what turns `@deck_342.pptx` back into the quoted
+  // mention carrying the absolute path the model can open.
   ctx.inject(['inputTriggers'], (scope: ClientContext) => {
     scope.effect(() => scope.inputTriggers.registerSource(fileReferenceSource), 'openlux-files: file reference source')
+    // Supplementary `/` roll so skills installed this run decorate as chips —
+    // the kernel's per-session skill catalog is never invalidated by an
+    // install (`skill-lexicon.ts` traces its two invalidation wires).
+    scope.effect(() => scope.inputTriggers.registerSource(skillLexiconSource), 'openlux-account: skill lexicon')
   })
 
   // And the pill they are drawn as. Attribute selectors over the mirror layer,
   // which is all that layer can carry (`file-chip-style.ts` measures why).
   ctx.effect(() => installFileChipStyle(), 'openlux-files: file chip style')
+
+  // Sent bubbles: text segments around a reference chip flow inline instead of
+  // stacking one block per segment (`bubble-ref-style.ts` traces the kernel's
+  // block-div rendering this corrects).
+  ctx.effect(() => installBubbleRefStyle(), 'openlux-account: bubble ref style')
 
   // The rail's pictures, reached the same way: `conversation` is the root
   // singleton that owns the draft-image registry, and the input state carries
@@ -429,6 +490,65 @@ export function apply(ctx: ClientContext): void {
       return () => { rail = undefined }
     }, 'openlux-files: rail pictures')
   })
+
+  // The row-menu delete request: published by the window hook the kernel patch
+  // reads, consumed by the confirm-card overlay. One pending request at a time.
+  let deleteRequest: SessionDeleteRequest | undefined
+  const deleteRequestWatchers = new Set<() => void>()
+  const deleteRequestFeed: HostObservable<SessionDeleteRequest | undefined> = {
+    getSnapshot: () => deleteRequest,
+    subscribe: (notify) => {
+      deleteRequestWatchers.add(notify)
+      return () => { deleteRequestWatchers.delete(notify) }
+    },
+  }
+  const publishDeleteRequest = (next: SessionDeleteRequest | undefined): void => {
+    deleteRequest = next
+    for (const notify of [...deleteRequestWatchers]) notify()
+  }
+
+  // Deleting the CURRENT session first clears the selection (blank view), so
+  // the conversation pane stops touching the session the host is disposing.
+  let releaseCurrentSession: ((id: string) => void) | undefined
+  ctx.inject(['sessions'], (scope: ClientContext) => {
+    scope.effect(() => {
+      releaseCurrentSession = (id: string) => {
+        const state = scope.sessions.list.getSnapshot()
+        if (String(state.current) === id) scope.sessions.clear()
+      }
+      return () => { releaseCurrentSession = undefined }
+    }, 'openlux-sessions: release current before delete')
+  })
+
+  ctx.effect(() => {
+    const face: NonNullable<Window['__openluxSessionActions']> = {
+      // A getter so the menu label follows live locale switches.
+      get deleteLabel() { return sessionsText('remove') },
+      requestDelete: (sessionId: string, title: string) => {
+        publishDeleteRequest({ id: sessionId, title })
+      },
+    }
+    window.__openluxSessionActions = face
+    return () => {
+      if (window.__openluxSessionActions === face) delete window.__openluxSessionActions
+      publishDeleteRequest(undefined)
+    }
+  }, 'openlux-sessions: row menu hook')
+
+  ctx.effect(() => {
+    /**
+     * Display names for context-injection producers (see the Window field's
+     * doc). Only the runtime-context snapshot writer is mapped today; the
+     * label is the brand, not a translation, so it is locale-independent.
+     */
+    const labels: NonNullable<Window['__openluxProducerLabels']> = {
+      '@deepseek-ai/dsh-system-prompt': 'OpenLux',
+    }
+    window.__openluxProducerLabels = labels
+    return () => {
+      if (window.__openluxProducerLabels === labels) delete window.__openluxProducerLabels
+    }
+  }, 'openlux-account: context producer labels')
 
   ctx.inject(['sessions', 'workspaces'], (scope: ClientContext) => {
     const controller = new SummonController(scope)
@@ -542,7 +662,6 @@ export function apply(ctx: ClientContext): void {
 
   const automationView = createAutomationViewStore()
   const marketView = createMarketViewStore()
-
   // The two settings seats that exposed Agent presets, taken and left blank —
   // no page, no nav row, no way to change the default. `HiddenPresetSeats.tsx`
   // carries the reasoning; publishing no `label` is what keeps the nav quiet.
@@ -623,10 +742,66 @@ export function apply(ctx: ClientContext): void {
 
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',
+    id: SESSION_DELETE_CONFIRM_ID,
+    order: SESSION_DELETE_CONFIRM_ORDER,
+    locale: SESSIONS_NS,
+    inject: (): SessionDeleteConfirmInjected => ({
+      callHost,
+      dismiss: () => publishDeleteRequest(undefined),
+      releaseCurrent: (sessionId: string) => { releaseCurrentSession?.(sessionId) },
+      hooks: { deleteRequest: deleteRequestFeed },
+    }),
+  }, SessionDeleteConfirm))
+
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay',
     id: MARKET_OVERLAY_ID,
     order: MARKET_OVERLAY_ORDER,
     locale: MARKET_NS,
     store: marketView,
     inject: marketFace,
   }, MarketOverlay))
+
+  // The composer's connector entry, beside the file button: the icon of a
+  // connected connector, opening the market's connector tab. WorkBuddy shows
+  // the same fact in the same seat (its connector capsule); the management
+  // acts it reaches differ only in chrome (`ConnectorCapsule.tsx`). No store
+  // here on purpose: this slot is session-scoped and `marketView` is already
+  // mounted under root seats — the kernel allows one scope per handle, and
+  // taking it here refused the whole plugin at load. The capsule asks through
+  // `market-open-request.ts` instead, and the overlay answers.
+  ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
+    name: 'conversation.input.left',
+    id: CONNECTOR_CAPSULE_ID,
+    order: CONNECTOR_CAPSULE_ORDER,
+    locale: MARKET_NS,
+    inject: (): ConnectorCapsuleInjected => ({ callHost }),
+  }, ConnectorCapsule))
+
+  // The blank-composer home content: scene chips and starter prompts above the
+  // input, featured cases below it (CSS `order` in `HomeContent.tsx` does the
+  // split — the dock is one column). One store feeds both seats, same pattern
+  // as `PresetRoster`: a plain snapshot/subscribe pair passed through `hooks`,
+  // not a kernel store handle, so both seats can share it freely.
+  const homeContent = new HomeContentStore(callHost)
+  const homeFace = (): HomeContentInjected => ({
+    hooks: { homeContent },
+    load: () => { void homeContent.load() },
+    selectScene: slug => { homeContent.selectScene(slug) },
+    callHost,
+  })
+  ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
+    name: 'conversation.input.dock',
+    id: HOME_SCENES_ID,
+    order: HOME_SCENES_ORDER,
+    locale: MARKET_NS,
+    inject: homeFace,
+  }, HomeScenesDock))
+  ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
+    name: 'conversation.input.dock',
+    id: HOME_CASES_ID,
+    order: HOME_CASES_ORDER,
+    locale: MARKET_NS,
+    inject: homeFace,
+  }, HomeCasesDock))
 }

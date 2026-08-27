@@ -10,12 +10,12 @@
  * resolver rather than taking a root.
  */
 
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
-  importLocalSkill, readSkillTarget, removeSkill, skillRoot,
+  importLocalSkill, readSkillTarget, removeSkill, setSkillEnabled, skillRoot,
 } from '../../openlux-plugin-account/src/market/skill-install.ts'
 
 /**
@@ -82,8 +82,8 @@ describe('skill root', () => {
     const target = await readSkillTarget()
 
     expect(target.installed).toEqual([
-      { slug: 'by-hand', name: 'By Hand', managed: false },
-      { slug: 'ours', name: 'Ours', managed: true, version: '1' },
+      { slug: 'by-hand', name: 'By Hand', managed: false, enabled: true },
+      { slug: 'ours', name: 'Ours', managed: true, version: '1', enabled: true },
     ])
   })
 
@@ -119,7 +119,7 @@ describe('local import', () => {
     expect(readdirSync(join(skillRoot(), 'my-local-skill')).sort()).toEqual(['SKILL.md', 'references'])
     // A hand-picked directory is the user's own, so nothing marks it as ours.
     const installed = (await readSkillTarget()).installed
-    expect(installed).toEqual([{ slug: 'my-local-skill', name: 'my-local-skill', managed: false }])
+    expect(installed).toEqual([{ slug: 'my-local-skill', name: 'my-local-skill', managed: false, enabled: true }])
   })
 
   it('names the directory when the front matter does not, and refuses a name that cannot be one', async () => {
@@ -174,5 +174,43 @@ describe('removal', () => {
     expect(await removeSkill('goes')).toBe(true)
 
     expect(readdirSync(root)).toEqual(['stays'])
+  })
+})
+
+describe('enablement', () => {
+  it('reads omitted invocation keys as enabled, and both close-keys as closed', async () => {
+    const root = skillRoot()
+    writeSkill(root, 'open', '---\nname: Open\n---\n')
+    writeSkill(root, 'shut', '---\nname: Shut\nuser-invocable: false\ndisable-model-invocation: true\n---\n')
+    writeSkill(root, 'yes-no', '---\nname: YesNo\nuser-invocable: yes\ndisable-model-invocation: false\n---\n')
+
+    const bySlug = Object.fromEntries((await readSkillTarget()).installed.map(row => [row.slug, row.enabled]))
+    expect(bySlug).toEqual({ open: true, shut: false, 'yes-no': true })
+  })
+
+  it('closes and reopens by writing the kernel invocation pair, without deleting the directory', async () => {
+    const root = skillRoot()
+    writeSkill(root, 'toggle-me', '---\nname: Toggle Me\ndescription: stays\n---\nbody\n')
+
+    expect(await setSkillEnabled('toggle-me', false)).toBe(true)
+    const closed = readFileSync(join(root, 'toggle-me', 'SKILL.md'), 'utf8')
+    expect(closed).toContain('user-invocable: false')
+    expect(closed).toContain('disable-model-invocation: true')
+    expect(closed).toContain('description: stays')
+    expect(closed).toMatch(/---\nbody/)
+    expect((await readSkillTarget()).installed).toEqual([
+      { slug: 'toggle-me', name: 'Toggle Me', managed: false, enabled: false },
+    ])
+
+    expect(await setSkillEnabled('toggle-me', true)).toBe(true)
+    const opened = readFileSync(join(root, 'toggle-me', 'SKILL.md'), 'utf8')
+    expect(opened).toContain('user-invocable: true')
+    expect(opened).toContain('disable-model-invocation: false')
+    expect((await readSkillTarget()).installed[0]?.enabled).toBe(true)
+  })
+
+  it('refuses a path that is not a slug in the root', async () => {
+    expect(await setSkillEnabled('../etc', false)).toBe(false)
+    expect(await setSkillEnabled('missing', true)).toBe(false)
   })
 })

@@ -14,13 +14,14 @@
  * would receive instead.
  */
 
-import { useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import {
-  Button, IconFullscreenOutline16, IconRightUpOutline14,
+  Button, IconFullscreenOutline16, IconRightUpOutline14, IconSettingsOutline14,
   Input, Modal, Pill, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
-  CatalogItem, CustomConnectorSync, CustomOpen, HomePlaybook, InstallOutcome, PlaybookArtifact,
+  CatalogItem, CustomConnectorFile, CustomConnectorSync, CustomOpen, HomePlaybook,
+  InstallOutcome, PlaybookArtifact,
 } from '../market/wire.ts'
 import { describe } from './MarketCard.tsx'
 import type { MarketKey } from './market-locales.ts'
@@ -46,6 +47,89 @@ const styles = {
     wordBreak: 'break-all',
   },
   tags: { display: 'flex', flexWrap: 'wrap', gap: '4px' },
+  // The custom-connector dialog, WorkBuddy's «MCP 服务管理» frame: a headed
+  // card whose body swaps between a server list and a full-bleed editor.
+  customRoot: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 },
+  customHeader: {
+    display: 'flex', alignItems: 'center', gap: '12px',
+    padding: '20px 56px 14px 24px', flex: '0 0 auto',
+  },
+  customBadge: {
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    width: '36px', height: '36px', flex: '0 0 36px', borderRadius: '10px',
+    border: '1px solid var(--dsw-alias-border-l1)', color: 'var(--dsw-alias-label-secondary)',
+  },
+  customHeading: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0, flex: 1 },
+  customTitle: {
+    margin: 0, fontSize: '15px', fontWeight: 600, lineHeight: '22px',
+    color: 'var(--dsw-alias-label-primary)',
+  },
+  customSubtitle: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', lineHeight: '18px' },
+  customList: {
+    flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 24px 20px',
+    display: 'flex', flexDirection: 'column', gap: '8px',
+  },
+  customRow: {
+    display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 14px',
+    borderRadius: '10px', border: '1px solid var(--dsw-alias-border-l1)',
+  },
+  customRowHead: {
+    display: 'flex', alignItems: 'center', gap: '8px',
+    fontSize: '13px', fontWeight: 500, color: 'var(--dsw-alias-label-primary)',
+  },
+  customRowDot: { width: '8px', height: '8px', borderRadius: '50%', flex: '0 0 8px' },
+  customRowState: { marginLeft: 'auto', fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)' },
+  customRowProblem: {
+    color: 'var(--dsw-alias-state-error-primary)', fontSize: '12px',
+    lineHeight: 1.5, paddingLeft: '16px',
+  },
+  customEmpty: {
+    flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
+    justifyContent: 'center', gap: '6px', padding: '24px',
+  },
+  customEmptyBadge: {
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    width: '56px', height: '56px', borderRadius: '14px', marginBottom: '6px',
+    border: '1px solid var(--dsw-alias-border-l1)', color: 'var(--dsw-alias-label-tertiary)',
+  },
+  customEmptyTitle: { fontSize: '14px', fontWeight: 600, color: 'var(--dsw-alias-label-primary)' },
+  customEmptyHint: {
+    fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)', marginBottom: '10px',
+  },
+  customBar: {
+    display: 'flex', alignItems: 'center', gap: '8px',
+    padding: '0 24px 10px', flex: '0 0 auto',
+  },
+  customBack: {
+    display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '4px 8px',
+    margin: '-4px 0 -4px -8px', border: 0, background: 'transparent', borderRadius: '6px',
+    color: 'var(--dsw-alias-label-secondary)', fontSize: '13px', cursor: 'pointer',
+  },
+  customPathStrip: {
+    display: 'flex', alignItems: 'center', gap: '8px', padding: '7px 24px',
+    background: 'var(--dsw-alias-interactive-bg-hover)', fontSize: '12px', flex: '0 0 auto',
+  },
+  customPathLabel: { color: 'var(--dsw-alias-label-tertiary)', flex: '0 0 auto' },
+  customPathValue: {
+    fontFamily: 'monospace', color: 'var(--dsw-alias-label-secondary)',
+    wordBreak: 'break-all', minWidth: 0,
+  },
+  // The theme ships no warning-state token; this is WorkBuddy's amber, same
+  // as the connecting dot in `market-card-style.ts`.
+  customDirty: { marginLeft: 'auto', flex: '0 0 auto', color: '#e6a23c' },
+  customEditor: {
+    // WorkBuddy's seat here is a Monaco editor; the result being matched is
+    // «edit the JSON without leaving the app», and for a file that is a dozen
+    // lines a plain textarea carries it without shipping an editor engine.
+    flex: 1, minHeight: 0, width: '100%', boxSizing: 'border-box', padding: '12px 24px',
+    border: 0, resize: 'none', outline: 'none', background: 'transparent',
+    color: 'var(--dsw-alias-label-primary)',
+    fontFamily: 'monospace', fontSize: '12px', lineHeight: 1.6,
+  },
+  customFoot: {
+    display: 'flex', flexDirection: 'column', gap: '6px',
+    padding: '8px 24px 14px', flex: '0 0 auto',
+  },
   prompts: { display: 'flex', flexDirection: 'column', gap: '6px' },
   promptsLabel: { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px' },
   prompt: {
@@ -244,6 +328,15 @@ export interface MarketDetailProps {
    */
   readonly onTry?: () => void
   readonly tryLabel?: string
+  /**
+   * Undo the install from inside the sheet.
+   *
+   * The connector card used to carry 「断开」 on its footer, which put a
+   * destructive act one stray click away on every connected row; the sheet is
+   * where the reader has already named the row they mean, so it lives here.
+   */
+  readonly onRemove?: () => void
+  readonly removeLabel?: string
   readonly onClose: () => void
 }
 
@@ -263,7 +356,7 @@ export function MarketDetail(props: MarketDetailProps): ReactNode {
 function StandardMarketDetail(props: MarketDetailProps & { readonly item: CatalogItem }): ReactNode {
   const {
     item, language, categoryName, kind, t, onPrimary, summonable, blocked, installed,
-    onTry, tryLabel, onClose,
+    onTry, tryLabel, onRemove, removeLabel, onClose,
   } = props
   const label = kind === 'connector'
     ? t('connect')
@@ -279,7 +372,25 @@ function StandardMarketDetail(props: MarketDetailProps & { readonly item: Catalo
       footer={(
         <div style={styles.footer}>
           <Button variant="ghost" onClick={onClose}>{t('detailClose')}</Button>
-          {installed && !summonable && !use && (
+          {/*
+            Primary, matching the 「连接」 the sheet shows before a connect:
+            whichever way this row can go, its one action reads the same.
+          */}
+          {onRemove !== undefined && removeLabel !== undefined && (
+            <Button
+              variant="primary"
+              data-testid="openlux-market-detail-remove"
+              onClick={onRemove}
+            >
+              {removeLabel}
+            </Button>
+          )}
+          {/*
+            The state word earns its place only when nothing else says it: a
+            sheet that offers 「断开」 is already talking about a connected row,
+            and a second caption beside the button is clutter.
+          */}
+          {installed && !summonable && !use && onRemove === undefined && (
             <span style={styles.note}>{t(kind === 'connector' ? 'connected' : 'installed')}</span>
           )}
           {use && (
@@ -798,92 +909,265 @@ export function ConnectorToken(props: ConnectorTokenProps): ReactNode {
 /** What the custom-connector panel needs. */
 export interface CustomConnectorProps {
   readonly open: boolean
+  /** The file's text, read as the panel opened; absent until the read lands. */
+  readonly file?: CustomConnectorFile
   /** The last re-read, absent until one has happened. */
   readonly sync?: CustomConnectorSync
   readonly busy: boolean
+  /** Why the last save did not land, cleared by the next one that does. */
+  readonly saveError?: string
   /** What the OS did with the file, absent until the opener was pressed. */
   readonly handoff?: CustomOpen['did']
   readonly t: T
   readonly onOpenFile: () => void
-  readonly onReload: () => void
+  readonly onSave: (content: string) => void
   readonly onClose: () => void
 }
 
+/** WorkBuddy's stacked-servers glyph, for the dialog head and the empty seat. */
+function ServersGlyph({ size }: { readonly size: number }): ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="2" y="3" width="12" height="4.4" rx="1.4" stroke="currentColor" strokeWidth="1.3" />
+      <rect x="2" y="8.6" width="12" height="4.4" rx="1.4" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="4.7" cy="5.2" r="0.75" fill="currentColor" />
+      <circle cx="4.7" cy="10.8" r="0.75" fill="currentColor" />
+    </svg>
+  )
+}
+
 /**
- * The user's own MCP servers.
+ * The user's own MCP servers, edited where they take effect.
  *
- * Two buttons and a list of complaints, because the servers themselves are
- * managed in a file the user edits — WorkBuddy's «自定义连接器» opens the MCP
- * config in its host editor and shows no cards for what is in it either. What
- * this adds over the bare file is the part a text editor cannot tell you:
- * whether what you wrote actually started, and what it said if it did not.
- * @param props - the last re-read and the three actions.
+ * WorkBuddy's «MCP 服务管理» shape (`mcp-panel.tsx` + `mcp-config-editor.tsx`),
+ * two views in one framed card: the dialog opens on a *list* of the file's
+ * servers — or a centred empty seat pointing at 「配置」 — and the JSON editor
+ * is the second view behind 「配置 MCP」, with the file's path above it and a
+ * save that validates before it writes and mounts the result immediately. An
+ * earlier revision only *opened* the file and asked the user to come back and
+ * press «重新读取»; the round-trip through an external editor is what this
+ * replaces. What the dialog adds over a bare editor is the part no text editor
+ * can tell you: whether what you wrote actually started, and what it said if
+ * it did not.
+ * @param props - the file, the last save's verdict, and the actions.
  * @returns the dialog, or null while closed.
  */
 export function CustomConnector(props: CustomConnectorProps): ReactNode {
-  const { open, sync, busy, handoff, t, onOpenFile, onReload, onClose } = props
+  const { open, file, sync, busy, saveError, handoff, t, onOpenFile, onSave, onClose } = props
+  const [view, setView] = useState<'list' | 'editor'>('list')
+  // The draft overlays the file's text; undefined means «not touched yet».
+  // Keyed off the file content rather than copied once, so a save's normalized
+  // write-back (or a fresh read on reopen) becomes the new baseline.
+  const [draft, setDraft] = useState<string>()
+  // Raised by the save press, so the baseline moving (= the save landed) is
+  // what sends the user back to the list — a refused save moves nothing and
+  // stays in the editor with its reason.
+  const saved = useRef(false)
+  useEffect(() => { setDraft(undefined) }, [file?.content, open])
+  useEffect(() => { if (open) { setView('list'); saved.current = false } }, [open])
+  useEffect(() => {
+    if (saved.current) { setView('list'); saved.current = false }
+  }, [file?.content])
   if (!open) return null
+
+  const text = draft ?? file?.content ?? ''
+  const dirty = file !== undefined && text !== file.content
+  const rows = sync?.rows ?? []
+
+  // Leaving the editor with unsaved edits gets one plain confirm — WorkBuddy's
+  // own guard is exactly `window.confirm` (`mcp-config-editor.tsx`).
+  const leaveEditor = (): void => {
+    if (dirty && !window.confirm(t('customUnsaved'))) return
+    setDraft(undefined)
+    setView('list')
+  }
 
   return (
     <Modal
       open
+      headless
+      className="openlux-market-custom-dialog"
       onClose={onClose}
       title={t('customTitle')}
       closeLabel={t('closeMarket')}
-      footer={(
-        <div style={styles.footer}>
-          <Button
-            variant="ghost"
-            disabled={busy}
-            data-testid="openlux-market-custom-open"
-            onClick={onOpenFile}
-          >
-            {t('customOpen')}
-          </Button>
-          <Button
-            variant="primary"
-            disabled={busy}
-            data-testid="openlux-market-custom-reload"
-            onClick={onReload}
-          >
-            {busy ? t('customReloading') : t('customReload')}
-          </Button>
-        </div>
-      )}
     >
-      <div style={styles.body}>
-        <span style={styles.note}>{t('customBody')}</span>
-        {/*
-          The path is always worth showing — it is what the user needs whatever
-          the OS did — but the two lesser outcomes each need a sentence, or the
-          button looks like it did nothing. Revealed is not a failure, so it is
-          not coloured like one.
-        */}
-        {handoff === 'revealed' && (
-          <span style={styles.note} data-testid="openlux-market-custom-revealed">
-            {t('customOpenRevealed')}
-          </span>
+      <div style={styles.customRoot} data-testid="openlux-market-custom-dialog">
+        <header style={styles.customHeader}>
+          <span style={styles.customBadge} aria-hidden="true"><ServersGlyph size={18} /></span>
+          <div style={styles.customHeading}>
+            <h2 style={styles.customTitle}>{t('customTitle')}</h2>
+            <span style={styles.customSubtitle}>{t('customSubtitle')}</span>
+          </div>
+          {view === 'list' && (
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<IconSettingsOutline14 />}
+              data-testid="openlux-market-custom-configure"
+              onClick={() => setView('editor')}
+            >
+              {t('customConfigure')}
+            </Button>
+          )}
+          <button
+            type="button"
+            style={styles.closeButton}
+            aria-label={t('closeMarket')}
+            onClick={onClose}
+            onPointerEnter={event => {
+              event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)'
+            }}
+            onPointerLeave={event => { event.currentTarget.style.background = 'transparent' }}
+          >
+            ×
+          </button>
+        </header>
+
+        {view === 'list' && (
+          <div style={styles.customList} data-testid="openlux-market-custom-list">
+            {/* A file that did not parse has no rows; its reason shows here. */}
+            {rows.length === 0 && sync !== undefined && sync.problems.map(problem => (
+              <span key={problem} style={styles.refusal} data-testid="openlux-market-custom-problem">
+                {problem}
+              </span>
+            ))}
+            {rows.map(row => (
+              <div key={row.name} style={styles.customRow} data-testid="openlux-market-custom-row">
+                <div style={styles.customRowHead}>
+                  <span
+                    style={{
+                      ...styles.customRowDot,
+                      background: row.live
+                        ? 'var(--dsw-alias-state-success-primary)'
+                        : 'var(--dsw-alias-state-error-primary)',
+                    }}
+                    aria-hidden="true"
+                  />
+                  {row.name}
+                  <span style={styles.customRowState}>
+                    {row.live ? t('connected') : t('customRowDown')}
+                  </span>
+                </div>
+                {row.problem !== undefined && (
+                  <span style={styles.customRowProblem}>{row.problem}</span>
+                )}
+              </div>
+            ))}
+            {rows.length === 0 && (
+              <div style={styles.customEmpty} data-testid="openlux-market-custom-empty">
+                <span style={styles.customEmptyBadge} aria-hidden="true">
+                  <ServersGlyph size={26} />
+                </span>
+                <span style={styles.customEmptyTitle}>{t('customEmptyTitle')}</span>
+                <span style={styles.customEmptyHint}>{t('customEmptyHint')}</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  data-testid="openlux-market-custom-empty-configure"
+                  onClick={() => setView('editor')}
+                >
+                  {t('customEmptyAction')}
+                </Button>
+              </div>
+            )}
+          </div>
         )}
-        {handoff === 'nothing' && (
-          <span style={styles.refusal} data-testid="openlux-market-custom-openfailed">
-            {t('customOpenFailed')}
-          </span>
+
+        {view === 'editor' && (
+          <>
+            <div style={styles.customBar}>
+              <button
+                type="button"
+                style={styles.customBack}
+                data-testid="openlux-market-custom-back"
+                onClick={leaveEditor}
+                onPointerEnter={event => {
+                  event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)'
+                }}
+                onPointerLeave={event => { event.currentTarget.style.background = 'transparent' }}
+              >
+                ‹ {t('customBack')}
+              </button>
+              <span style={{ flex: 1 }} />
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy}
+                data-testid="openlux-market-custom-cancel"
+                onClick={leaveEditor}
+              >
+                {t('customCancel')}
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                // Disabled while clean, WorkBuddy's rule: the button doubles as
+                // the «you have unsaved changes» signal.
+                disabled={busy || !dirty}
+                data-testid="openlux-market-custom-save"
+                onClick={() => { saved.current = true; onSave(text) }}
+              >
+                {busy ? t('customSaving') : t('customSave')}
+              </Button>
+            </div>
+            {file !== undefined && (
+              <div style={styles.customPathStrip}>
+                <span style={styles.customPathLabel}>{t('customPathLabel')}:</span>
+                <span style={styles.customPathValue} data-testid="openlux-market-custom-path">
+                  {file.path}
+                </span>
+                {dirty && <span style={styles.customDirty}>{t('customDirty')}</span>}
+              </div>
+            )}
+            <textarea
+              value={text}
+              spellCheck={false}
+              disabled={busy || file === undefined}
+              style={styles.customEditor}
+              data-testid="openlux-market-custom-editor"
+              aria-label={t('customTitle')}
+              onChange={event => setDraft(event.target.value)}
+            />
+            <div style={styles.customFoot}>
+              {saveError !== undefined && (
+                <span style={styles.refusal} data-testid="openlux-market-custom-saveerror">
+                  {saveError}
+                </span>
+              )}
+              {/*
+                The two lesser outcomes of the external open each need a
+                sentence, or that button looks like it did nothing. Revealed is
+                not a failure, so it is not coloured like one.
+              */}
+              {handoff === 'revealed' && (
+                <span style={styles.note} data-testid="openlux-market-custom-revealed">
+                  {t('customOpenRevealed')}
+                </span>
+              )}
+              {handoff === 'nothing' && (
+                <span style={styles.refusal} data-testid="openlux-market-custom-openfailed">
+                  {t('customOpenFailed')}
+                </span>
+              )}
+              <span style={styles.note}>
+                {t('customBody')}
+                {' '}
+                <button
+                  type="button"
+                  style={{
+                    border: 0, background: 'transparent', padding: 0, cursor: 'pointer',
+                    color: 'var(--dsw-alias-label-secondary)', textDecoration: 'underline',
+                    fontSize: 'inherit',
+                  }}
+                  data-testid="openlux-market-custom-open"
+                  onClick={onOpenFile}
+                >
+                  {t('customOpen')}
+                </button>
+              </span>
+            </div>
+          </>
         )}
-        {(handoff !== undefined || sync !== undefined) && (
-          <span style={styles.path} data-testid="openlux-market-custom-path">
-            {sync?.path ?? ''}
-          </span>
-        )}
-        {sync !== undefined && (
-          <span style={styles.note} data-testid="openlux-market-custom-live">
-            {t('customLive', { count: sync.live })}
-          </span>
-        )}
-        {sync?.problems.map(problem => (
-          <span key={problem} style={styles.refusal} data-testid="openlux-market-custom-problem">
-            {problem}
-          </span>
-        ))}
       </div>
     </Modal>
   )

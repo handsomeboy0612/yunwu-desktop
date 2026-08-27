@@ -301,10 +301,13 @@ describe('published package surface', () => {
     expect(desktopClient).toContain('installDesktopDirectoryPickerBridge()')
   })
 
-  it('drops folders onto the renderer slot wrapper without patching ui-workspace', () => {
-    for (const key of Object.keys(workspaceManifest.resolutions ?? {})) {
-      expect(key).not.toContain('dsh-client-ui-workspace')
-    }
+  it('drops folders onto the renderer slot wrapper without patching ui-workspace for it', () => {
+    // ui-workspace carries exactly one patch — the row-menu delete seam
+    // (automation.spec.ts owns its assertions). Folder drop must not grow it:
+    // the feature leans on the renderer's `[data-slot]` wrapper instead.
+    const workspacePatch = readFileSync(
+      new URL('./patches/dsh-client-ui-workspace@0.1.1-rc.2.patch', workspaceRoot), 'utf8')
+    expect(workspacePatch).not.toContain('data-dsh-workspace-drop-target')
     const dropSource = readFileSync(new URL('src/client/workspace-folder-drop.ts', packageRoot), 'utf8')
     expect(dropSource).toContain('[data-slot="sidebar.workspaces"]')
     expect(dropSource).not.toContain('data-dsh-workspace-drop-target')

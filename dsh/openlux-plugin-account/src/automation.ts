@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { rm } from 'node:fs/promises'
+import { basename, dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import {
   installModelSelection,
@@ -171,6 +173,7 @@ interface AutomationAgents {
     readonly setup: (agentCtx: Context) => Promise<void>
   }): Promise<AutomationAgentHandle>
   get(id: string): AutomationAgent | undefined
+  resume(options: { readonly resumeSessionId: string }): Promise<AutomationAgentHandle>
 }
 
 interface AutomationAgentPresets {
@@ -216,6 +219,7 @@ interface AutomationWorkspace {
   readonly title: string
   readonly sessionIds: readonly string[]
   attachSession(sessionId: string): Promise<void>
+  detachSession(sessionId: string): Promise<void>
   status(): Promise<'ok' | 'missing-dir'>
 }
 
@@ -245,9 +249,15 @@ interface AutomationPermissionPresets {
   set(session: unknown, name: string): void
 }
 
+/** The subset of a SessionHeader this module reads; `locate` takes the header back verbatim. */
+interface AutomationSessionHeader {
+  readonly id: string
+}
+
 interface AutomationSessionPersistence {
-  list(): Promise<readonly { readonly id: string }[]>
+  list(): Promise<readonly AutomationSessionHeader[]>
   inspect(id: string): Promise<{ readonly events: readonly AutomationSessionEvent[] }>
+  locate(meta: AutomationSessionHeader): { readonly kind: string; readonly path: string } | undefined
 }
 
 interface AutomationStorageDomain {
@@ -378,6 +388,8 @@ export class AutomationRuntime {
         return await this.remove(payload)
       case 'automations.run':
         return await this.runNow(payload)
+      case 'automations.deleteSession':
+        return await this.deleteSession(payload)
       default:
         throw new Error(`unknown automation endpoint: ${endpoint}`)
     }
@@ -573,6 +585,85 @@ export class AutomationRuntime {
     const current = this.table.get(id)
     if (current?.activeRun !== undefined) throw new Error('自动化正在执行，请完成后再删除')
     return { removed: await this.table.delete(id) }
+  }
+
+  /**
+   * Permanently delete one session: its live registration, its persisted log
+   * directory, and its workspace seat.
+   *
+   * The kernel ships no session-delete API (`dsh-session-persistence` README
+   * lists deletion as out-of-band backend maintenance), so this composes three
+   * sanctioned primitives: a handle's `dispose()` unregisters the agent and
+   * broadcasts `session/disposed` — every connected client drops the row
+   * instantly; the log directory that `sessionPersistence.locate` names is
+   * then removed so a restart cannot resurrect the row; and
+   * `workspace.detachSession` releases the accounting seat.
+   *
+   * The handle is the crux: window-facing agents are created inside
+   * `dsh-host-apiproxy` / `dsh-api-remotes`, which drop their handles on the
+   * floor (`return (await ctx.agents.resume(...)).agent`), so a visited
+   * session stayed undeletable for the whole app run. Our patches to those two
+   * packages stash every such handle in `globalThis.__openluxAgentHandles`,
+   * and this endpoint disposes through that stash with true owner capability.
+   */
+  private async deleteSession(payload: unknown): Promise<{ readonly removed: boolean }> {
+    const id = deleteSessionIdOf(payload)
+    const busy = [...this.table.entries()]
+      .some(([, record]) => record.activeRun?.sessionId === id)
+    if (busy) throw new Error('该会话正被自动化任务写入，请等执行结束后再删除')
+
+    const headers = await this.services.sessionPersistence.list()
+    const header = headers.find(candidate => String(candidate.id) === id)
+
+    const owned = [...this.handles].find(handle => handle.agent.id === id)
+    let disposedLive = false
+    if (owned !== undefined) {
+      await owned.dispose()
+      this.handles.delete(owned)
+      disposedLive = true
+    } else if (this.services.agents.get(id) !== undefined) {
+      // Live because a window visited or created it. The kernel patch stashed
+      // the owner handle; dispose stops the loop, drains it, and unregisters.
+      const stashed = globalAgentHandles().get(id)
+      if (stashed === undefined) {
+        throw new Error('会话正在使用中，请先切换到其他会话后再删除')
+      }
+      await stashed.dispose()
+      globalAgentHandles().delete(id)
+      if (this.services.agents.get(id) !== undefined) {
+        // A newer registration replaced the stashed handle's agent mid-flight.
+        throw new Error('会话正在使用中，请稍后重试')
+      }
+      disposedLive = true
+    } else if (header !== undefined) {
+      const handle = await this.services.agents.resume({ resumeSessionId: id })
+      await handle.dispose()
+    }
+
+    let removedLog = false
+    if (header !== undefined) {
+      const location = this.services.sessionPersistence.locate(header)
+      if (location !== undefined) {
+        const container = dirname(location.path)
+        // The jsonl backend keeps one directory per session named by its id;
+        // removing it takes sidecar artifacts along. Any other layout only
+        // loses the artifact itself.
+        const target = basename(container) === id ? container : location.path
+        await rm(target, { recursive: true, force: true })
+        removedLog = true
+      }
+    }
+
+    const workspace = this.services.workspaceRegistry.list()
+      .find(candidate => candidate.sessionIds.includes(id))
+    if (workspace !== undefined) {
+      await workspace.detachSession(id).catch((error: unknown) => {
+        this.ctx.logger.warn(`openlux automation could not detach deleted session ${id}`)
+        this.ctx.logger.warn(error)
+      })
+    }
+
+    return { removed: disposedLive || removedLog }
   }
 
   private async runNow(payload: unknown): Promise<AutomationTask> {
@@ -1160,6 +1251,25 @@ function toggleInputOf(payload: unknown): { readonly id: string; readonly enable
 
 function taskIdOf(payload: unknown): string {
   return requiredText(objectOf(payload).id, '自动化编号', 200)
+}
+
+function deleteSessionIdOf(payload: unknown): string {
+  return requiredText(objectOf(payload).sessionId, '会话编号', 200)
+}
+
+/** What deletion needs from a stashed handle: the owner's disposer. */
+interface StashedAgentHandle {
+  dispose(): Promise<void>
+}
+
+/**
+ * The handle stash our `dsh-host-apiproxy` / `dsh-api-remotes` patches fill:
+ * one owner handle per window-facing session, newest registration wins.
+ * Present only in the patched desktop bundle, hence the defensive read.
+ */
+function globalAgentHandles(): Map<string, StashedAgentHandle> {
+  const holder = globalThis as { __openluxAgentHandles?: Map<string, StashedAgentHandle> }
+  return holder.__openluxAgentHandles ??= new Map()
 }
 
 function objectOf(value: unknown): Record<string, unknown> {
