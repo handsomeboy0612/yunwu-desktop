@@ -19,6 +19,17 @@ const CSS = `
   gap: 0;
   border-radius: 14px;
 }
+.openlux-market-connector-detail-dialog {
+  /* WorkBuddy's connect modal: a narrow centered card (its
+     .connector-detail-modal), the asks list scrolling under a fixed head. */
+  width: min(520px, 100%);
+  height: auto;
+  max-height: min(640px, calc(100vh - 48px));
+  min-height: 0;
+  padding: 0;
+  gap: 0;
+  border-radius: 16px;
+}
 .openlux-market-preview-dialog {
   width: min(760px, 100%);
   height: min(620px, calc(100vh - 48px));
@@ -327,6 +338,7 @@ const CSS = `
 }
 @media (max-width: 640px) {
   .openlux-market-expert-detail-dialog,
+  .openlux-market-connector-detail-dialog,
   .openlux-market-preview-dialog,
   .openlux-market-custom-dialog {
     height: calc(100vh - 32px);

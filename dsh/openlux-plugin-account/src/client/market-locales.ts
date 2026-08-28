@@ -140,9 +140,14 @@ export const zh = {
   'connectorCancelAuth': '取消连接',
   // WorkBuddy 已连接卡片的悬停动作:图标换成聊天气泡,气泡提示就是这三个字。
   'connectorChat': '去对话',
-  // 输入框旁那颗连接器入口的悬停提示;第二条是「记录在册但这次没挂上」的情形。
-  'connectorCapsule': '已连接 {count} 个连接器，点击管理',
-  'connectorCapsuleOffline': '有连接器这次没连上，点击查看',
+  // 输入框旁那颗连接器入口的悬停提示——只报「去对话」带进来的那一个,不报数量
+  // (产品拍板 2026-08-28);第二条是它「记录在册但这次没挂上」的情形。
+  'connectorCapsule': '{name} 已连接，点击管理',
+  'connectorCapsuleOffline': '这个连接器这次没连上，点击查看',
+  'connectorCapsuleManage': '管理连接器',
+  // 连接器详情页(WB 的连接弹窗形状):标题与问题条区的抬头。
+  'connectorDetailTitle': '连接 {name}',
+  'connectorTryHeading': '试试这样用',
   'connectorNotMountable': '当前部署没有可写的插件树，无法连接连接器',
   'connectorTokenTitle': '需要一个令牌',
   'connectorTokenBody': '「{name}」要用你自己的密钥访问它的服务。填进来之后会存在本机，只交给这一个连接器的进程。',
@@ -343,8 +348,11 @@ export const en = {
   'connectorReauthorize': 'Sign in again',
   'connectorCancelAuth': 'Cancel connection',
   'connectorChat': 'Open chat',
-  'connectorCapsule': '{count} connector(s) connected — click to manage',
-  'connectorCapsuleOffline': 'A connector did not come up this launch — click to see',
+  'connectorCapsule': '{name} connected — click to manage',
+  'connectorCapsuleOffline': 'This connector did not come up this launch — click to see',
+  'connectorCapsuleManage': 'Manage connectors',
+  'connectorDetailTitle': 'Connect {name}',
+  'connectorTryHeading': 'Try it like this',
   'connectorNotMountable': 'This deployment has no writable plugin tree, so connectors cannot be mounted',
   'connectorTokenTitle': 'This one needs a token',
   'connectorTokenBody': '“{name}” uses your own key to reach its service. It is stored on this machine and handed only to this connector’s process.',

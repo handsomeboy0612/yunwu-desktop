@@ -69,6 +69,16 @@ export interface SummonRequest {
    * its derived chip decoration on a cold session.
    */
   readonly skillToken?: string
+  /**
+   * The market case this summon is a 「做同款」 of.
+   *
+   * Carried through to {@link SummonController.apply} because only that point
+   * knows which session the summon landed on: the host then writes the staged
+   * reference HTML into that session's working directory and injects the
+   * reading instruction (`market/case-reference.ts`). Never rides the visible
+   * draft — the prompt the user sees stays pure business copy.
+   */
+  readonly caseReference?: { readonly playbookId: number }
 }
 
 /**
@@ -193,8 +203,22 @@ export class SummonController {
    * @param scope - a context with `sessions`, `workspaces` and `connection`
    * (the conversation service is read per use, since a session's composer
    * exists only while that session's conversation view is mounted).
+   * @param attachCaseReference - hands a landed 「做同款」 to the host, which
+   * stages the reference file and injects its instruction. Fire-and-forget:
+   * a failure degrades to a summon without reference, never a broken one.
+   * @param detachCaseReference - hands a landed reference-less summon to the
+   * host, which deletes the session's reference file. A blank session can be
+   * reused by any later summon; when the earlier one was a 「做同款」, its
+   * reading instruction is already queued in the durable inbox and cannot be
+   * withdrawn — deleting the file routes that instruction into its own
+   * self-heal clause (file missing → follow the user's text, no questions).
+   * Fire-and-forget for the same reason as attach.
    */
-  constructor(private readonly scope: ClientContext) {}
+  constructor(
+    private readonly scope: ClientContext,
+    private readonly attachCaseReference?: (playbookId: number, sessionId: string) => void,
+    private readonly detachCaseReference?: (sessionId: string) => void,
+  ) {}
 
   /**
    * Take the user to this preset's new session.
@@ -241,6 +265,18 @@ export class SummonController {
       }
       // The `agent-preset/selected` broadcast moves the chip and the header
       // label (ui-agent-preset subscribes to it), so nothing is noted here.
+    }
+    // Only now is the receiving session known, which is what the host needs to
+    // place the reference file (the session's cwd) and to inject into the right
+    // inbox. After the preset settled: a refused preset returns above, and a
+    // reference without its expert would instruct whatever agent is there.
+    // A reference-less summon instead detaches: the reused blank session may
+    // still carry a queued reading instruction from an earlier 「做同款」, and
+    // deleting the file is the only way to defuse it (see the constructor doc).
+    if (pending.caseReference !== undefined) {
+      this.attachCaseReference?.(pending.caseReference.playbookId, session.id)
+    } else {
+      this.detachCaseReference?.(session.id)
     }
     this.draft(session.id, pending.prompt, pending.skillToken)
   }

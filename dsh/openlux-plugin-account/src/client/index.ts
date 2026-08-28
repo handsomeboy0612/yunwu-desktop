@@ -136,6 +136,16 @@ declare global {
      * the plugin (or the patch) the stock package names show through.
      */
     __openluxProducerLabels?: Readonly<Record<string, string>>
+    /**
+     * Consumed by the `dsh-client-ui-conversation` patch inside the
+     * input-message `buildViewNode`: a context-injection row whose plugin
+     * producer is listed here is not rendered at all in the conversation.
+     * Display-only — the durable log and the model context keep the message;
+     * the trajectory tab still shows it, deliberately, as the debug window.
+     * Today this hides the case-reference reading instruction, whose absolute
+     * file path is plumbing the user should never have to look at.
+     */
+    __openluxProducerHidden?: readonly string[]
   }
 }
 
@@ -538,15 +548,33 @@ export function apply(ctx: ClientContext): void {
      */
     const labels: NonNullable<Window['__openluxProducerLabels']> = {
       '@deepseek-ai/dsh-system-prompt': 'OpenLux',
+      // 做同款的参考注入行(`market/case-reference.ts` 的 CASE_REFERENCE_PRODUCER)。
+      // 会话里整行隐藏(见下方 hidden),此标签只服务于轨迹页等其余入口。
+      'openlux-case-reference': '参考案例',
     }
     window.__openluxProducerLabels = labels
+    /**
+     * 会话里不渲染参考指令行:内容是给模型的绝对路径与阅读规程,对用户是纯管道
+     * 噪音(2026-08-29 拍板)。注入本身照常进上下文,轨迹页保留可见作排查窗口。
+     */
+    const hidden: NonNullable<Window['__openluxProducerHidden']> = ['openlux-case-reference']
+    window.__openluxProducerHidden = hidden
     return () => {
       if (window.__openluxProducerLabels === labels) delete window.__openluxProducerLabels
+      if (window.__openluxProducerHidden === hidden) delete window.__openluxProducerHidden
     }
   }, 'openlux-account: context producer labels')
 
   ctx.inject(['sessions', 'workspaces'], (scope: ClientContext) => {
-    const controller = new SummonController(scope)
+    // 做同款落地后把 (案例, 会话) 交给宿主:落盘参考文件并注入阅读指令。
+    // 普通召唤落地则反向撤文件——复用的空白会话可能残留上一次做同款的指令,
+    // 删文件让它落进自愈条款。两个方向的结果都被有意忽略:失败即静默降级
+    // (无参考召唤 / 残文件等 TTL 清扫),召唤本身永远照常。
+    const controller = new SummonController(scope, (playbookId, sessionId) => {
+      void callHost('market.caseReferenceAttach', { id: playbookId, sessionId })
+    }, (sessionId) => {
+      void callHost('market.caseReferenceDetach', { sessionId })
+    })
     scope.effect(() => {
       // The pick may predate the session that takes it: the workspace connect
       // either creates a blank session or reuses one, and nothing hands back
@@ -770,7 +798,10 @@ export function apply(ctx: ClientContext): void {
     id: CONNECTOR_CAPSULE_ID,
     order: CONNECTOR_CAPSULE_ORDER,
     locale: MARKET_NS,
-    inject: (): ConnectorCapsuleInjected => ({ callHost }),
+    inject: (): ConnectorCapsuleInjected => ({
+      callHost,
+      language: () => (locale.getSnapshot().active === 'en' ? 'en' : 'zh'),
+    }),
   }, ConnectorCapsule))
 
   // The blank-composer home content (`HomeContent.tsx`: scene chips and

@@ -126,13 +126,14 @@ function clampPan(
 export interface PlaybookArtifactPreviewProps {
   readonly artifact: PlaybookArtifact
   readonly title: string
+  readonly language: 'zh' | 'en'
   readonly expanded: boolean
   readonly t: T
 }
 
 /** Render videos/images directly and HTML-like artifacts through the bridge-aware viewer. */
 export function PlaybookArtifactPreview(
-  { artifact, title, expanded, t }: PlaybookArtifactPreviewProps,
+  { artifact, title, language, expanded, t }: PlaybookArtifactPreviewProps,
 ): ReactNode {
   if (artifact.artifactType === 'video') {
     return (
@@ -152,6 +153,7 @@ export function PlaybookArtifactPreview(
     <BridgeArtifactPreview
       artifact={artifact}
       title={title}
+      language={language}
       expanded={expanded}
       t={t}
     />
@@ -159,7 +161,7 @@ export function PlaybookArtifactPreview(
 }
 
 function BridgeArtifactPreview(
-  { artifact, title, expanded, t }: PlaybookArtifactPreviewProps,
+  { artifact, title, language, expanded, t }: PlaybookArtifactPreviewProps,
 ): ReactNode {
   const stageRef = useRef<HTMLDivElement>(null)
   const frameRef = useRef<HTMLIFrameElement>(null)
@@ -190,6 +192,10 @@ function BridgeArtifactPreview(
   const send = useCallback((message: Record<string, unknown>): void => {
     frameRef.current?.contentWindow?.postMessage({ wb: 1, ...message }, '*')
   }, [])
+
+  useEffect(() => {
+    send({ type: 'locale', language })
+  }, [artifact.url, language, send])
 
   const zoomTo = useCallback((next: number): void => {
     if (meta === undefined) return
@@ -359,6 +365,7 @@ function BridgeArtifactPreview(
                     onLoad={event => {
                       const target = event.currentTarget.contentWindow
                       window.setTimeout(() => {
+                        target?.postMessage({ wb: 1, type: 'locale', language }, '*')
                         target?.postMessage({ wb: 1, type: 'thumb' }, '*')
                         target?.postMessage({ wb: 1, type: 'goto', page: pageNumber }, '*')
                       }, 30)
@@ -391,7 +398,10 @@ function BridgeArtifactPreview(
                 left: `${frameLeft}px`,
                 top: `${frameTop}px`,
               }}
-          onLoad={() => send({ type: 'ping' })}
+          onLoad={() => {
+            send({ type: 'locale', language })
+            send({ type: 'ping' })
+          }}
         />
 
         {measure !== undefined && (

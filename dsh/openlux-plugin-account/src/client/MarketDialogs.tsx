@@ -23,8 +23,11 @@ import type {
   CatalogItem, CustomConnectorFile, CustomConnectorSync, CustomOpen, HomePlaybook,
   InstallOutcome, PlaybookArtifact,
 } from '../market/wire.ts'
+import { BRAND_MARK_URI } from './brand-mark.ts'
 import { describe } from './MarketCard.tsx'
+import { marketItemName, marketItemTags } from './market-item-locale.ts'
 import type { MarketKey } from './market-locales.ts'
+import { playbookCopy } from './playbook-locale.ts'
 import { PlaybookArtifactPreview } from './PlaybookArtifactPreview.tsx'
 
 /** Copy reader for this section. */
@@ -277,6 +280,35 @@ const styles = {
   previewPrimaryContent: {
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
   },
+  // The connector sheet, WorkBuddy's connect modal: a centered column — flow
+  // header (us ⇄ them), 「连接 {name}」, description, one action row, then the
+  // 「试试这样用」 asks (`connector-panel.tsx:1542-1686`).
+  connDialog: { display: 'flex', flexDirection: 'column', minHeight: 0, position: 'relative' },
+  connScroll: {
+    minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column',
+    alignItems: 'center', gap: '14px', padding: '40px 32px 28px', textAlign: 'center',
+  },
+  connFlow: { display: 'flex', alignItems: 'center', gap: '16px' },
+  connSeat: {
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    width: '56px', height: '56px', flex: '0 0 56px', overflow: 'hidden',
+    borderRadius: '14px', border: '1px solid var(--dsw-alias-border-l1)',
+    background: 'var(--dsw-alias-bg-layer-1)',
+  },
+  connSeatMark: { width: '38px', height: '38px', objectFit: 'contain' },
+  connDots: { display: 'flex', gap: '5px', color: 'var(--dsw-alias-label-tertiary)' },
+  connDot: { width: '4px', height: '4px', borderRadius: '50%', background: 'currentColor' },
+  connTitle: { margin: 0, fontSize: '18px', fontWeight: 600, color: 'var(--dsw-alias-label-primary)' },
+  connDescription: {
+    margin: 0, fontSize: '13px', lineHeight: 1.6, maxWidth: '400px',
+    color: 'var(--dsw-alias-label-secondary)', whiteSpace: 'pre-wrap',
+  },
+  connActions: { display: 'flex', alignItems: 'center', gap: '10px', marginTop: '2px' },
+  connActionContent: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px' },
+  connPrompts: {
+    display: 'flex', flexDirection: 'column', gap: '8px', width: '100%',
+    marginTop: '12px', textAlign: 'left',
+  },
 } satisfies Record<string, CSSProperties>
 
 /** What the detail dialog needs. */
@@ -325,8 +357,10 @@ export interface MarketDetailProps {
    *
    * Offered instead of the primary action on a row that is already in place: an
    * installed skill's «安装» button would otherwise install it a second time.
+   * @param prompt - one specific 问题条 the user pressed (connector sheet);
+   * absent everywhere else, and the flow draws its own opener.
    */
-  readonly onTry?: () => void
+  readonly onTry?: (prompt?: string) => void
   readonly tryLabel?: string
   /**
    * Undo the install from inside the sheet.
@@ -348,9 +382,137 @@ export interface MarketDetailProps {
 export function MarketDetail(props: MarketDetailProps): ReactNode {
   const { item, kind } = props
   if (item === undefined) return null
-  return kind === 'expert'
-    ? <ExpertMarketDetail {...props} item={item} />
-    : <StandardMarketDetail {...props} item={item} />
+  if (kind === 'expert') return <ExpertMarketDetail {...props} item={item} />
+  if (kind === 'connector') return <ConnectorMarketDetail {...props} item={item} />
+  return <StandardMarketDetail {...props} item={item} />
+}
+
+/**
+ * The connector sheet, in WorkBuddy's connect-modal shape: flow header showing
+ * our mark and the connector's, 「连接 {name}」, the description, one action
+ * row, then 「试试这样用」 — every published ask offered as its own way in
+ * (`connector-panel.tsx:1542-1686`). Pressing an ask on a connected row rides
+ * straight into a session holding that exact question; on a row not yet
+ * connected it starts the connect instead, which is what WorkBuddy's
+ * `handleTryConnector` falls back to when its silent auto-enable fails.
+ */
+function ConnectorMarketDetail(props: MarketDetailProps & { readonly item: CatalogItem }): ReactNode {
+  const {
+    item, language, t, onPrimary, blocked, installed, prompts,
+    onTry, tryLabel, onRemove, removeLabel, onClose,
+  } = props
+  const displayName = marketItemName(item, language)
+  const description = describe(item, language)
+  return (
+    <Modal
+      open
+      headless
+      className="openlux-market-connector-detail-dialog"
+      onClose={onClose}
+      title={displayName}
+      closeLabel={t('detailClose')}
+    >
+      <div style={styles.connDialog} data-testid="openlux-market-connector-detail">
+        <button
+          type="button"
+          style={styles.closeButton}
+          aria-label={t('detailClose')}
+          onClick={onClose}
+          onPointerEnter={event => {
+            event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)'
+          }}
+          onPointerLeave={event => { event.currentTarget.style.background = 'transparent' }}
+        >
+          ×
+        </button>
+        <div style={styles.connScroll}>
+          <div style={styles.connFlow} aria-hidden="true">
+            <span style={styles.connSeat}>
+              <img src={BRAND_MARK_URI} alt="" style={styles.connSeatMark} />
+            </span>
+            <span style={styles.connDots}>
+              <span style={styles.connDot} />
+              <span style={styles.connDot} />
+              <span style={styles.connDot} />
+            </span>
+            <ConnectorSeat item={item} language={language} />
+          </div>
+
+          <h2 style={styles.connTitle}>{t('connectorDetailTitle', { name: displayName })}</h2>
+          {description !== '' && <p style={styles.connDescription}>{description}</p>}
+
+          <div style={styles.connActions}>
+            {/* A connected row's acts: into a session, or undo the connect.
+                Not-yet-connected keeps the one word the card shows: 「连接」. */}
+            {installed && onTry !== undefined && (
+              <Button
+                variant="primary"
+                data-testid="openlux-market-detail-try"
+                onClick={() => onTry()}
+              >
+                <span style={styles.connActionContent}>
+                  <ChatGlyph />
+                  {tryLabel ?? t('tryNow')}
+                </span>
+              </Button>
+            )}
+            {installed && onRemove !== undefined && removeLabel !== undefined && (
+              <Button
+                variant="ghost"
+                data-testid="openlux-market-detail-remove"
+                onClick={onRemove}
+              >
+                {removeLabel}
+              </Button>
+            )}
+            {!installed && onPrimary !== undefined && (
+              <Button
+                variant="primary"
+                data-testid="openlux-market-detail-action"
+                onClick={() => onPrimary()}
+              >
+                {t('connect')}
+              </Button>
+            )}
+            {onPrimary === undefined && blocked !== undefined && (
+              <span style={styles.note}>{blocked}</span>
+            )}
+          </div>
+
+          {prompts.length > 0 && (
+            <section style={styles.connPrompts} aria-label={t('connectorTryHeading')}>
+              <span style={styles.sectionTitle}><OffersGlyph />{t('connectorTryHeading')}</span>
+              <div style={styles.promptList}>
+                {prompts.slice(0, 5).map(prompt => (
+                  <button
+                    key={prompt}
+                    type="button"
+                    style={styles.expertPrompt}
+                    data-testid="openlux-market-connector-prompt"
+                    onClick={() => {
+                      // Connected: carry this ask. Not yet: begin the connect —
+                      // an ask cannot be answered by a row that is not mounted.
+                      if (installed && onTry !== undefined) onTry(prompt)
+                      else onPrimary?.()
+                    }}
+                    onPointerEnter={event => {
+                      event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-active)'
+                    }}
+                    onPointerLeave={event => {
+                      event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)'
+                    }}
+                  >
+                    <span>{`“${prompt}”`}</span>
+                    <span style={styles.promptIcon} aria-hidden="true"><ChatGlyph /></span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+        </div>
+      </div>
+    </Modal>
+  )
 }
 
 function StandardMarketDetail(props: MarketDetailProps & { readonly item: CatalogItem }): ReactNode {
@@ -362,12 +524,14 @@ function StandardMarketDetail(props: MarketDetailProps & { readonly item: Catalo
     ? t('connect')
     : t('install')
   const use = installed && onTry !== undefined
+  const displayName = marketItemName(item, language)
+  const displayTags = marketItemTags(item, language)
 
   return (
     <Modal
       open
       onClose={onClose}
-      title={item.name}
+      title={displayName}
       closeLabel={t('detailClose')}
       footer={(
         <div style={styles.footer}>
@@ -397,7 +561,7 @@ function StandardMarketDetail(props: MarketDetailProps & { readonly item: Catalo
             <Button
               variant="primary"
               data-testid="openlux-market-detail-try"
-              onClick={onTry}
+              onClick={() => onTry()}
             >
               {tryLabel ?? t('tryNow')}
             </Button>
@@ -441,11 +605,11 @@ function StandardMarketDetail(props: MarketDetailProps & { readonly item: Catalo
           )}
           {/* The card no longer carries these, so this is where the author and
               the licence a skill ships under are read. */}
-          {item.tags.length > 0 && (
+          {displayTags.length > 0 && (
             <div style={styles.row}>
               <span style={styles.label}>{t('detailTags')}</span>
               <span style={{ ...styles.value, ...styles.tags }}>
-                {item.tags.map(tag => <Pill key={tag}>{tag}</Pill>)}
+                {displayTags.map(tag => <Pill key={tag}>{tag}</Pill>)}
               </span>
             </div>
           )}
@@ -468,10 +632,13 @@ function ExpertMarketDetail(props: MarketDetailProps & { readonly item: CatalogI
     relatedCases = [], caseOpening, caseError, casePreview,
     onCaseOpen, onCaseBack, onCaseUse, onClose,
   } = props
+  const displayName = marketItemName(item, language)
+  const displayTags = marketItemTags(item, language)
   if (casePreview !== undefined) {
     return (
       <ExpertCasePreview
         item={item}
+        language={language}
         preview={casePreview}
         t={t}
         {...onCaseBack === undefined ? {} : { onBack: onCaseBack }}
@@ -486,15 +653,15 @@ function ExpertMarketDetail(props: MarketDetailProps & { readonly item: CatalogI
       headless
       className="openlux-market-expert-detail-dialog"
       onClose={onClose}
-      title={item.name}
+      title={displayName}
       closeLabel={t('detailClose')}
     >
       <div style={styles.expertDialog} data-testid="openlux-market-expert-detail">
         <header style={styles.expertHeader}>
-          <ExpertAvatar item={item} />
+          <ExpertAvatar item={item} language={language} />
           <div style={styles.expertHeading}>
             <div style={styles.expertTitleLine}>
-              <h2 style={styles.expertTitle}>{item.name}</h2>
+              <h2 style={styles.expertTitle}>{displayName}</h2>
               {item.team && <Pill>{t('teamBadge')}</Pill>}
               {categoryName !== '' && <span style={styles.expertProfession}>{categoryName}</span>}
             </div>
@@ -531,9 +698,9 @@ function ExpertMarketDetail(props: MarketDetailProps & { readonly item: CatalogI
 
         <div style={styles.expertScroll}>
           <p style={styles.expertDescription}>{describe(item, language)}</p>
-          {item.tags.length > 0 && (
+          {displayTags.length > 0 && (
             <div style={styles.tags}>
-              {item.tags.map(tag => <Pill key={tag}>{tag}</Pill>)}
+              {displayTags.map(tag => <Pill key={tag}>{tag}</Pill>)}
             </div>
           )}
 
@@ -575,6 +742,7 @@ function ExpertMarketDetail(props: MarketDetailProps & { readonly item: CatalogI
                   <RelatedCaseCard
                     key={related.id}
                     item={related}
+                    language={language}
                     disabled={caseOpening === related.id}
                     onOpen={() => onCaseOpen(related)}
                   />
@@ -590,8 +758,9 @@ function ExpertMarketDetail(props: MarketDetailProps & { readonly item: CatalogI
 }
 
 function ExpertCasePreview(
-  { item, preview, t, onBack, onUse, onClose }: {
+  { item, language, preview, t, onBack, onUse, onClose }: {
     readonly item: CatalogItem
+    readonly language: 'zh' | 'en'
     readonly preview: { readonly item: HomePlaybook; readonly artifact: PlaybookArtifact }
     readonly t: T
     readonly onBack?: () => void
@@ -600,13 +769,14 @@ function ExpertCasePreview(
   },
 ): ReactNode {
   const [expanded, setExpanded] = useState(false)
+  const copy = playbookCopy(preview.item, language)
   return (
     <Modal
       open
       headless
       className={`openlux-market-preview-dialog${expanded ? ' openlux-market-preview-dialog-expanded' : ''}`}
       onClose={onClose}
-      title={preview.item.title}
+      title={copy.title}
       closeLabel={t('homeClose')}
     >
       <div style={styles.previewDialog} data-testid="openlux-market-case-preview">
@@ -622,14 +792,14 @@ function ExpertCasePreview(
                 ‹
               </button>
             )}
-            <h2 style={styles.previewTitle}>{preview.item.title}</h2>
+            <h2 style={styles.previewTitle}>{copy.title}</h2>
           </div>
-          {(preview.item.subtitle || preview.item.description) !== '' && (
+          {(copy.subtitle || copy.description) !== '' && (
             <p style={styles.previewDescription}>
-              {preview.item.subtitle || preview.item.description}
+              {copy.subtitle || copy.description}
             </p>
           )}
-          <span style={styles.expertChip}>{item.name}</span>
+          <span style={styles.expertChip}>{marketItemName(item, language)}</span>
           <button
             type="button"
             style={styles.closeButton}
@@ -642,7 +812,8 @@ function ExpertCasePreview(
         <div style={styles.previewStage}>
           <PlaybookArtifactPreview
             artifact={preview.artifact}
-            title={preview.item.title}
+            title={copy.title}
+            language={language}
             expanded={expanded}
             t={t}
           />
@@ -658,7 +829,7 @@ function ExpertCasePreview(
               {expanded ? <CollapseGlyph /> : <IconFullscreenOutline16 />}
             </button>
           </Tooltip>
-          {onUse !== undefined && preview.item.initPrompt !== '' && (
+          {onUse !== undefined && copy.initPrompt !== '' && (
             <Button
               variant="primary"
               data-testid="openlux-market-case-use"
@@ -684,12 +855,52 @@ function avatarHue(seed: string): string {
   return `hsl(${value}deg 42% 45%)`
 }
 
-function ExpertAvatar({ item }: { readonly item: CatalogItem }): ReactNode {
+/**
+ * The connector's own seat in the flow header: its brand image in a rounded
+ * square matching the app's, or the same letter block the cards fall back to.
+ */
+function ConnectorSeat(props: {
+  readonly item: CatalogItem
+  readonly language: 'zh' | 'en'
+}): ReactNode {
+  const { item, language } = props
+  const [failed, setFailed] = useState(false)
+  const remote = /^https?:\/\//u.test(item.icon)
+  if (remote && !failed) {
+    return (
+      <span style={styles.connSeat}>
+        <img
+          src={item.icon}
+          alt=""
+          style={styles.connSeatMark}
+          onError={() => setFailed(true)}
+        />
+      </span>
+    )
+  }
+  return (
+    <span
+      style={{
+        ...styles.connSeat, background: avatarHue(item.slug), border: 0,
+        color: '#fff', fontSize: '22px', fontWeight: 600,
+      }}
+      aria-hidden="true"
+    >
+      {[...marketItemName(item, language)][0] ?? '?'}
+    </span>
+  )
+}
+
+function ExpertAvatar(props: {
+  readonly item: CatalogItem
+  readonly language: 'zh' | 'en'
+}): ReactNode {
+  const { item, language } = props
   const [failed, setFailed] = useState(false)
   const remote = /^https?:\/\//u.test(item.icon)
   return (
     <span style={{ ...styles.expertAvatar, background: avatarHue(item.slug) }} aria-hidden="true">
-      {[...item.name][0] ?? '?'}
+      {[...marketItemName(item, language)][0] ?? '?'}
       {remote && !failed && (
         <img
           src={item.icon}
@@ -740,26 +951,28 @@ function CasesGlyph(): ReactNode {
 }
 
 function RelatedCaseCard(
-  { item, disabled, onOpen }: {
+  { item, language, disabled, onOpen }: {
     readonly item: HomePlaybook
+    readonly language: 'zh' | 'en'
     readonly disabled: boolean
     readonly onOpen: () => void
   },
 ): ReactNode {
   const [imageFailed, setImageFailed] = useState(false)
+  const copy = playbookCopy(item, language)
   return (
     <button
       type="button"
       style={styles.caseCard}
       disabled={disabled}
-      title={item.title}
+      title={copy.title}
       data-testid={`openlux-market-related-case-${item.id}`}
       onClick={onOpen}
     >
-      {item.cover !== '' && !imageFailed
+      {copy.cover !== '' && !imageFailed
         ? (
           <img
-            src={item.cover}
+            src={copy.cover}
             alt=""
             loading="lazy"
             style={styles.caseCover}
@@ -768,9 +981,9 @@ function RelatedCaseCard(
         )
         : <span style={styles.caseCoverFallback} aria-hidden="true" />}
       <span style={styles.caseCopy}>
-        <span style={styles.caseTitle}>{item.title}</span>
-        {(item.subtitle || item.description) !== '' && (
-          <span style={styles.caseSubtitle}>{item.subtitle || item.description}</span>
+        <span style={styles.caseTitle}>{copy.title}</span>
+        {(copy.subtitle || copy.description) !== '' && (
+          <span style={styles.caseSubtitle}>{copy.subtitle || copy.description}</span>
         )}
       </span>
     </button>
@@ -842,6 +1055,7 @@ function installedBodyKey(partition: 'expert' | 'skill' | 'connector'): MarketKe
 export interface ConnectorTokenProps {
   /** The connector being connected, absent when the dialog is closed. */
   readonly item: CatalogItem | undefined
+  readonly language: 'zh' | 'en'
   /** What the manifest calls the secret, when it says. */
   readonly label?: string
   readonly value: string
@@ -863,7 +1077,7 @@ export interface ConnectorTokenProps {
  * @returns the dialog, or null when nothing is being connected.
  */
 export function ConnectorToken(props: ConnectorTokenProps): ReactNode {
-  const { item, label, value, busy, t, onChange, onCancel, onConfirm } = props
+  const { item, language, label, value, busy, t, onChange, onCancel, onConfirm } = props
   if (item === undefined) return null
 
   return (
@@ -889,7 +1103,9 @@ export function ConnectorToken(props: ConnectorTokenProps): ReactNode {
       )}
     >
       <div style={styles.body}>
-        <span style={styles.note}>{t('connectorTokenBody', { name: item.name })}</span>
+        <span style={styles.note}>
+          {t('connectorTokenBody', { name: marketItemName(item, language) })}
+        </span>
         <Input
           value={value}
           type="password"
@@ -1177,6 +1393,7 @@ export function CustomConnector(props: CustomConnectorProps): ReactNode {
 export interface MarketOutcomeProps {
   readonly item: CatalogItem | undefined
   readonly outcome: InstallOutcome | undefined
+  readonly language: 'zh' | 'en'
   /**
    * Which partition installed, because "where it went and what to do next" is
    * the whole content of a success and the two answers differ: a preset is
@@ -1194,7 +1411,7 @@ export interface MarketOutcomeProps {
  * @returns the dialog, or null when there is nothing to report.
  */
 export function MarketOutcome(props: MarketOutcomeProps): ReactNode {
-  const { item, outcome, partition = 'expert', t, onClose } = props
+  const { item, outcome, language, partition = 'expert', t, onClose } = props
   if (item === undefined || outcome === undefined) return null
   const refused = outcome.kind === 'refused'
 
@@ -1218,7 +1435,10 @@ export function MarketOutcome(props: MarketOutcomeProps): ReactNode {
         {outcome.kind === 'installed' && (
           <>
             <span style={styles.note}>
-              {t(installedBodyKey(partition), { name: item.name, path: outcome.path })}
+              {t(installedBodyKey(partition), {
+                name: marketItemName(item, language),
+                path: outcome.path,
+              })}
             </span>
             {/* Named only when some skill did not come down: a partial install is
                 still an install, and the persona will keep advertising the skill

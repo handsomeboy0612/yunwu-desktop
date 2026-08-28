@@ -35,10 +35,14 @@ import type { MarketKey } from './market-locales.ts'
 import { pickSkillDirectory } from './skill-pick.ts'
 import { skillCreationDraft } from './skill-create.ts'
 import { connectorRow } from './connector-rows.ts'
-import { publishConnectorsLive } from './connector-live.ts'
+import { publishConnectorsLive, publishTriedConnector } from './connector-live.ts'
 import { takeMarketTab } from './market-open-request.ts'
 import { FeaturedScenes } from './FeaturedScenes.tsx'
 import { useHorizontalDrag, useHorizontalWheel } from './horizontal-scroll.ts'
+import {
+  marketCategoryName, marketItemName, marketItemPrompts, marketItemTags,
+} from './market-item-locale.ts'
+import { playbookCopy } from './playbook-locale.ts'
 import { MarketCard, describe, type CardState } from './MarketCard.tsx'
 import {
   ConnectorToken, CustomConnector, MarketConfirm, MarketDetail, MarketOutcome,
@@ -186,6 +190,16 @@ interface PendingSummon {
   readonly item: CatalogItem
   /** The question the user pressed, else the expert's own opening one. */
   readonly prompt?: string
+  /** The case a 「做同款」 press is reproducing; rides through to the summon. */
+  readonly caseReference?: CaseReference
+}
+
+/**
+ * The market case one summon reproduces (`SummonRequest['caseReference']`'s
+ * shape, spelled locally so this component does not import the controller).
+ */
+interface CaseReference {
+  readonly playbookId: number
 }
 
 const styles = {
@@ -525,8 +539,11 @@ export function MarketSection(
 
   const categories = catalog?.categories ?? []
   const categoryName = useCallback(
-    (id: number) => categories.find(row => row.id === id)?.name ?? '',
-    [categories],
+    (id: number) => {
+      const row = categories.find(categoryRow => categoryRow.id === id)
+      return row === undefined ? '' : marketCategoryName(row, active)
+    },
+    [active, categories],
   )
 
   /**
@@ -569,7 +586,11 @@ export function MarketSection(
       if (onlyMine && !isInstalled(item.slug)) return false
       if (category !== 0 && item.categoryId !== category) return false
       if (needle === '') return true
-      const haystack = [item.name, item.slug, describe(item, active), ...item.tags].join(' ').toLowerCase()
+      const haystack = [
+        marketItemName(item, active), item.name, item.nameEn,
+        item.slug, describe(item, active),
+        ...marketItemTags(item, active), ...item.tags, ...item.tagsEn,
+      ].join(' ').toLowerCase()
       return haystack.includes(needle)
     })
   }, [catalog, query, kind, category, active, tab, onlyMine, isInstalled])
@@ -692,6 +713,13 @@ export function MarketSection(
       return
     }
     setCasePreview({ item, artifact: reply.value })
+    // Prefetch for a 「做同款」 press: the user is about to read this preview,
+    // so the host downloads the same HTML into its staging cache now — the
+    // press then finds it already there instead of waiting on the network.
+    // Fire-and-forget: a failed prefetch just makes the press itself download.
+    if (reply.value.artifactType === 'html') {
+      void callHost('market.caseReferenceStage', { id: item.id })
+    }
   }, [callHost, t])
 
   /**
@@ -702,24 +730,30 @@ export function MarketSection(
    * @param item - the expert.
    * @param prompt - a specific question, else the expert's own opening one.
    * @param carried - opening questions an install just brought back.
+   * @param caseReference - the case a 「做同款」 press is reproducing.
    */
   const enter = useCallback(async (
     item: CatalogItem,
     prompt: string | undefined,
     carried?: readonly string[],
+    caseReference?: CaseReference,
   ): Promise<void> => {
     if (summon === undefined) return
     // Neither the install nor the sidecar had one: ask the console rather than
     // land on a blank composer for the sake of one read.
     const opening = prompt
+      ?? marketItemPrompts(item, active)[0]
       ?? carried?.[0]
       ?? installedById.get(item.slug)?.prompts?.[0]
-      ?? item.openingPrompts?.[0]
       ?? (await readPrompts(item.slug))[0]
     setDetail(undefined)
-    summon({ preset: item.slug, prompt: opening ?? '' })
+    summon({
+      preset: item.slug,
+      prompt: opening ?? '',
+      ...caseReference === undefined ? {} : { caseReference },
+    })
     onDismiss?.()
-  }, [summon, installedById, readPrompts, onDismiss])
+  }, [summon, active, installedById, readPrompts, onDismiss])
 
   /**
    * Leave for a new session with one of this connector's example asks prefilled.
@@ -732,15 +766,21 @@ export function MarketSection(
    * no preset — the same shape the skill 「试一试」 uses. A row with no
    * published examples still travels: landing on a blank composer beside the
    * capsule beats a button that silently does nothing.
+   * @param ask - one specific 问题条 the user pressed on the detail sheet
+   * (WorkBuddy's `handleTryConnector(connector, isConnected, example)`); absent
+   * on the card's 「去对话」, which draws a random one.
    */
-  const tryConnector = useCallback((item: CatalogItem): void => {
+  const tryConnector = useCallback((item: CatalogItem, ask?: string): void => {
     if (summon === undefined) return
-    const examples = item.openingPrompts ?? []
-    const prompt = examples[Math.floor(Math.random() * examples.length)] ?? ''
+    const examples = marketItemPrompts(item, active)
+    const prompt = ask ?? examples[Math.floor(Math.random() * examples.length)] ?? ''
     setDetail(undefined)
+    // The composer capsule shows the carried connector from here on — the
+    // press is what makes the entry appear at all (its doc has the decision).
+    publishTriedConnector(item.slug)
     summon({ prompt })
     onDismiss?.()
-  }, [summon, onDismiss])
+  }, [summon, active, onDismiss])
 
   /**
    * Connect one connector, with the secret when it asked for one.
@@ -1061,8 +1101,13 @@ export function MarketSection(
    * after it costs none.
    * @param item - the row the user pressed.
    * @param prompt - a specific question (a detail-sheet suggestion).
+   * @param caseReference - the case a 「做同款」 press is reproducing.
    */
-  const primary = useCallback(async (item: CatalogItem, prompt?: string): Promise<void> => {
+  const primary = useCallback(async (
+    item: CatalogItem,
+    prompt?: string,
+    caseReference?: CaseReference,
+  ): Promise<void> => {
     // A skill installs on the press, with no consent step. The dialog exists for
     // presets because a `user` preset "carries the same trust as shell access"
     // in the kernel's own words, and ours carry `!!js`; a skill is instructions
@@ -1086,10 +1131,14 @@ export function MarketSection(
       return
     }
     if (installedById.has(item.slug)) {
-      await enter(item, prompt)
+      await enter(item, prompt, undefined, caseReference)
       return
     }
-    setPending(prompt === undefined ? { item } : { item, prompt })
+    setPending({
+      item,
+      ...prompt === undefined ? {} : { prompt },
+      ...caseReference === undefined ? {} : { caseReference },
+    })
   }, [tab, install, beginConnect, installedById, enter])
 
   /**
@@ -1104,7 +1153,7 @@ export function MarketSection(
       setOutcome({ item: request.item, outcome: result })
       return
     }
-    await enter(request.item, request.prompt, result.prompts)
+    await enter(request.item, request.prompt, result.prompts, request.caseReference)
   }, [install, summon, enter])
 
   /**
@@ -1137,11 +1186,10 @@ export function MarketSection(
    */
   const editSkill = useCallback((item: CatalogItem): void => {
     if (summon === undefined || skills === null) return
-    const held = installedSkillBySlug.get(item.slug)
-    const prompt = t('skillEditPrompt', { name: held?.name ?? item.name })
+    const prompt = t('skillEditPrompt', { name: marketItemName(item, active) })
     summon(skillCreationDraft(skills, prompt))
     onDismiss?.()
-  }, [summon, onDismiss, skills, installedSkillBySlug, t])
+  }, [summon, onDismiss, skills, active, t])
 
   /**
    * Import a skill directory from disk («从本地添加技能»).
@@ -1154,8 +1202,9 @@ export function MarketSection(
     const pick = await pickSkillDirectory()
     if (pick.kind === 'cancelled') return
     const placeholder: CatalogItem = {
-      slug: 'local', name: t('skillLocalTitle'), descriptionZh: '', descriptionEn: '',
-      version: '', icon: '', categoryId: 0, tags: [], team: false, featured: false, downloads: 0,
+      slug: 'local', name: t('skillLocalTitle'), nameEn: '', descriptionZh: '', descriptionEn: '',
+      version: '', icon: '', categoryId: 0, tags: [], tagsEn: [],
+      team: false, featured: false, downloads: 0,
     }
     if (pick.kind === 'unsupported') {
       setOutcome({
@@ -1208,9 +1257,9 @@ export function MarketSection(
     const held = installedSkillBySlug.get(item.slug)
     summon(held !== undefined && held.enabled
       ? { prompt: `/${held.name} `, skillToken: held.name }
-      : { prompt: t('skillTryPrompt', { name: item.name }) })
+      : { prompt: t('skillTryPrompt', { name: marketItemName(item, active) }) })
     onDismiss?.()
-  }, [summon, onDismiss, installedSkillBySlug, t])
+  }, [summon, onDismiss, installedSkillBySlug, active, t])
 
   /**
    * «创建技能»: start writing one in a session.
@@ -1268,12 +1317,14 @@ export function MarketSection(
   const detailBlocked = detail === undefined ? undefined : blockedReason(detail)
   // The catalog carries these exactly as WorkBuddy's expert object does, so a
   // first-open detail does not grow its question section after a network read.
+  const detailCatalogPrompts = detail === undefined ? [] : marketItemPrompts(detail, active)
   const detailPrompts = detail === undefined
     ? []
-    : detail.openingPrompts
-      ?? installedById.get(detail.slug)?.prompts
-      ?? prompts[detail.slug]
-      ?? []
+    : detailCatalogPrompts.length > 0
+      ? detailCatalogPrompts
+      : installedById.get(detail.slug)?.prompts
+        ?? prompts[detail.slug]
+        ?? []
   const relatedCases = detail === undefined ? undefined : relatedCasesBySlug[detail.slug]
 
   const openDetail = useCallback((item: CatalogItem): void => {
@@ -1609,6 +1660,7 @@ export function MarketSection(
             <FeaturedScenes
               scenes={featuredScenes ?? []}
               experts={catalog?.items ?? []}
+              language={active}
               loading={featuredScenesReading}
               resolvingExperts={catalog === null}
               title={t('featuredExperts')}
@@ -1641,7 +1693,7 @@ export function MarketSection(
               {categories.map(row => (
                 <span key={row.id} style={styles.categoryItem}>
                   <Pill active={category === row.id} onClick={() => setCategory(row.id)}>
-                    {row.name}
+                    {marketCategoryName(row, active)}
                   </Pill>
                 </span>
               ))}
@@ -1758,11 +1810,30 @@ export function MarketSection(
           : {
             onCaseUse: (playbook: HomePlaybook): void => {
               setCasePreview(undefined)
-              void primary(detail, playbook.initPrompt)
+              void (async (): Promise<void> => {
+                // File before session: the preview open already prefetched, so
+                // this is normally an instant cache hit; a cold cache waits at
+                // most the host's download budget. Either way the staging
+                // answer arrives before the summon creates the session, and a
+                // failure degrades to a summon without reference — today's
+                // behaviour, never an error dialog.
+                await callHost('market.caseReferenceStage', { id: playbook.id })
+                await primary(
+                  detail,
+                  playbookCopy(playbook, active).initPrompt,
+                  { playbookId: playbook.id },
+                )
+              })()
             },
           }}
         {...tab === 'skill' && summon !== undefined && detail !== undefined
           ? { onTry: () => trySkill(detail), tryLabel: t('tryNow') }
+          : {}}
+        {...tab === 'connector' && summon !== undefined && detail !== undefined
+          && connectedBySlug.get(detail.slug)?.live === true
+          // The sheet's 去对话 carries the pressed 问题条 when there is one;
+          // the card's corner button rides the same road with none (random).
+          ? { onTry: (prompt?: string) => { tryConnector(detail, prompt) }, tryLabel: t('connectorChat') }
           : {}}
         {...tab === 'connector' && detail !== undefined && connectedBySlug.has(detail.slug)
           // 「断开」 lives in the sheet, not on the card: the card's own act is
@@ -1793,6 +1864,7 @@ export function MarketSection(
 
       <ConnectorToken
         item={token?.item}
+        language={active}
         {...token?.requirement.label === undefined ? {} : { label: token.requirement.label }}
         value={token?.value ?? ''}
         busy={token !== undefined && installing.has(token.item.slug)}
@@ -1818,6 +1890,7 @@ export function MarketSection(
       <MarketOutcome
         item={outcome?.item}
         outcome={outcome?.outcome}
+        language={active}
         partition={tab}
         t={t}
         onClose={() => setOutcome(undefined)}

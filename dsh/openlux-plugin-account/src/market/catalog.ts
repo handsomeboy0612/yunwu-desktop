@@ -141,7 +141,7 @@ function itemsOf(
   raw: unknown,
   api: string,
   type: CatalogType,
-  tagNames: ReadonlyMap<number, string>,
+  tagNames: ReadonlyMap<number, { readonly zh: string; readonly en: string }>,
   featuredIds: ReadonlySet<number>,
 ): CatalogItem[] {
   if (!Array.isArray(raw)) return []
@@ -151,6 +151,12 @@ function itemsOf(
     const slug = text(row['slug'])
     if (slug === '') continue
     const id = count(row['id'])
+    const tagIds = positiveIds(row['tag_ids'])
+    const openingPrompts = Array.isArray(row['opening_prompts_zh'])
+      ? parallelTexts(row['opening_prompts_zh'])
+      : Array.isArray(row['opening_prompts'])
+        ? texts(row['opening_prompts'])
+        : undefined
     const artifact = artifactOf(row['artifact'], api, formatFor(type))
     const unavailable: Unavailable | undefined = !PRESET_ID.test(slug)
       ? 'bad-id'
@@ -159,17 +165,22 @@ function itemsOf(
     items.push({
       slug,
       name: text(row['name_zh']) === '' ? slug : text(row['name_zh']),
+      nameEn: text(row['name_en']),
       descriptionZh: text(row['description_zh']),
       descriptionEn: text(row['description_en']),
       version: text(row['version']),
       icon: nestedText(row['icon_asset'], 'url'),
       categoryId: positiveIds(row['category_ids'])[0] ?? 0,
-      tags: positiveIds(row['tag_ids']).map(tagId => tagNames.get(tagId) ?? '').filter(Boolean),
+      tags: tagIds.map(tagId => tagNames.get(tagId)?.zh ?? '').filter(Boolean),
+      tagsEn: tagIds.map(tagId => tagNames.get(tagId)?.en ?? ''),
       team: text(row['expert_kind']) === 'team',
       featured: featuredIds.has(id),
       downloads: count(row['download_count']),
-      ...Array.isArray(row['opening_prompts'])
-        ? { openingPrompts: texts(row['opening_prompts']) }
+      ...openingPrompts !== undefined
+        ? { openingPrompts }
+        : {},
+      ...Array.isArray(row['opening_prompts_en'])
+        ? { openingPromptsEn: parallelTexts(row['opening_prompts_en']) }
         : {},
       ...artifact === undefined ? {} : { artifact },
       ...unavailable === undefined ? {} : { unavailable },
@@ -225,7 +236,14 @@ function categoriesOf(raw: unknown): CatalogCategory[] {
     const row = (entry ?? {}) as Record<string, unknown>
     const id = count(row['id'])
     const name = text(row['name_zh'])
-    if (id > 0 && name !== '') categories.push({ id, name })
+    if (id > 0 && name !== '') {
+      categories.push({
+        id,
+        slug: text(row['slug']),
+        name,
+        nameEn: text(row['name_en']),
+      })
+    }
   }
   return categories
 }
@@ -235,14 +253,18 @@ function categoriesOf(raw: unknown): CatalogCategory[] {
  * @param raw - the `tags` field, an array or its JSON text.
  * @returns the tags, empty when unreadable.
  */
-function namesById(raw: unknown): ReadonlyMap<number, string> {
-  const result = new Map<number, string>()
+function namesById(
+  raw: unknown,
+): ReadonlyMap<number, { readonly zh: string; readonly en: string }> {
+  const result = new Map<number, { readonly zh: string; readonly en: string }>()
   if (!Array.isArray(raw)) return result
   for (const entry of raw) {
     const row = (entry ?? {}) as Record<string, unknown>
     const id = count(row['id'])
     const name = text(row['name_zh'])
-    if (id > 0 && name !== '') result.set(id, name)
+    if (id > 0 && name !== '') {
+      result.set(id, { zh: name, en: text(row['name_en']) })
+    }
   }
   return result
 }
@@ -276,6 +298,11 @@ function texts(raw: unknown): string[] {
     if (item !== '' && !result.includes(item)) result.push(item)
   }
   return result
+}
+
+/** Keep empty translation slots so the two locale arrays stay index-aligned. */
+function parallelTexts(raw: unknown): string[] {
+  return Array.isArray(raw) ? raw.map(value => text(value)) : []
 }
 
 /**

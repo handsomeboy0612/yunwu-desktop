@@ -214,15 +214,21 @@ function playbooksOf(raw: unknown): HomePlaybook[] | undefined {
       id,
       slug,
       title: text(row['title_zh']) || slug,
+      titleEn: text(row['title_en']),
       subtitle: text(row['subtitle_zh']),
+      subtitleEn: text(row['subtitle_en']),
       description: text(row['description']),
+      descriptionEn: text(row['description_en']),
       initPrompt: text(row['init_prompt']),
+      initPromptEn: text(row['init_prompt_en']),
       sceneSlug: text(row['scene_slug']),
       cover: nestedText(row['cover_asset'], 'url'),
+      coverEn: nestedText(row['cover_asset_en'], 'url'),
       artifactType: nestedText(row['current_revision'], 'artifact_type'),
       sortOrder: positive(row['sort_order']),
       experts: expertsOf(row['experts']),
       tags: array(row['tags']).map(entry => nestedText(entry, 'name_zh')).filter(Boolean),
+      tagsEn: array(row['tags']).map(entry => nestedText(entry, 'name_en')),
     }]
   })
 }

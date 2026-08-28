@@ -32,6 +32,7 @@ import {
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { CatalogItem } from '../market/wire.ts'
 import { DOT_ATTR, SEAT_ATTR, SPIN_ATTR } from './market-card-style.ts'
+import { marketItemName, marketItemTags } from './market-item-locale.ts'
 import type { MarketKey } from './market-locales.ts'
 
 /** How the card presents this row's install state. */
@@ -343,6 +344,8 @@ export function MarketCard(
   const [imageFailed, setImageFailed] = useState(false)
   const [hovering, setHovering] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const displayName = marketItemName(item, language)
+  const displayTags = marketItemTags(item, language)
   const remote = item.icon.startsWith('http://') || item.icon.startsWith('https://')
   const { imageContainerRef, shouldLoadImage } = useDeferredImageLoad(priorityAvatarLoad)
   // One label for both halves of the flow: with a conversation to land in, an
@@ -563,7 +566,7 @@ export function MarketCard(
           style={{ ...styles.avatar, background: hue(item.slug) }}
           aria-hidden="true"
         >
-          {[...item.name][0] ?? '?'}
+          {[...displayName][0] ?? '?'}
           {remote && !imageFailed && shouldLoadImage && (
             <img
               src={item.icon}
@@ -577,8 +580,8 @@ export function MarketCard(
             />
           )}
         </span>
-        <span style={styles.name} title={item.name}>
-          {item.name}
+        <span style={styles.name} title={displayName}>
+          {displayName}
           {dot !== undefined && (
             <span
               {...{ [DOT_ATTR]: dot }}
@@ -593,9 +596,9 @@ export function MarketCard(
 
       <span style={styles.description}>{describe(item, language)}</span>
 
-      {item.tags.length > 0 && (
+      {displayTags.length > 0 && (
         <span style={styles.tags}>
-          {item.tags.slice(0, 3).map(tag => <span key={tag} style={styles.tag}>{tag}</span>)}
+          {displayTags.slice(0, 3).map(tag => <span key={tag} style={styles.tag}>{tag}</span>)}
         </span>
       )}
 

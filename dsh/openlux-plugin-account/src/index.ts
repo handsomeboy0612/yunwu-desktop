@@ -39,6 +39,7 @@ import { TokenManager } from './account/tokens.ts'
 import { installAutomationRuntime } from './automation.ts'
 import { FILE_STAGE_ENDPOINT, FILE_VISION_ENDPOINT } from './files/name.ts'
 import { stageFile } from './files/stage.ts'
+import { CaseReferenceRuntime } from './market/case-reference.ts'
 import { readCatalog, type Catalog, type CatalogType } from './market/catalog.ts'
 import { readExpertManifest, type ConsoleAccess } from './market/console.ts'
 import {
@@ -156,6 +157,8 @@ export function apply(ctx: Context, config: Config = {}): void {
   )
   const tokens = new TokenManager(ctx, balance, modelCoordinator)
   const automations = installAutomationRuntime(ctx)
+  // 「做同款」的参考案例:预览时预取进内存,召唤落到会话后写盘并注入指令。
+  const caseReferences = new CaseReferenceRuntime(ctx)
 
   // Installs run one at a time. They stage inside the same preset root and
   // verify by re-reading the roster, so two in flight could rename over each
@@ -192,6 +195,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         modelCoordinator,
         serialize,
         serializeAccount,
+        caseReferences,
         endpoint,
         payload,
         signal,
@@ -330,6 +334,7 @@ async function route(
   modelCoordinator: ModelSyncCoordinator,
   serialize: Serializer,
   serializeAccount: Serializer,
+  caseReferences: CaseReferenceRuntime,
   endpoint: string,
   payload: unknown,
   signal?: AbortSignal,
@@ -427,6 +432,29 @@ async function route(
           positiveIdOf(payload),
           signal,
         ),
+      }
+
+    // 做同款的两步:预览打开时把案例 HTML 预取进内存(幂等),召唤落到会话后
+    // 落盘到会话工作目录并注入阅读指令。两步都不弹错——失败即静默降级为
+    // 「无参考召唤」,那就是今天的行为(`market/case-reference.ts` 有全部理由)。
+    case 'market.caseReferenceStage':
+      return {
+        ok: true,
+        value: await caseReferences.stage(desktopConfigAccess(ctx, baseUrl), positiveIdOf(payload), signal),
+      }
+
+    case 'market.caseReferenceAttach':
+      return {
+        ok: true,
+        value: await caseReferences.attach(positiveIdOf(payload), sessionIdOf(payload)),
+      }
+
+    // 普通召唤(无 caseReference)复用了空白会话:删掉该会话的参考文件,
+    // 让可能残留在持久收件箱里的旧阅读指令落进自愈条款,不污染新任务。
+    case 'market.caseReferenceDetach':
+      return {
+        ok: true,
+        value: await caseReferences.detach(sessionIdOf(payload)),
       }
 
     // Where an install would land, and what the roster already holds. The
@@ -791,6 +819,12 @@ function connectorRequestOf(payload: unknown): ConnectorRequest {
 /** Read a skill or connector slug off the wire, empty when the payload has none. */
 function slugOf(payload: unknown): string {
   const value = (payload as { slug?: unknown } | null)?.slug
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+/** 做同款 attach 的目标会话;空串让 attach 以 bad-request 拒绝。 */
+function sessionIdOf(payload: unknown): string {
+  const value = (payload as { sessionId?: unknown } | null)?.sessionId
   return typeof value === 'string' ? value.trim() : ''
 }
 

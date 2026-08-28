@@ -39,19 +39,27 @@ export type Unavailable =
 export interface CatalogItem {
   /** Catalog identity, and the preset directory id an install would take. */
   readonly slug: string
+  /** Stable Chinese/default name used when writing install metadata. */
   readonly name: string
+  /** English display name; empty when the catalog has not published one yet. */
+  readonly nameEn: string
   readonly descriptionZh: string
   readonly descriptionEn: string
   readonly version: string
   readonly icon: string
   readonly categoryId: number
+  /** Chinese/default tag labels, kept for matching and install metadata. */
   readonly tags: readonly string[]
+  /** English tag labels in the same order as tags; entries may be empty. */
+  readonly tagsEn: readonly string[]
   /** Whether this expert is a team; the second-level tab reads it. */
   readonly team: boolean
   readonly featured: boolean
   readonly downloads: number
   /** Opening questions already carried by the expert catalog's first screen. */
   readonly openingPrompts?: readonly string[]
+  /** English opening questions in the same published order. */
+  readonly openingPromptsEn?: readonly string[]
   readonly artifact?: CatalogArtifact
   readonly unavailable?: Unavailable
 }
@@ -59,7 +67,9 @@ export interface CatalogItem {
 /** One category, for the filter row. */
 export interface CatalogCategory {
   readonly id: number
+  readonly slug: string
   readonly name: string
+  readonly nameEn: string
 }
 
 /**
@@ -133,16 +143,22 @@ export interface HomePlaybook {
   readonly id: number
   readonly slug: string
   readonly title: string
+  readonly titleEn: string
   readonly subtitle: string
+  readonly subtitleEn: string
   readonly description: string
+  readonly descriptionEn: string
   readonly initPrompt: string
+  readonly initPromptEn: string
   readonly sceneSlug: string
   readonly cover: string
+  readonly coverEn: string
   readonly artifactType: string
   /** Stable editorial order from the V2 playbook row. */
   readonly sortOrder: number
   readonly experts: readonly HomeExpertRef[]
   readonly tags: readonly string[]
+  readonly tagsEn: readonly string[]
 }
 
 /** Independently ETag-revalidated home modules combined for the renderer. */

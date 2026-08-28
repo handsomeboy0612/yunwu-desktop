@@ -4,10 +4,12 @@ import {
 } from 'react'
 import type { CatalogItem, HomeShowcase } from '../market/wire.ts'
 import { useHorizontalDrag, useHorizontalWheel } from './horizontal-scroll.ts'
+import { marketItemName } from './market-item-locale.ts'
 
 interface FeaturedScenesProps {
   readonly scenes: readonly HomeShowcase[]
   readonly experts: readonly CatalogItem[]
+  readonly language: 'zh' | 'en'
   readonly loading: boolean
   readonly resolvingExperts: boolean
   readonly title: string
@@ -126,12 +128,16 @@ function hue(seed: string): string {
   return `hsl(${value}deg 42% 45%)`
 }
 
-function FeaturedAvatar({ expert }: { readonly expert: CatalogItem }): ReactNode {
+function FeaturedAvatar(props: {
+  readonly expert: CatalogItem
+  readonly language: 'zh' | 'en'
+}): ReactNode {
+  const { expert, language } = props
   const [failed, setFailed] = useState(false)
   const remote = /^https?:\/\//u.test(expert.icon)
   return (
     <span style={{ ...styles.avatar, background: hue(expert.slug) }} aria-hidden="true">
-      {[...expert.name][0] ?? '?'}
+      {[...marketItemName(expert, language)][0] ?? '?'}
       {remote && !failed && (
         <img
           src={expert.icon}
@@ -155,7 +161,8 @@ function FeaturedAvatar({ expert }: { readonly expert: CatalogItem }): ReactNode
  */
 export function FeaturedScenes(props: FeaturedScenesProps): ReactNode {
   const {
-    scenes, experts, loading, resolvingExperts, title, previousLabel, nextLabel, onExpertOpen,
+    scenes, experts, language, loading, resolvingExperts,
+    title, previousLabel, nextLabel, onExpertOpen,
   } = props
   const stripRef = useRef<HTMLDivElement>(null)
   const { dragHandlers, isDragging } = useHorizontalDrag<HTMLDivElement>()
@@ -235,7 +242,7 @@ export function FeaturedScenes(props: FeaturedScenesProps): ReactNode {
                       key={member.expert.slug}
                       type="button"
                       style={styles.member}
-                      title={member.expert.name}
+                      title={marketItemName(member.expert, language)}
                       onPointerEnter={event => {
                         event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)'
                       }}
@@ -244,8 +251,8 @@ export function FeaturedScenes(props: FeaturedScenesProps): ReactNode {
                       }}
                       onClick={() => onExpertOpen(member.expert as CatalogItem)}
                     >
-                      <FeaturedAvatar expert={member.expert} />
-                      <span style={styles.memberName}>{member.expert.name}</span>
+                      <FeaturedAvatar expert={member.expert} language={language} />
+                      <span style={styles.memberName}>{marketItemName(member.expert, language)}</span>
                     </button>
                   ))}
             </span>

@@ -1,5 +1,5 @@
 diff --git a/lib/client.js b/lib/client.js
-index c6be13412e7a47a3a999b4bd6cc11cb4aa4cf20e..0d2db67e782c6cc227374572e7d8a94ea41c5964 100644
+index c6be134..1fb99b5 100644
 --- a/lib/client.js
 +++ b/lib/client.js
 @@ -6186,7 +6186,7 @@ window.__ModuleLoader__.load({
@@ -20,3 +20,14 @@ index c6be13412e7a47a3a999b4bd6cc11cb4aa4cf20e..0d2db67e782c6cc227374572e7d8a94e
  			"hero.chooseWorkspace": "Choose workspace",
  			"session.hierarchy": "Session hierarchy",
  			"details.title": "Details",
+@@ -8639,6 +8639,10 @@ window.__ModuleLoader__.load({
+ 			update: (context) => context.state,
+ 			buildViewNode: (context) => {
+ 				if (context.state === void 0) return null;
++				if (context.state.kind === "context") {
++					const src = context.state.source;
++					if (src !== null && typeof src === "object" && src.kind === "plugin" && globalThis.__openluxProducerHidden?.includes(src.plugin) === true) return null;
++				}
+ 				return chatNode(context, context.state.kind, context.state.seq, context.state);
+ 			}
+ 		};
