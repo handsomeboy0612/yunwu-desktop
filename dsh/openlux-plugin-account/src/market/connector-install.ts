@@ -966,6 +966,123 @@ export async function remountConnector(
   return outcome
 }
 
+/**
+ * Bring every connected connector's config back in line with the console.
+ *
+ * The record snapshots the bridge config at connect time (see
+ * {@link ConnectorRecord.config}: resolved, secret lifted out), so an operator
+ * fixing a connector's `server_json` on the console reaches nobody who already
+ * connected — the old shell had the same staleness and solved it the same way,
+ * a silent reconcile at startup (`src/main/market/auto-update.ts`).
+ *
+ * Per row: read the manifest fresh, build the config the way a fresh connect
+ * would, lift the secret back out, and compare the two records shape-for-shape.
+ * Only a real difference touches anything; then the record is rewritten first
+ * and the entry remounted after, because the console is the source of truth
+ * for the config — a new config that fails to mount shows up as the row's
+ * failure (same surface a restore failure uses), and the next launch retries.
+ *
+ * A row whose manifest is gone (delisted, offline, signed out) is left exactly
+ * as it is: a connected connector works without the console by design, so
+ * breaking it over a read failure would be strictly worse than staleness.
+ * The user's own servers (`custom:` rows) are never records here, so they are
+ * out of scope by construction.
+ *
+ * Secrets survive the swap: the credential ref is named by slug, not stored in
+ * the config, so the new record points at the same stored token. A connector
+ * whose auth mode *changed* (none → token) ends up needing a credential the
+ * seam does not hold — {@link bring} then records the row as down with the
+ * message that says to reconnect, which is the honest state.
+ * @param ctx - host context.
+ * @param access - console origin and token reader.
+ * @returns how many rows were rewritten, and how many of those failed to mount.
+ */
+export async function reconcileConnectors(
+  ctx: Context,
+  access: ConsoleAccess,
+): Promise<{ updated: number; failed: number }> {
+  const records = await readRecords()
+  let updated = 0
+  let failed = 0
+  for (const row of records) {
+    try {
+      let manifest: ConnectorManifest
+      try {
+        manifest = await readConnectorManifest(ctx, access, row.slug)
+      } catch (error: unknown) {
+        ctx.logger.info(`openlux: connector ${row.slug} 对账跳过（清单读不到，保留现状）: ${
+          error instanceof Error ? error.message : String(error)}`)
+        continue
+      }
+      // Built with a stand-in secret so token rows compare too; the stand-in is
+      // lifted straight back out below, the same trick the requirement probe
+      // uses. What is compared never contains a real credential on either side.
+      const built = buildConfig(manifest, RECONCILE_PROBE_TOKEN)
+      if (built.kind === 'refused') {
+        ctx.logger.info(`openlux: connector ${row.slug} 对账跳过（新配置组不出来）: ${built.message}`)
+        continue
+      }
+      const placed = built.secret ?? built.oauth
+      const next: ConnectorRecord = {
+        slug: row.slug,
+        serverName: built.serverName,
+        name: row.name,
+        ...row.version === undefined ? {} : { version: row.version },
+        connectedAt: row.connectedAt,
+        config: placed === undefined ? built.config : without(built.config, placed),
+        ...built.secret === undefined ? {} : { secret: { ...built.secret, ref: row.secret?.ref ?? refNameFor(row.slug) } },
+        ...built.oauth === undefined ? {} : { oauth: built.oauth },
+      }
+      if (sameConnectorShape(row, next)) continue
+
+      const fresh = await readRecords()
+      await writeRecords(fresh.map(entry => entry.slug === row.slug ? next : entry))
+      const state = mounted.get(row.slug)
+      if (state !== undefined) await unmountEntry(ctx, state.entryId)
+      mounted.delete(row.slug)
+      const outcome = await bring(ctx, next)
+      updated += 1
+      if (outcome.kind === 'mounted') {
+        ctx.logger.info(`openlux: connector ${row.slug} 配置已随控制台更新并重挂`)
+      } else {
+        failed += 1
+        ctx.logger.warn(`openlux: connector ${row.slug} 配置已更新，但重挂失败: ${outcome.message}`)
+      }
+    } catch (error: unknown) {
+      // One row must not stop the loop — the old shell interrupted a whole
+      // startup chain that way once, and the lesson is recorded on its file.
+      failed += 1
+      ctx.logger.warn(`openlux: connector ${row.slug} 对账失败: ${
+        error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  if (updated > 0) ctx.logger.info(`openlux: connectors reconciled, ${updated} updated, ${failed} failed`)
+  return { updated, failed }
+}
+
+/** Stand-in secret for the reconcile comparison; never mounted, never stored. */
+const RECONCILE_PROBE_TOKEN = 'openlux-reconcile-probe'
+
+/** Whether two records would mount the same thing the same way. */
+function sameConnectorShape(a: ConnectorRecord, b: ConnectorRecord): boolean {
+  return a.serverName === b.serverName
+    && stableJson(a.config) === stableJson(b.config)
+    && stableJson(a.secret ?? null) === stableJson(b.secret ?? null)
+    && stableJson(a.oauth ?? null) === stableJson(b.oauth ?? null)
+}
+
+/** JSON with object keys sorted at every level, so comparisons ignore order. */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  if (typeof value === 'object' && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
+    return `{${entries.join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'undefined'
+}
+
 /** What building a bridge config from a manifest ended in. */
 type BuildOutcome =
   | {

@@ -74,10 +74,19 @@ const SKILL_PROVENANCE_FILE = 'openlux-market.json'
 const MAX_SCANNED_SKILLS = 512
 
 /** What an installed skill came from, as recorded beside its `SKILL.md`. */
-interface SkillProvenance {
+export interface SkillProvenance {
   readonly itemId: string
   readonly version?: string
   readonly installedAt: string
+  /**
+   * Artifact digest, as verified at install time.
+   *
+   * Optional because installs before 2026-08 never wrote it. The startup
+   * reconcile pass treats a missing digest as "unknown" and refreshes the skill
+   * once, which writes a record that has one — a self-healing migration rather
+   * than a schema bump.
+   */
+  readonly sha256?: string
 }
 
 /**
@@ -156,6 +165,12 @@ export async function readSkillTarget(): Promise<SkillTarget> {
  * @param access - console origin and token reader.
  * @param request - the gallery's request, whose `id` is the catalog slug.
  * @param signal - caller cancellation.
+ * @param options.replace - allow overwriting a skill **this market installed**
+ * (its directory carries our provenance sidecar). The startup reconcile pass
+ * uses this to refresh a stale skill; a hand-made or locally imported one is
+ * still refused. The old directory is only removed after the new bytes have
+ * been downloaded, verified and shape-checked, so the failure window left is
+ * the write itself.
  * @returns the outcome; every refusal here is an ordinary answer.
  */
 export async function installSkill(
@@ -163,6 +178,7 @@ export async function installSkill(
   access: ConsoleAccess,
   request: InstallRequest,
   signal?: AbortSignal,
+  options?: { readonly replace?: boolean },
 ): Promise<InstallOutcome> {
   if (!PRESET_ID.test(request.id)) {
     return refuse('invalid-id', `技能标识 ${JSON.stringify(request.id)} 不符合目录命名规则（小写字母、数字、连字符）。`)
@@ -172,9 +188,15 @@ export async function installSkill(
   }
   const root = skillRoot()
   const destination = join(root, request.id)
-  if (await exists(join(destination, SKILL_FILE))) {
+  const occupied = await exists(join(destination, SKILL_FILE))
+  const replacing = occupied && options?.replace === true
+  if (occupied && !replacing) {
     return refuse('already-installed',
       `已经装过技能 ${request.id} 了。要重装请先删除 ${destination}。`)
+  }
+  if (replacing && await readProvenance(join(destination, SKILL_PROVENANCE_FILE)) === undefined) {
+    return refuse('already-installed',
+      `技能 ${request.id} 不是市场安装的（没有 ${SKILL_PROVENANCE_FILE}），不能自动覆盖。`)
   }
 
   let signed
@@ -214,7 +236,15 @@ export async function installSkill(
     itemId: request.itemId,
     ...request.version === undefined ? {} : { version: request.version },
     installedAt: new Date().toISOString(),
+    // The digest the bytes were just checked against, so the reconcile pass
+    // can compare against the catalog without hashing the directory.
+    sha256: signed.sha256,
   }
+  // Not before this line: everything above only read the network, so a failure
+  // there leaves the old version untouched. From here the bytes are verified
+  // and the directory is rebuilt in place (no rename against a watched root —
+  // see {@link land}).
+  if (replacing) await rm(destination, { recursive: true, force: true })
   const written = await land(entries, destination, provenance)
   if (written !== undefined) return written
 
@@ -442,10 +472,51 @@ async function readProvenance(path: string): Promise<SkillProvenance | undefined
       itemId: row.itemId,
       ...typeof row.version === 'string' ? { version: row.version } : {},
       installedAt: typeof row.installedAt === 'string' ? row.installedAt : '',
+      ...typeof row.sha256 === 'string' && row.sha256.trim() !== ''
+        ? { sha256: row.sha256.trim().toLowerCase() }
+        : {},
     }
   } catch {
     return undefined
   }
+}
+
+/** One market-installed skill, as the reconcile pass sees it. */
+export interface ManagedSkill {
+  /** Directory name, which is also the catalog slug. */
+  readonly slug: string
+  readonly provenance: SkillProvenance
+}
+
+/**
+ * Read the skills this market installed, sidecar and all.
+ *
+ * Only the rows with a provenance sidecar: a hand-made or locally imported
+ * skill has none and is nobody's to update. Same scan rules as
+ * {@link readSkillTarget}, kept separate because that one answers the gallery
+ * (names, enabled flags) and this one answers the reconcile pass (digests).
+ * @returns market-installed skills, sorted by directory name.
+ */
+export async function readManagedSkills(): Promise<readonly ManagedSkill[]> {
+  const root = skillRoot()
+  let names: string[]
+  try {
+    const entries = await readdir(root, { withFileTypes: true })
+    names = entries
+      .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+      .map(entry => entry.name)
+      .sort()
+      .slice(0, MAX_SCANNED_SKILLS)
+  } catch {
+    return []
+  }
+  const managed: ManagedSkill[] = []
+  for (const slug of names) {
+    if (!await exists(join(root, slug, SKILL_FILE))) continue
+    const provenance = await readProvenance(join(root, slug, SKILL_PROVENANCE_FILE))
+    if (provenance !== undefined) managed.push({ slug, provenance })
+  }
+  return managed
 }
 
 /**

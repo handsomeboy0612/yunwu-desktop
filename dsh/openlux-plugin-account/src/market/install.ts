@@ -246,6 +246,11 @@ export async function readProvenance(directory: string): Promise<MarketProvenanc
  * @param presets - the roster service, as read by the caller.
  * @param request - what to install, as the catalog described it.
  * @param signal - caller cancellation.
+ * @param options.replace - allow overwriting a preset **this market installed**
+ * (its directory carries our provenance sidecar). The startup reconcile pass
+ * uses this to swap in a newer artifact; a user-authored or hand-copied preset
+ * is still refused, because no sidecar means the market never put it there and
+ * must never take it away.
  * @returns what happened; refusals are values, not exceptions.
  */
 export async function installPreset(
@@ -254,6 +259,7 @@ export async function installPreset(
   access: ConsoleAccess,
   request: InstallRequest,
   signal?: AbortSignal,
+  options?: { readonly replace?: boolean },
 ): Promise<InstallOutcome> {
   if (!presets.authorable) {
     return refuse('not-authorable', '当前部署没有可写的预设目录，无法安装专家。')
@@ -268,12 +274,17 @@ export async function installPreset(
     return refuse('not-authorable', '内核报告可以安装，但没有解析出可写的预设目录，已中止。')
   }
   const existing = (await presets.list()).find(preset => preset.id === request.id)
-  if (existing !== undefined) {
+  const replacing = existing !== undefined && options?.replace === true
+  if (existing !== undefined && !replacing) {
     return refuse('already-installed', existing.broken === undefined
       ? `已经装过 ${request.id} 了（来源：${existing.trust}）。要重装请先在「设置 → Agent 预设」里删除它。`
       // A broken row still occupies the id, and the kernel's own section is
       // where it gets removed — saying so is more useful than overwriting it.
       : `${request.id} 这个位置上有一份损坏的预设：${existing.broken}`)
+  }
+  if (replacing && await readProvenance(join(root, request.id)) === undefined) {
+    return refuse('already-installed',
+      `${request.id} 不是市场安装的预设（没有 ${PROVENANCE_FILE}），不能自动覆盖。`)
   }
 
   if (request.format !== PRESET_DIR_FORMAT && request.format !== EXPERT_CONTENT_FORMAT) {
@@ -372,6 +383,10 @@ export async function installPreset(
   await mkdir(root, { recursive: true })
   const staging = join(root, `.openlux-staging-${request.id}-${randomUUID().slice(0, 8)}`)
   const destination = join(root, request.id)
+  // Replacement parks the old directory here until the new one has proven
+  // itself. `.`-prefixed for the same reason staging is: discovery cannot see
+  // it, so a half-finished swap never becomes a roster row.
+  const parked = join(root, `.openlux-replaced-${request.id}-${randomUUID().slice(0, 8)}`)
   try {
     await writeEntries(plan.entries, staging)
     if (plan.composition !== undefined) {
@@ -385,7 +400,16 @@ export async function installPreset(
       `${JSON.stringify(provenanceOf(request, prompts), undefined, 2)}\n`,
       'utf8',
     )
-    await rename(staging, destination)
+    // Rename cannot land on an existing directory, so a replacement moves the
+    // old one aside first. Both renames stay inside the writable root, so each
+    // is atomic; a failure between them puts the old version straight back.
+    if (replacing) await rename(destination, parked)
+    try {
+      await rename(staging, destination)
+    } catch (error: unknown) {
+      if (replacing) await rename(parked, destination).catch(() => undefined)
+      throw error
+    }
   } catch (error: unknown) {
     await rm(staging, { recursive: true, force: true })
     throw error
@@ -397,9 +421,13 @@ export async function installPreset(
     // reason is passed through verbatim: it is written for the person who has
     // to fix the artifact, and paraphrasing it loses the file it names.
     await rm(destination, { recursive: true, force: true })
+    // The old version was discovered before, so putting it back beats leaving
+    // the seat empty; failing that, the refusal below still says what broke.
+    if (replacing) await rename(parked, destination).catch(() => undefined)
     return refuse('broken-after-install', installed?.broken
       ?? `内核没有发现装好的预设 ${request.id}，制品的目录结构可能不对。`)
   }
+  if (replacing) await rm(parked, { recursive: true, force: true })
   return {
     kind: 'installed',
     id: request.id,

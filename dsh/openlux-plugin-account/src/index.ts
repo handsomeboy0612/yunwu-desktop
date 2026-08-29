@@ -46,6 +46,7 @@ import {
   readFeaturedScenes, readHomeContent, readPlaybookArtifact, readRelatedPlaybooks,
 } from './market/home-content.ts'
 import { installPreset, readInstallTarget, type InstallOutcome, type InstallRequest, type InstallTarget } from './market/install.ts'
+import { reconcileMarketInstalls } from './market/reconcile.ts'
 import {
   importLocalSkill, installSkill, readSkillTarget, removeSkill, setSkillEnabled,
 } from './market/skill-install.ts'
@@ -249,6 +250,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       // And the user's own file, which is the whole truth for what is in it —
       // nothing else would bring those back either.
       await syncCustomConnectors(ctx)
+      // Then the market reconcile: installed experts/skills/connectors follow
+      // what the console publishes now (the old shell's `autoUpdateMarketAssets`
+      // for this shell; `market/reconcile.ts` carries the rules). After the
+      // restores on purpose — it compares against mounted state — and inside
+      // the same install queue, so a user-triggered install cannot interleave.
+      // It never throws; offline and signed-out are skips inside it.
+      await reconcileMarketInstalls(ctx, desktopConfigAccess(ctx, baseUrl))
     })
     // Nothing to abort: `create` is not cancellable, and a half-mounted entry
     // would be worse than one extra mount. Disposal leaves the entries up —
