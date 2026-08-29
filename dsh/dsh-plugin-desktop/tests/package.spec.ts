@@ -232,6 +232,9 @@ describe('published package surface', () => {
     // register `conversation.input.dock` until it is. The host half stays
     // wired — the market's featured strip reads the same content platform.
     expect(client).not.toContain("ctx.slots.inject('conversation.input.dock'")
+    // Stronger than the source check: the parked seat's modules are not even
+    // reachable from the client entry, so the bundle carries no trace of them.
+    expect(clientRuntime).not.toContain('conversation.input.dock')
     expect(hostRuntime).toContain('market.home')
   })
 
